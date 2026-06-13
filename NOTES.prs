@@ -40,3 +40,21 @@ sudo systemctl start mcp-google.service
 sudo systemctl status mcp-google.service
 
 journalctl -u mcp-google.service -f
+
+
+
+-------------------------------------
+
+npx -y @microsoft/playwright-mcp install
+npx -y @microsoft/playwright-mcp --transport sse --port 8931
+
+npx @playwright/mcp@latest --port 8931
+npx @playwright/mcp@latest --config '/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/config_playwright.json'
+
+sudo systemctl stop mcp-playwright.service
+sudo rm ./mcp-playwright.log
+sudo cp ./mcp-playwright.service /etc/systemd/system/mcp-playwright.service
+sudo systemctl daemon-reload
+sudo systemctl enable mcp-playwright.service
+sudo systemctl start mcp-playwright.service
+sudo systemctl status mcp-playwright.service

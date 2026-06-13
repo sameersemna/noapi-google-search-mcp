@@ -1,0 +1,48 @@
+{
+  "server": {
+    "port": 11402,
+    "host": "0.0.0.0",
+    "allowedHosts": [
+      "*"
+    ]
+  },
+  "browser": {
+    "browserName": "chromium",
+    "isolated": true,
+    "launchOptions": {
+      "headless": true,
+      "args": [
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-dev-shm-usage"
+      ]
+    },
+    "contextOptions": {
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+  },
+  "sharedBrowserContext": true,
+  "capabilities": [
+    "core",
+    "vision",
+    "pdf"
+  ],
+  "imageResponses": "allow",
+  "snapshot": {
+    "mode": "full"
+  },
+  "timeouts": {
+    "action": 10000,
+    "navigation": 45000,
+    "expect": 5000
+  },
+  "console": {
+    "level": "info"
+  },
+  "allowUnrestrictedFileAccess": false,
+  "codegen": "none"
+}
