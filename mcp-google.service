@@ -1,0 +1,21 @@
+[Unit]
+Description=MCP Google HTTP Proxy Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=sameer
+WorkingDirectory=/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/sameer/.n/n/versions/node/26.3.0/bin:/home/sameer/anaconda3/envs/mcp-google/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+StandardOutput=append:/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/service.log
+StandardError=inherit
+
+ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -i -m google_search_mcp
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

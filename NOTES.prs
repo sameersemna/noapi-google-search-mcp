@@ -1,0 +1,42 @@
+conda create -y -n mcp-google python=3.11
+
+# Install packaging tools
+pip install pyinstaller
+
+# Install the project locally so dependencies resolve
+pip install -e .
+
+# 2. Build the binary using Python's module layout execution
+pyinstaller --onefile \
+  --name "noapi-google-search-mcp" \
+  --collect-all playwright \
+  --collect-all cv2 \
+  --copy-metadata noapi-google-search-mcp \
+  src/google_search_mcp/server.py
+
+
+pyinstaller --onefile \
+  --name "noapi-google-search-mcp" \
+  --collect-all playwright \
+  --collect-all cv2 \
+  --copy-metadata noapi-google-search-mcp \
+  --copy-metadata mcp \
+  --copy-metadata standard-mcp \
+  src/google_search_mcp/server.py
+
+# 1. Download the internal standalone Chromium dependencies
+./dist/noapi-google-search-mcp --install-browsers
+
+# 2. Launch the HTTP pipeline over port 11403
+npx -y mcp-proxy --port 11403 --transport streamable-http -- ./dist/noapi-google-search-mcp
+
+
+sudo systemctl stop mcp-google.service
+sudo rm ./service.log
+sudo cp ./mcp-google.service /etc/systemd/system/mcp-google.service
+sudo systemctl daemon-reload
+sudo systemctl enable mcp-google.service
+sudo systemctl start mcp-google.service
+sudo systemctl status mcp-google.service
+
+journalctl -u mcp-google.service -f
