@@ -1,0 +1,21 @@
+[Unit]
+Description=MCP DuckDuckGo HTTP Proxy Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=sameer
+WorkingDirectory=/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/sameer/.n/n/versions/node/26.3.0/bin:/home/sameer/anaconda3/envs/mcp-google/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+StandardOutput=append:/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/mcp-duckduckgo.log
+StandardError=inherit
+
+ExecStart=uvx duckduckgo-mcp-server --transport streamable-http --host 0.0.0.0 --port 11404
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

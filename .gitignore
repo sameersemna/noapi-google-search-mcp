@@ -19,3 +19,4 @@ env/
 htmlcov/
 .coverage
 *.log
+.playwright-mcp/*.yml

@@ -55,21 +55,19 @@ from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from playwright.async_api import async_playwright
-from fake_useragent import UserAgent
+from seleniumbase import Driver
 
-ua = UserAgent()
-# Generates a random Chrome-specific user-agent
-# random_chrome = ua.chrome
-# print(random_chrome)
+# 1. Spin up a hardened, stealth-optimized browser via SeleniumBase
+driver = Driver(browser="chrome", uc=True, headless=True, no_sandbox=True, 
+                no_dev_shm_usage=True, no_infobars=True, window_size="1280,800", enable_webgl=True, use_gl="desktop")
+endpoint_url = driver.get_cdp_endpoint_url()
 
 mcp = FastMCP("google-search")
 
-USER_AGENT = ua.chrome
-# USER_AGENT = (
-#     # "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-#     # "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-#     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-# )
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 # JavaScript to inject before every page load to hide automation signals
 STEALTH_JS = """
@@ -135,18 +133,19 @@ TIME_RANGE_MAP = {
 
 async def _launch_browser(pw, viewport=None):
     """Launch a headless Chromium browser with stealth settings to avoid bot detection."""
-    browser = await pw.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-infobars",
-            "--window-size=1280,800",
-            "--enable-webgl",
-            "--use-gl=desktop",
-        ],
-    )
+    browser = await pw.chromium.connect_over_cdp(endpoint_url)
+    # browser = await pw.chromium.launch(
+    #     headless=True,
+    #     args=[
+    #         "--disable-blink-features=AutomationControlled",
+    #         "--no-sandbox",
+    #         "--disable-dev-shm-usage",
+    #         "--disable-infobars",
+    #         "--window-size=1280,800",
+    #         "--enable-webgl",
+    #         "--use-gl=desktop",
+    #     ],
+    # )
     vp = viewport or {"width": 1280, "height": 800}
     context = await browser.new_context(
         user_agent=USER_AGENT,
