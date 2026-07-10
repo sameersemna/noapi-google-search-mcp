@@ -57,6 +57,11 @@ from mcp.server.fastmcp import Context, FastMCP, Image
 from playwright.async_api import async_playwright
 from fake_useragent import UserAgent
 
+try:
+    from lingua import LanguageDetectorBuilder
+except Exception:
+    LanguageDetectorBuilder = None
+
 ua = UserAgent()
 # Generates a random Chrome-specific user-agent
 # random_chrome = ua.chrome
@@ -712,14 +717,27 @@ async def _do_google_search(
                         if (out.startsWith('/url?')) {
                             try {
                                 const u = new URL(out, location.origin);
-                                out = u.searchParams.get('q') || out;
+                                out =
+                                    u.searchParams.get('q') ||
+                                    u.searchParams.get('url') ||
+                                    u.searchParams.get('u') ||
+                                    u.searchParams.get('uddg') ||
+                                    out;
                             } catch (_) {}
                         } else if (out.includes('/url?')) {
                             try {
                                 const u = new URL(out, location.origin);
-                                out = u.searchParams.get('q') || out;
+                                out =
+                                    u.searchParams.get('q') ||
+                                    u.searchParams.get('url') ||
+                                    u.searchParams.get('u') ||
+                                    u.searchParams.get('uddg') ||
+                                    out;
                             } catch (_) {}
                         }
+                        try {
+                            out = decodeURIComponent(out);
+                        } catch (_) {}
                         if (!out.startsWith('http')) return '';
                         if (out.includes('google.com/search') || out.includes('/preferences?')) return '';
                         return out;
@@ -787,6 +805,9 @@ async def _do_google_search(
             )
 
             if not results:
+                provider, fallback = _fallback_web_search(query, num_results)
+                if fallback:
+                    return _format_fallback_results(query, provider, fallback)
                 return f"No results found for: {query}"
 
             header = f"Google Search Results for: {query}"
@@ -2520,18 +2541,188 @@ LANGUAGE_CODES = {
     "english": "en", "spanish": "es", "french": "fr", "german": "de",
     "italian": "it", "portuguese": "pt", "japanese": "ja", "korean": "ko",
     "chinese": "zh-CN", "arabic": "ar", "russian": "ru", "hindi": "hi",
+    "marathi": "mr",
     "dutch": "nl", "swedish": "sv", "turkish": "tr", "polish": "pl",
     "thai": "th", "vietnamese": "vi", "indonesian": "id", "greek": "el",
     "hebrew": "he", "czech": "cs", "danish": "da", "finnish": "fi",
     "norwegian": "no", "romanian": "ro", "hungarian": "hu", "ukrainian": "uk",
 }
 
+LANG_DETECTION_CONFIDENCE_THRESHOLD = 0.80
+_LINGUA_DETECTOR = None
+
+
+def _get_lingua_detector():
+    """Build and cache detector lazily to avoid startup overhead."""
+    global _LINGUA_DETECTOR
+    if LanguageDetectorBuilder is None:
+        return None
+    if _LINGUA_DETECTOR is None:
+        _LINGUA_DETECTOR = LanguageDetectorBuilder.from_all_languages().build()
+    return _LINGUA_DETECTOR
+
+
+def _detect_source_language(text: str) -> tuple[str, float] | None:
+    """Detect source language code and confidence, if available."""
+    sample = (text or "").strip()
+    if len(sample) < 3:
+        return None
+
+    detector = _get_lingua_detector()
+    if detector is None:
+        return None
+
+    try:
+        values = detector.compute_language_confidence_values(sample)
+        if not values:
+            return None
+        top = values[0]
+        lang = getattr(top, "language", None)
+        confidence = float(getattr(top, "value", 0.0) or 0.0)
+        if lang is None:
+            return None
+
+        iso = None
+        try:
+            iso = lang.iso_code_639_1.name.lower()
+        except Exception:
+            try:
+                iso = str(lang.iso_code_639_1).lower()
+            except Exception:
+                iso = None
+        if not iso:
+            return None
+        if iso == "zh":
+            iso = "zh-CN"
+        return iso, confidence
+    except Exception:
+        return None
+
+
+def _split_translation_chunks(text: str, max_chars: int = 1500) -> list[str]:
+    """Split long text for fallback APIs with query-size limits."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    parts = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_chars:
+            parts.append(remaining.strip())
+            break
+
+        cut = max(
+            remaining.rfind("\n", 0, max_chars),
+            remaining.rfind(". ", 0, max_chars),
+            remaining.rfind("! ", 0, max_chars),
+            remaining.rfind("? ", 0, max_chars),
+            remaining.rfind("; ", 0, max_chars),
+            remaining.rfind(", ", 0, max_chars),
+            remaining.rfind(" ", 0, max_chars),
+        )
+        if cut < max_chars // 3:
+            cut = max_chars
+
+        parts.append(remaining[:cut].strip())
+        remaining = remaining[cut:].lstrip()
+
+    return [p for p in parts if p]
+
+
+def _translate_via_google_http(text: str, sl: str, tl: str) -> str:
+    """Fallback translator using Google HTTP endpoint (no browser scraping)."""
+    chunks = _split_translation_chunks(text)
+    if not chunks:
+        return ""
+
+    out = []
+    for chunk in chunks:
+        try:
+            endpoint = (
+                "https://translate.googleapis.com/translate_a/single"
+                f"?client=gtx&sl={quote_plus(sl)}&tl={quote_plus(tl)}&dt=t&q={quote_plus(chunk)}"
+            )
+            req = urllib.request.Request(endpoint, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(body)
+            segs = data[0] if isinstance(data, list) and data else []
+            translated = "".join((s[0] for s in segs if isinstance(s, list) and s and s[0]),)
+            translated = translated.strip()
+            if not translated:
+                return ""
+            out.append(translated)
+        except Exception:
+            return ""
+
+    return "\n".join(out).strip()
+
+
+def _translate_via_mymemory(text: str, sl: str, tl: str) -> str:
+    """Secondary fallback translator via MyMemory public endpoint."""
+    chunks = _split_translation_chunks(text, max_chars=500)
+    if not chunks:
+        return ""
+
+    # MyMemory does not accept "auto" as a source language.
+    # Use English as a practical fallback source for this tertiary provider.
+    mm_sl = (sl or "").strip() or "en"
+    if mm_sl.lower() == "auto":
+        mm_sl = "en"
+
+    out = []
+    for chunk in chunks:
+        try:
+            endpoint = (
+                "https://api.mymemory.translated.net/get"
+                f"?q={quote_plus(chunk)}&langpair={quote_plus(mm_sl)}|{quote_plus(tl)}"
+            )
+            req = urllib.request.Request(endpoint, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(body)
+
+            status = data.get("responseStatus")
+            details = (data.get("responseDetails") or "").strip()
+            if status is not None and str(status) != "200":
+                return ""
+
+            translated = (data.get("responseData") or {}).get("translatedText", "").strip()
+            if not translated:
+                return ""
+            upper_text = translated.upper()
+            upper_details = details.upper()
+            if "INVALID SOURCE LANGUAGE" in upper_text or "INVALID SOURCE LANGUAGE" in upper_details:
+                return ""
+            out.append(translated)
+        except Exception:
+            return ""
+
+    return "\n".join(out).strip()
+
 
 async def _do_google_translate(text: str, to_language: str, from_language: str = "") -> str:
     """Translate text using Google Translate directly."""
     # Resolve language names to codes
     tl = LANGUAGE_CODES.get(to_language.lower(), to_language.lower())
-    sl = LANGUAGE_CODES.get(from_language.lower(), from_language.lower()) if from_language else "auto"
+    detection_note = ""
+    if from_language:
+        sl = LANGUAGE_CODES.get(from_language.lower(), from_language.lower())
+    else:
+        detected = _detect_source_language(text)
+        if detected and detected[1] >= LANG_DETECTION_CONFIDENCE_THRESHOLD:
+            sl = detected[0]
+            detection_note = f"Detected source language: {sl} (confidence {detected[1]:.2f})"
+        else:
+            sl = "auto"
+            if detected:
+                detection_note = (
+                    "Detected source language confidence is low "
+                    f"({detected[1]:.2f}); using auto-detect instead."
+                )
 
     encoded_text = quote_plus(text)
     url = f"https://translate.google.com/?sl={sl}&tl={tl}&text={encoded_text}&op=translate"
@@ -2548,46 +2739,86 @@ async def _do_google_translate(text: str, to_language: str, from_language: str =
 
             data = await page.evaluate(
                 r"""
-                () => {
+                (payload) => {
+                    const sourceText = payload?.sourceText || '';
+                    const targetLang = payload?.targetLang || '';
                     const data = {};
 
-                    // Translation output is in spans with lang attribute inside the result container
-                    const resultContainer = document.querySelector('[data-result-index] .HwtZe, .lRu31, [jsname="W297wb"]');
-                    if (resultContainer) {
-                        data.translation = resultContainer.innerText.trim();
-                    }
+                    const normalizedSource = (sourceText || '').trim();
+                    const targetPrefix = (targetLang || '').toLowerCase().split('-')[0];
+                    const candidates = [];
 
-                    // Fallback: look for the output textarea or contenteditable
-                    if (!data.translation) {
-                        const outputArea = document.querySelector(
-                            '.J0lOec, [aria-label*="Translation"], ' +
-                            'span[jsname="W297wb"], .ryNqvb, ' +
-                            '[data-language-to-translate-into] .Y2IQFc'
-                        );
-                        if (outputArea) {
-                            data.translation = outputArea.innerText.trim();
+                    const addCandidate = (t) => {
+                        const val = (t || '').trim();
+                        if (!val) return;
+                        if (normalizedSource && val === normalizedSource) return;
+                        candidates.push(val);
+                    };
+
+                    const selectors = [
+                        '[data-result-index] [lang]',
+                        '[data-language-to-translate-into] [lang]',
+                        'span[jsname="W297wb"]',
+                        '[aria-live="polite"] span',
+                        '.J0lOec',
+                        '.lRu31',
+                        '.HwtZe',
+                        '.Y2IQFc',
+                        '.ryNqvb'
+                    ];
+
+                    for (const sel of selectors) {
+                        const nodes = document.querySelectorAll(sel);
+                        for (const node of nodes) {
+                            const lang = (node.getAttribute('lang') || '').toLowerCase();
+                            if (lang && targetPrefix && !lang.startsWith(targetPrefix)) continue;
+                            addCandidate(node.innerText || node.textContent || '');
                         }
                     }
 
-                    // Last resort: get all text containers and find the non-source one
-                    if (!data.translation) {
-                        const containers = document.querySelectorAll('.Y2IQFc');
-                        if (containers.length >= 2) {
-                            data.translation = containers[containers.length - 1].innerText.trim();
-                        }
+                    if (candidates.length > 0) {
+                        // Pick the longest non-source candidate (usually full translation)
+                        candidates.sort((a, b) => b.length - a.length);
+                        data.translation = candidates[0];
                     }
 
                     return data;
                 }
-                """
+                """,
+                {"sourceText": text, "targetLang": tl},
             )
 
-            if not data.get("translation") or data["translation"] == text:
+            translation = (data.get("translation") or "").strip()
+
+            # API fallbacks when UI scraping fails or is blocked.
+            if not translation or translation == text:
+                translation = _translate_via_google_http(text, sl, tl)
+                if translation and translation != text:
+                    lines = ["Google Translate (fallback API)\n"]
+                    if detection_note:
+                        lines.append(detection_note)
+                    lines.append(f"Original: {text}")
+                    lines.append(f"Translation ({to_language}): {translation}")
+                    return "\n".join(lines)
+
+            if not translation or translation == text:
+                translation = _translate_via_mymemory(text, sl, tl)
+                if translation and translation != text:
+                    lines = ["Google Translate (fallback API 2)\n"]
+                    if detection_note:
+                        lines.append(detection_note)
+                    lines.append(f"Original: {text}")
+                    lines.append(f"Translation ({to_language}): {translation}")
+                    return "\n".join(lines)
+
+            if not translation or translation == text:
                 return f"Could not translate: {text}"
 
             lines = ["Google Translate\n"]
+            if detection_note:
+                lines.append(detection_note)
             lines.append(f"Original: {text}")
-            lines.append(f"Translation ({to_language}): {data['translation']}")
+            lines.append(f"Translation ({to_language}): {translation}")
 
             return "\n".join(lines)
 
