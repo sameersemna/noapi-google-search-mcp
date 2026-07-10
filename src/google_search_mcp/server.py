@@ -51,7 +51,7 @@ from datetime import datetime, timezone
 from email import policy as email_policy
 from email.parser import BytesParser as EmailParser
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote, urlparse, parse_qs
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from playwright.async_api import async_playwright
@@ -520,6 +520,109 @@ async def _wait_for_google_results_ready(page, timeout_ms: int = 15000):
     )
 
 
+def _fallback_duckduckgo_search(query: str, num_results: int = 5) -> list[dict]:
+    """Fallback web search used when Google blocks automated requests."""
+    try:
+        ddg_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+        req = urllib.request.Request(ddg_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    matches = re.findall(
+        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    results = []
+    seen = set()
+    for href, title_html in matches:
+        if len(results) >= num_results:
+            break
+
+        parsed_href = href
+        if "duckduckgo.com/l/?" in href:
+            try:
+                q = parse_qs(urlparse(href).query)
+                parsed_href = unquote((q.get("uddg", [""])[0] or "").strip())
+            except Exception:
+                parsed_href = href
+
+        if not parsed_href.startswith("http"):
+            continue
+
+        title = re.sub(r"<[^>]+>", "", title_html)
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title:
+            continue
+
+        key = (title.lower(), parsed_href)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        results.append({"title": title, "url": parsed_href, "snippet": ""})
+
+    return results
+
+
+def _fallback_bing_rss_search(query: str, num_results: int = 5) -> list[dict]:
+    """Second fallback when both Google and DuckDuckGo are blocked."""
+    try:
+        rss_url = f"https://www.bing.com/search?format=rss&q={quote_plus(query)}"
+        req = urllib.request.Request(rss_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            xml_bytes = resp.read()
+        root = ET.fromstring(xml_bytes)
+    except Exception:
+        return []
+
+    results = []
+    seen = set()
+    for item in root.findall("./channel/item"):
+        if len(results) >= num_results:
+            break
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        desc = (item.findtext("description") or "").strip()
+        if not title or not link.startswith("http"):
+            continue
+        key = (title.lower(), link)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({"title": title, "url": link, "snippet": desc})
+
+    return results
+
+
+def _fallback_web_search(query: str, num_results: int = 5) -> tuple[str, list[dict]]:
+    ddg = _fallback_duckduckgo_search(query, num_results)
+    if ddg:
+        return "DuckDuckGo", ddg
+    bing = _fallback_bing_rss_search(query, num_results)
+    if bing:
+        return "Bing RSS", bing
+    return "", []
+
+
+def _format_fallback_results(query: str, provider: str, results: list[dict]) -> str:
+    lines = [
+        "Google blocked by bot detection for this request.",
+        f"Showing fallback web results ({provider}):\n",
+        f"Web Results for: {query}\n",
+    ]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r.get('title', '')}")
+        lines.append(f"   URL: {r.get('url', '')}")
+        if r.get("snippet"):
+            lines.append(f"   {r['snippet']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # google_search
 # ---------------------------------------------------------------------------
@@ -540,7 +643,7 @@ async def _do_google_search(
 
     encoded_query = quote_plus(search_query)
     start = (page - 1) * num_results
-    url = f"https://www.google.com/search?q={encoded_query}&num={num_results + 5}"
+    url = f"https://www.google.com/search?q={encoded_query}&num={num_results + 2}"
 
     # Language and region
     if language:
@@ -568,12 +671,32 @@ async def _do_google_search(
             if await _is_blocked(browser_page):
                 solved = await _try_solve_captcha(browser_page)
                 if not solved:
-                    await _save_cookies(context)
-                    return (
-                        "Search blocked by Google bot detection. "
-                        "Your IP may be temporarily rate-limited. "
-                        "Try again in a few minutes or from a different network."
-                    )
+                    # One warm-up retry: open Google home first, then re-run query.
+                    # This helps when the first direct SERP request gets a transient block.
+                    try:
+                        await browser_page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(browser_page)
+                        await _human_delay(browser_page)
+                        await browser_page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(browser_page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(browser_page):
+                        provider, fallback = _fallback_web_search(query, num_results)
+                        if fallback:
+                            await _save_cookies(context)
+                            return _format_fallback_results(query, provider, fallback)
+                        await _save_cookies(context)
+                        return (
+                            "Search blocked by Google bot detection. "
+                            "Your IP may be temporarily rate-limited. "
+                            "Try again in a few minutes or from a different network."
+                        )
 
             await _wait_for_google_results_ready(browser_page, timeout_ms=15000)
 
@@ -692,6 +815,10 @@ async def _do_google_search(
         except Exception as e:
             # Check if the exception was due to bot detection
             if await _is_blocked(browser_page):
+                provider, fallback = _fallback_web_search(query, num_results)
+                if fallback:
+                    await _save_cookies(context)
+                    return _format_fallback_results(query, provider, fallback)
                 await _save_cookies(context)
                 return (
                     "Search blocked by Google bot detection. "
