@@ -491,6 +491,34 @@ async def _dismiss_consent(page):
     await _human_delay(page)
 
 
+async def _wait_for_google_results_ready(page, timeout_ms: int = 15000):
+    """Wait until Google SERP has results or a terminal no-result/block state."""
+    await page.wait_for_function(
+        """
+        () => {
+            const bodyText = (document.body?.innerText || '').toLowerCase();
+
+            if (bodyText.includes('our systems have detected unusual traffic') ||
+                bodyText.includes('unusual traffic from your computer network') ||
+                bodyText.includes('did not match any documents') ||
+                bodyText.includes('no results found for')) {
+                return true;
+            }
+
+            const hasResultCards = document.querySelectorAll(
+                'div#search div.g, #rso div.g, #rso div.MjjYud, a h3'
+            ).length > 0;
+
+            const hasSearchContainer = !!document.querySelector('div#search, #rso');
+            const hasEnoughLinks = document.querySelectorAll('a[href]').length > 20;
+
+            return hasResultCards || (hasSearchContainer && hasEnoughLinks);
+        }
+        """,
+        timeout=timeout_ms,
+    )
+
+
 # ---------------------------------------------------------------------------
 # google_search
 # ---------------------------------------------------------------------------
@@ -546,46 +574,88 @@ async def _do_google_search(
                         "Try again in a few minutes or from a different network."
                     )
 
-            await browser_page.wait_for_selector("div#search", timeout=15000)
+            await _wait_for_google_results_ready(browser_page, timeout_ms=15000)
 
             results = await browser_page.evaluate(
                 """
                 (numResults) => {
                     const results = [];
-                    const containers = document.querySelectorAll('div#search div.g');
+                    const seen = new Set();
+
+                    const normalizeHref = (href) => {
+                        if (!href) return '';
+                        let out = href;
+                        if (out.startsWith('/url?')) {
+                            try {
+                                const u = new URL(out, location.origin);
+                                out = u.searchParams.get('q') || out;
+                            } catch (_) {}
+                        } else if (out.includes('/url?')) {
+                            try {
+                                const u = new URL(out, location.origin);
+                                out = u.searchParams.get('q') || out;
+                            } catch (_) {}
+                        }
+                        if (!out.startsWith('http')) return '';
+                        if (out.includes('google.com/search') || out.includes('/preferences?')) return '';
+                        return out;
+                    };
+
+                    const canonicalKey = (url, title) => {
+                        try {
+                            const u = new URL(url);
+                            const path = (u.pathname || '/').replace(/\\/+$/, '') || '/';
+                            const host = u.hostname.replace(/^www\\./, '');
+                            const t = (title || '').trim().toLowerCase();
+                            return `${host}${path}|${t}`;
+                        } catch (_) {
+                            return `${url}|${(title || '').trim().toLowerCase()}`;
+                        }
+                    };
+
+                    const addResult = (title, href, snippet) => {
+                        if (results.length >= numResults) return;
+                        const cleanTitle = (title || '').trim();
+                        const cleanUrl = normalizeHref(href || '');
+                        if (!cleanTitle || !cleanUrl) return;
+                        const key = canonicalKey(cleanUrl, cleanTitle);
+                        if (seen.has(key)) return;
+                        seen.add(key);
+                        results.push({
+                            title: cleanTitle,
+                            url: cleanUrl,
+                            snippet: (snippet || '').trim(),
+                        });
+                    };
+
+                    const containers = document.querySelectorAll(
+                        'div#search div.g, #rso div.g, #rso div.MjjYud, div.g, div.MjjYud, div[data-hveid]'
+                    );
                     for (const el of containers) {
                         if (results.length >= numResults) break;
-                        const linkEl = el.querySelector('a[href^="http"]');
                         const titleEl = el.querySelector('h3');
+                        if (!titleEl) continue;
+                        const linkEl = titleEl.closest('a[href]') || el.querySelector('a:has(h3), a[href]');
                         const snippetEl = el.querySelector(
-                            'div[data-sncf], div.VwiC3b, span.aCOpRe, div[style*="-webkit-line-clamp"]'
+                            'div[data-sncf], div.VwiC3b, span.aCOpRe, div[style*="-webkit-line-clamp"], div[data-content-feature]'
                         );
-                        if (linkEl && titleEl) {
-                            results.push({
-                                title: titleEl.innerText.trim(),
-                                url: linkEl.href,
-                                snippet: snippetEl ? snippetEl.innerText.trim() : ''
-                            });
-                        }
+                        addResult(titleEl.innerText, linkEl?.href || '', snippetEl?.innerText || '');
                     }
-                    if (results.length === 0) {
-                        const allLinks = document.querySelectorAll('div#search a[href^="http"]');
-                        for (const a of allLinks) {
+
+                    if (results.length < numResults) {
+                        const headings = document.querySelectorAll('#search h3, #rso h3, h3');
+                        for (const h3 of headings) {
                             if (results.length >= numResults) break;
-                            const h3 = a.querySelector('h3');
-                            if (h3) {
-                                const parent = a.closest('div.g') || a.parentElement?.parentElement;
-                                const snippetEl = parent?.querySelector(
-                                    'div[data-sncf], div.VwiC3b, span.aCOpRe, div[style*="-webkit-line-clamp"]'
-                                );
-                                results.push({
-                                    title: h3.innerText.trim(),
-                                    url: a.href,
-                                    snippet: snippetEl ? snippetEl.innerText.trim() : ''
-                                });
-                            }
+                            const a = h3.closest('a[href]');
+                            if (!a) continue;
+                            const parent = a.closest('div.g, div.MjjYud, div[data-hveid]') || a.parentElement?.parentElement;
+                            const snippetEl = parent?.querySelector(
+                                'div[data-sncf], div.VwiC3b, span.aCOpRe, div[style*="-webkit-line-clamp"], div[data-content-feature]'
+                            );
+                            addResult(h3.innerText, a.href || '', snippetEl?.innerText || '');
                         }
                     }
+
                     return results;
                 }
                 """,
@@ -701,13 +771,15 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
                     await _save_cookies(context)
                     return []
 
-            await page.wait_for_selector("div#search", timeout=15000)
+            await _wait_for_google_results_ready(page, timeout_ms=15000)
 
             results = await page.evaluate(
                 """
                 (numResults) => {
                     const results = [];
-                    const containers = document.querySelectorAll('div#search div.SoaBEf, div#search div.g');
+                    const containers = document.querySelectorAll(
+                        'div#search div.SoaBEf, div#search div.g, #rso div.SoaBEf, #rso div.g, div.SoaBEf, div.g'
+                    );
                     for (const el of containers) {
                         if (results.length >= numResults) break;
                         const linkEl = el.querySelector('a[href^="http"]');
@@ -737,7 +809,7 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
                         }
                     }
                     if (results.length === 0) {
-                        const allLinks = document.querySelectorAll('div#search a[href^="http"]');
+                        const allLinks = document.querySelectorAll('#search a[href^="http"], #rso a[href^="http"], a[href^="http"]');
                         for (const a of allLinks) {
                             if (results.length >= numResults) break;
                             const heading = a.querySelector('div[role="heading"], h3');
