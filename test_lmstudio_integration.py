@@ -20,10 +20,13 @@ import urllib.error
 from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
-LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
-MODEL = "openai/gpt-oss-120b"
+# LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
+LMSTUDIO_URL = "http://latitude:11435/v1/chat/completions"
+# MODEL = "openai/gpt-oss-120b"
+MODEL = "llama/qwen-1.5b"
 TIMEOUT = 120
-LOG_FILE = "/home/xentureon/google-search-mcp/test_lmstudio_results.md"
+# LOG_FILE = "/home/xentureon/google-search-mcp/test_lmstudio_results.md"
+LOG_FILE = "/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/test_lmstudio_results.md"
 
 # ── Tool definitions ─────────────────────────────────────────────────────────
 TOOL_DEFS = {

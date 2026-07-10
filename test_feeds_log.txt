@@ -2,8 +2,8 @@
 ======================================================================
   Feed Subscription System — Detailed Test Log
 ======================================================================
-Date: 2026-02-16 23:42:17
-Python: 3.12.3
+Date: 2026-07-10 15:03:45
+Python: 3.11.15
 Platform: linux
 
 ======================================================================
@@ -82,78 +82,78 @@ Platform: linux
     Feature: Fetch and parse live RSS feed from a major news outlet
     Source: BBC News (http://feeds.bbci.co.uk/news/rss.xml)
     Method: _check_source_rss() -> _fetch_url_bytes() -> _parse_rss_atom()
-    Items fetched: 38
-    Sample item title: Government abandons plans to delay 30 council elections
-    Sample item URL: https://www.bbc.com/news/articles/c70ne31d884o?at_medium=RSS&at_campaign=rss
-    Sample item published: Mon, 16 Feb 2026 18:07:59 GMT
-    Sample content preview: All English elections will now go ahead as originally planned after Reform UK brought a legal challenge over the decision to delay some polls.
+    Items fetched: 39
+    Sample item title: Bayeux Tapestry arrives in UK for first time in 900 years under police guard
+    Sample item URL: https://www.bbc.co.uk/news/articles/cly9r54e5r4o?at_medium=RSS&at_campaign=rss
+    Sample item published: Fri, 10 Jul 2026 05:00:04 GMT
+    Sample content preview: The famous artefact depicting events leading up to the Norman Conquest of England will go on display in September.
     At least 5 items: PASS
     All items have titles: PASS
     All items have URLs: PASS
     URLs are HTTP(S): PASS
-  -> PASS  (0.36s)
+  -> PASS  (0.31s)
 
 --- Reddit — r/technology via RSS ---
     Feature: Fetch subreddit posts via Reddit's native RSS endpoint
     Source: r/technology (https://www.reddit.com/r/technology/.rss)
     Method: _check_source_reddit('technology') -> Atom feed parsing
     Items fetched: 25
-    Sample post title: Hi! We're 404 Media's Jason Koebler and Joseph Cox. AMA (us) about the tech ICE is using, Flock and the state of surveillance in the US on Feb. 4, 12 pm ET
-    Sample post URL: https://www.reddit.com/r/technology/comments/1qv9y8j/hi_were_404_medias_jason_koebler_and_joseph_cox/
-    Sample post author: /u/404mediaco
+    Sample post title: 'PS5 Has Put a Dampener on Gaming': 45% of Playstation Enthusiasts 'Seriously Considering' Leaving Sony for PC
+    Sample post URL: https://www.reddit.com/r/technology/comments/1usjbex/ps5_has_put_a_dampener_on_gaming_45_of/
+    Sample post author: /u/JeremyJJ77
     At least 5 items: PASS
     All items have titles: PASS
     All items have URLs: PASS
-  -> PASS  (0.82s)
+  -> PASS  (0.81s)
 
 --- Hacker News — Top Stories via Firebase API ---
     Feature: Fetch top stories from HN public API with metadata
     Source: https://hacker-news.firebaseio.com/v0/topstories.json
     Method: _check_source_hackernews('top', limit=5) -> parallel story fetches
     Items fetched: 5
-    Sample title: 14-year-old Miles Wu folded origami pattern that holds 10k times its own weight
-    Sample URL: https://www.smithsonianmag.com/innovation/this-14-year-old-is-using-origami-to-design-emergency-shelters-that-are-sturdy-cost-efficient-and-easy-to-deploy-180988179/
-    Sample author: bookofjoe
-    Sample score: 261
-    Sample comments: 46
-    Sample published: 2026-02-16T18:41:50+00:00
+    Sample title: Good Tools Are Invisible
+    Sample URL: https://www.gingerbill.org/article/2026/07/10/good-tools-are-invisible/
+    Sample author: theanonymousone
+    Sample score: 39
+    Sample comments: 11
+    Sample published: 2026-07-10T10:32:41+00:00
     Got 5 stories: PASS
     All have titles: PASS
     All have URLs: PASS
     All have authors: PASS
     Metadata has score: PASS
     Metadata has comments: PASS
-  -> PASS  (0.81s)
+  -> PASS  (0.80s)
 
 --- GitHub — Releases via Atom Feed ---
     Feature: Fetch release notes from a public GitHub repository
     Source: anthropics/anthropic-sdk-python (releases.atom)
     Method: _check_source_github('anthropics/anthropic-sdk-python')
     Items fetched: 10
-    Latest release: v0.79.0
-    Release URL: https://github.com/anthropics/anthropic-sdk-python/releases/tag/v0.79.0
-    Content preview: 0.79.0 (2026-02-07) Full Changelog: v0.78.0...v0.79.0 Features api: enabling fast-mode in claude-opus-4-6 ( 5953ba7 ) Bug Fixes pass speed parameter t
+    Latest release: v0.116.0
+    Release URL: https://github.com/anthropics/anthropic-sdk-python/releases/tag/v0.116.0
+    Content preview: 0.116.0 (2026-07-02) Full Changelog: v0.115.1...v0.116.0 Features api: add agent-memory-2026-07-22 beta header ( e181d5c )
     At least 1 release: PASS
     All have titles: PASS
     All have URLs: PASS
     URLs point to GitHub: PASS
-  -> PASS  (0.74s)
+  -> PASS  (0.61s)
 
 --- arXiv — cs.AI Papers via API ---
     Feature: Fetch recent papers from arXiv by category
     Source: http://export.arxiv.org/api/query?search_query=cat:cs.AI
     Method: _check_source_arxiv('cs.AI', max_results=5)
     Items fetched: 5
-    Sample paper title: Semantic Chunking and the Entropy of Natural Language
-    Sample paper URL: https://arxiv.org/abs/2602.13194v1
-    Sample author: Weishun Zhong
-    Abstract preview: The entropy rate of printed English is famously estimated to be about one bit per character, a benchmark that modern large language models (LLMs) have only recently approached. This entropy rate impli
+    Sample paper title: OpenCoF: Learning to Reason Through Video Generation
+    Sample paper URL: https://arxiv.org/abs/2607.08763v1
+    Sample author: Xinyan Chen
+    Abstract preview: Reasoning has become a core capability for large models, especially when reliable decisions require understanding logical consequences. Recent video generation models offer a reasoning path distinct f
     Got papers: PASS
     All have titles: PASS
     All have URLs: PASS
     URLs point to arXiv: PASS
     Content has abstracts: PASS
-  -> PASS  (0.41s)
+  -> PASS  (0.27s)
 
 --- YouTube — Channel Feed (3Blue1Brown) ---
     Feature: Fetch recent videos from a YouTube channel RSS feed
@@ -161,32 +161,32 @@ Platform: linux
     Feed URL: https://www.youtube.com/feeds/videos.xml?channel_id=UCYO_jab_esuFRV4b17AJtAw
     Method: _check_source_youtube(feed_url)
     Items fetched: 15
-    Latest video title: Solution to the ladybug clock puzzle
-    Video URL: https://www.youtube.com/shorts/7gG91SZwBoE
+    Latest video title: 100 random chords, how many intersections?
+    Video URL: https://www.youtube.com/shorts/wGffBCfrAsE
     Channel/author: 3Blue1Brown
-    Published: 2026-02-16T14:08:37+00:00
+    Published: 2026-06-16T18:04:05+00:00
     Got videos: PASS
     All have titles: PASS
     All have URLs: PASS
     URLs are YouTube: PASS
     Metadata has video_url: PASS
-  -> PASS  (0.28s)
+  -> PASS  (0.14s)
 
 --- Podcast — Lex Fridman RSS Feed ---
     Feature: Fetch podcast episodes with audio URLs and metadata
     Source: Lex Fridman Podcast (https://lexfridman.com/feed/podcast/)
     Method: _check_source_podcast(feed_url)
-    Items fetched: 492
-    Latest episode: #491 – OpenClaw: The Viral AI Agent that Broke the Internet – Peter Steinberger
-    Episode URL: https://lexfridman.com/peter-steinberger/?utm_source=rss&utm_medium=rss&utm_campaign=peter-steinberger
-    Author: Lex Fridman
-    Published: Thu, 12 Feb 2026 03:10:39 +0000
-    Audio URL: https://media.blubrry.com/takeituneasy/ins.blubrry.com/takeituneasy/lex_ai_peter_steinberger.mp3
+    Items fetched: 499
+    Latest episode: #498 – Anthony Kaldellis: Roman Empire, Byzantine Empire, Rise & Fall of Empires
+    Episode URL: https://lexfridman.com/anthony-kaldellis/?utm_source=rss&utm_medium=rss&utm_campaign=anthony-kaldellis
+    Author: 
+    Published: Tue, 30 Jun 2026 21:33:40 +0000
+    Audio URL: https://media.blubrry.com/takeituneasy/ins.blubrry.com/takeituneasy/lex_ai_anthony_kaldellis.mp3
     Duration: N/A
     Got episodes: PASS
     All have titles: PASS
     Have audio URLs in metadata: PASS
-  -> PASS  (2.15s)
+  -> PASS  (1.34s)
 
 ======================================================================
   END-TO-END MCP TOOL TEST
@@ -225,10 +225,10 @@ Platform: linux
     Step 3: check_feeds()
     Output: Feed Check Complete
             
-              BBC News: 36 new items
+              BBC News: 38 new items
               Hacker News (top): 29 new items
             
-            Total: 65 new items across 2 sources
+            Total: 67 new items across 2 sources
     CHECK: PASS — feeds checked successfully
     CHECK: PASS — new items found and stored
 
@@ -241,27 +241,26 @@ Platform: linux
                        URL: https://www.bbc.co.uk/news/10628994?at_medium=RSS&at_campaign=rss
                        Top stories, breaking news, live reporting, and follow news topics that match your interests
                     
-                    2. [news/BBC News] Acto
+                    2. [news/BBC News] Why 
     CHECK: PASS — news items returned
     Input: get_feed_items(source_type="hackernews", limit=3)
     Output preview: Recent Feed Items (3 items)
                     
-                    1. [hackernews/Hacker News (top)] 10 years building vertical software: are we cooked?
-                       Published: 2026-02-16T21:48:00+00:00
-                       URL: https://twitter.com/nicbstme/status/2023501562480644501
+                    1. [hackernews/Hacker News (top)] Late Bronze Age Collapse
+                       Published: 2026-07-10T11:59:55+00:00
+                       URL: https://acoup.blog/2026/01/30/collections-the-late-bronze-age-collapse-a-very-brief-introduction/
                     
-                    2. [hackernews/Hacker News (top)] Study: Self-generated Agent Skills are useless
+                    2. [hackernews/Hacker News (top)] EU Commission: addictive design
 
     Step 5: search_feeds()
     Input: search_feeds("the") — common word, should match
     Output preview: Feed Search: "the" (20 results)
                     
-                    1. [news/BBC News] Will the US Supreme Court stand up to Trump?
-                       Published: Fri, 13 Feb 2026 15:15:00 GMT
-                       URL: https://www.bbc.co.uk/sounds/play/w3ct8bz4?at_medium=RSS&at_campaign=rss
-                       Or will the court expand the US president’s power?
+                    1. [hackernews/Hacker News (top)] The glass backbone: Why the Army's logistics will break in the next war
+                       Published: 2026-07-09T13:24:43+00:00
+                       URL: https://mwi.westpoint.edu/the-glass-backbone-why-the-armys-logistics-will-break-in-the-next-war/
                     
-                    2. [news/BBC News] How 
+                    2. [news/BBC Ne
     CHECK: PASS — search returned results
     Input: search_feeds("xyznonexistent12345") — should find nothing
     Output: No results found for: "xyznonexistent12345"
@@ -275,12 +274,12 @@ Platform: linux
                                      
                                      
                                        HACKERNEWS
-                                         Hacker News (top) — 29 items, last checked: 2026-02-16T22:42
+                                         Hacker News (top) — 29 items, last checked: 2026-07-10T13:03
     CHECK: PASS — BBC removed from subscriptions
     Input: unsubscribe("news", "nonexistent_feed")
     Output: No subscription found for 'nonexistent_feed'.
     CHECK: PASS — non-existent handled correctly
-  -> PASS  (1.43s)
+  -> PASS  (2.37s)
 
 ======================================================================
   SUMMARY
