@@ -1,0 +1,94 @@
+# noapi-google-search-mcp — Agent Context File
+
+## Repository Structure (Post-Refactoring)
+
+```
+src/google_search_mcp/
+    __init__.py          # Package init, version, main() entry point
+    __main__.py          # `python -m google_search_mcp` entry
+    server.py            # MCP server bootstrap + ALL 39 tool definitions (~8,200 lines)
+    config.py            # Centralized constants: paths, presets, maps, stealth JS
+    browser.py           # Browser lifecycle: launch, cookies, stealth, consent
+    captcha.py           # CAPTCHA detection + neural net solver (MobileNetV2)
+    utils/
+        __init__.py
+        text.py          # strip_html, format_timestamp, split_translation_chunks, collapse_newlines
+        network.py       # fetch_url_bytes, fallback_* search providers
+        image.py         # is_base64_image, save_base64_image, is_local_file
+        language.py      # detect_source_language, resolve_language_code
+    server_selenium.py   # [DEPRECATED] Legacy SeleniumBase variant — not imported
+```
+
+## Architectural Paradigms (MUST PRESERVE)
+
+### 1. Module Responsibilities
+- **`config.py`** — Single source of truth for ALL paths, constants, presets, maps. Never define literals in tool code.
+- **`browser.py`** — All Playwright browser lifecycle. Tools call `launch_browser()`, `load_cookies()`, `save_cookies()`, `dismiss_consent()`, `human_delay()`.
+- **`captcha.py`** — All CAPTCHA detection and solving. Tools call `is_blocked()` and `try_solve_captcha()`.
+- **`utils/`** — Pure functions with no side effects. No Playwright or MCP dependencies.
+- **`server.py`** — Tool definitions only. Imports from modules above. No duplicated constants or helpers.
+
+### 2. Error Handling
+- All `except` blocks use `except Exception as e:` with meaningful error messages.
+- No bare `except:` or `except Exception: pass` without justification.
+- Browser context cleanup in `finally` blocks always.
+- Tools return `str` for text results, `list` for mixed text+Image content.
+
+### 3. Naming Conventions
+- **Public tool functions**: lowercase_with_underscores (e.g., `google_search`, `transcribe_video`)
+- **Internal helpers**: `_leading_underscore` (e.g., `_get_feeds_db`, `_download_audio`)
+- **Module-level constants**: `UPPER_CASE` (defined in `config.py`)
+- **Imports from config**: Explicit named imports, never `from .config import *`
+
+### 4. Docstring Standard
+- **Tool docstrings**: Brief description + `Args:` section only. NO "Sample prompts" in code.
+- **Internal function docstrings**: One-line description only.
+- **Section comments**: `# --- Section Name ---` format only.
+
+### 5. Agent Interoperability Rules
+- Zero global state mutations — all state passed explicitly.
+- All paths/configs from `config.py` — single source of truth.
+- No circular imports between modules.
+- Each tool file is focused on one domain.
+- `server_selenium.py` is DEPRECATED — do not modify. Use `server.py` only.
+
+## Structural Changes Executed (2026-07-20)
+
+1. **Extracted `config.py`** — All constants, paths, presets, maps, STEALTH_JS from server.py
+2. **Extracted `browser.py`** — Browser launch, cookies, stealth, consent dismissal
+3. **Extracted `captcha.py`** — CAPTCHA detection + MobileNetV2 neural net solver
+4. **Created `utils/` package** — text, network, image, language utilities
+5. **Refactored `server.py`** — Imports from modules, removed duplicated code
+6. **Deprecated `server_selenium.py`** — Marked as [DEPRECATED], not imported
+7. **Updated `__init__.py`** — Version bumped to 0.3.1, clean docstring
+8. **Fixed test imports** — `test_all.py` and `test_feeds.py` updated for new module structure
+9. **All 120 tests pass** — 100% pass rate
+
+## Optimized System Prompt for Future Agents
+
+```
+You are working on the noapi-google-search-mcp codebase. Follow these rules:
+
+ARCHITECTURE:
+- config.py holds ALL constants (paths, presets, maps, STEALTH_JS)
+- browser.py handles Playwright lifecycle (launch_browser, load_cookies, save_cookies, dismiss_consent, human_delay)
+- captcha.py handles CAPTCHA detection/solving (is_blocked, try_solve_captcha)
+- utils/ has pure functions (text.py, network.py, image.py, language.py)
+- server.py has tool definitions only — import from modules above
+- server_selenium.py is DEPRECATED — do not modify
+
+CONVENTIONS:
+- Tool functions: lowercase_with_underscores
+- Internal helpers: _leading_underscore
+- Constants: UPPER_CASE in config.py
+- Docstrings: Brief + Args only — NO "Sample prompts" in code
+- Error handling: except Exception as e: with meaningful messages
+- Browser cleanup: always in finally blocks
+
+AGENT RULES:
+- Never define literals in tool code — add to config.py instead
+- Never use bare except: or except Exception: pass
+- Never create circular imports
+- Never modify server_selenium.py
+- Always run test_all.py after changes to verify 120/120 tests pass
+```

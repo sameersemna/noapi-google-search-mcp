@@ -1,38 +1,15 @@
 """
-Google Search MCP Server
+[DEPRECATED] Google Search MCP Server — SeleniumBase variant.
 
-A Model Context Protocol (MCP) server that performs real Google searches
-using headless Chromium (via Playwright) and returns structured results.
+This file is a legacy duplicate of server.py that uses SeleniumBase
+instead of Playwright's launch_persistent_context. It is NOT imported
+by the package and is kept only for reference.
 
-Tools provided:
-    - google_search: Search with time filtering, site filtering, pagination, language/region
-    - google_news: Search Google News for recent headlines
-    - google_scholar: Search Google Scholar for academic papers
-    - google_images: Search Google Images for image URLs
-    - google_trends: Check Google Trends for topic interest over time
-    - google_maps: Search Google Maps for places, restaurants, businesses
-    - google_maps_directions: Get directions between locations with route map screenshot
-    - google_finance: Look up stock prices and market data
-    - google_weather: Get current weather and forecasts
-    - google_shopping: Search Google Shopping for products and prices
-    - google_books: Search Google Books for books and publications
-    - google_translate: Translate text between languages
-    - google_flights: Search for flights between destinations
-    - google_hotels: Search for hotels and accommodation
-    - google_lens: Reverse image search to identify objects, products, brands
-    - google_lens_detect: Detect objects in image and identify each via Lens
-    - ocr_image: Extract text from images locally using RapidOCR (no internet needed)
-    - transcribe_video: Download and transcribe YouTube videos with timestamps
-    - search_transcript: Search a transcribed video for topics by keyword
-    - extract_video_clip: Extract a video clip by topic
-    - list_images: List image files in a directory for use with google_lens
-    - visit_page: Fetch a URL and return its text content
-    - subscribe: Subscribe to content sources (news RSS, Reddit, HN, GitHub, arXiv, YouTube, podcasts, Twitter/X)
-    - unsubscribe: Remove a subscription and its stored content
-    - list_subscriptions: List all active feed subscriptions
-    - check_feeds: Fetch new content from all or specific subscriptions
-    - search_feeds: Full-text search across all stored feed content
-    - get_feed_items: Get recent items from feed subscriptions
+Use server.py (Playwright-based) instead. The Playwright variant has
+all 38 tools, cookie persistence, CAPTCHA solving, and feed subscriptions.
+This file lacks the feed system and is not maintained in sync.
+
+To remove: delete this file and any references in your config.
 """
 
 import asyncio

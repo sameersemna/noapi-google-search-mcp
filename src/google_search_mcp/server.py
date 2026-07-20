@@ -1,38 +1,8 @@
-"""
-Google Search MCP Server
+"""Google Search MCP Server — 38 tools for local LLMs.
 
-A Model Context Protocol (MCP) server that performs real Google searches
-using headless Chromium (via Playwright) and returns structured results.
-
-Tools provided:
-    - google_search: Search with time filtering, site filtering, pagination, language/region
-    - google_news: Search Google News for recent headlines
-    - google_scholar: Search Google Scholar for academic papers
-    - google_images: Search Google Images for image URLs
-    - google_trends: Check Google Trends for topic interest over time
-    - google_maps: Search Google Maps for places, restaurants, businesses
-    - google_maps_directions: Get directions between locations with route map screenshot
-    - google_finance: Look up stock prices and market data
-    - google_weather: Get current weather and forecasts
-    - google_shopping: Search Google Shopping for products and prices
-    - google_books: Search Google Books for books and publications
-    - google_translate: Translate text between languages
-    - google_flights: Search for flights between destinations
-    - google_hotels: Search for hotels and accommodation
-    - google_lens: Reverse image search to identify objects, products, brands
-    - google_lens_detect: Detect objects in image and identify each via Lens
-    - ocr_image: Extract text from images locally using RapidOCR (no internet needed)
-    - transcribe_video: Download and transcribe YouTube videos with timestamps
-    - search_transcript: Search a transcribed video for topics by keyword
-    - extract_video_clip: Extract a video clip by topic
-    - list_images: List image files in a directory for use with google_lens
-    - visit_page: Fetch a URL and return its text content
-    - subscribe: Subscribe to content sources (news RSS, Reddit, HN, GitHub, arXiv, YouTube, podcasts, Twitter/X)
-    - unsubscribe: Remove a subscription and its stored content
-    - list_subscriptions: List all active feed subscriptions
-    - check_feeds: Fetch new content from all or specific subscriptions
-    - search_feeds: Full-text search across all stored feed content
-    - get_feed_items: Get recent items from feed subscriptions
+Provides real Google search, live feeds, vision, OCR, video transcription,
+email, document reading, and web utilities — all running locally through
+headless Chromium and open-source ML models. No API keys required.
 """
 
 import asyncio
@@ -55,252 +25,85 @@ from urllib.parse import quote_plus, unquote, urlparse, parse_qs
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from playwright.async_api import async_playwright
-from fake_useragent import UserAgent
 
-try:
-    from lingua import LanguageDetectorBuilder
-except Exception:
-    LanguageDetectorBuilder = None
+from .config import (
+    CAPTCHA_CLASS_MAP,
+    CLIPS_DIR,
+    COOKIE_DIR,
+    COOKIE_JSON_PATH,
+    FEEDS_DB_PATH,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    IMAGE_EXTENSIONS,
+    DEFAULT_IMAGE_DIR,
+    LANGUAGE_CODES,
+    LANG_DETECTION_CONFIDENCE_THRESHOLD,
+    MAX_PAGE_CHARS,
+    MAX_OBJECTS,
+    MOBILENET_ONNX_PATH,
+    PRESET_NEWS_FEEDS,
+    ARXIV_CATEGORIES,
+    TIME_RANGE_MAP,
+    TRANSCRIBE_CACHE_DIR,
+    TRANSCRIPT_CACHE_DIR,
+    VIDEO_CACHE_DIR,
+    USER_AGENT,
+    IMAP_SERVERS,
+)
+from .browser import (
+    _parse_netscape_cookie_file,
+    dismiss_consent,
+    human_delay,
+    launch_browser,
+    load_cookies,
+    save_cookies,
+    wait_for_google_results_ready,
+    warmup_retry,
+)
+from .captcha import is_blocked, try_solve_captcha
+from .utils.text import (
+    strip_html,
+    format_timestamp,
+    split_translation_chunks,
+    collapse_newlines,
+)
+from .utils.network import (
+    fetch_url_bytes,
+    fallback_web_search,
+    fallback_duckduckgo_news,
+    fallback_duckduckgo_images,
+    format_fallback_results,
+)
 
-ua = UserAgent()
-# Generates a random Chrome-specific user-agent
-# random_chrome = ua.chrome
-# print(random_chrome)
+# Internal alias for legacy function references within this module
+_fetch_url_bytes = fetch_url_bytes
+from .utils.image import (
+    is_base64_image,
+    save_base64_image,
+    is_local_file,
+)
+from .utils.language import (
+    detect_source_language,
+    resolve_language_code,
+)
 
 mcp = FastMCP("google-search")
 
-USER_AGENT = ua.chrome
-# USER_AGENT = (
-#     # "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-#     # "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-#     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-# )
 
-# JavaScript to inject before every page load to hide automation signals
-STEALTH_JS = """
-// Overwrite navigator.webdriver to false
-Object.defineProperty(navigator, 'webdriver', { get: () => false });
-
-// Fake plugins array (headless Chrome has none by default)
-Object.defineProperty(navigator, 'plugins', {
-    get: () => [
-        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
-          description: 'Portable Document Format',
-          length: 1, item: () => null, namedItem: () => null,
-          [Symbol.iterator]: function*() { yield {type: 'application/pdf'}; } },
-        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-          description: '', length: 1, item: () => null, namedItem: () => null,
-          [Symbol.iterator]: function*() { yield {type: 'application/pdf'}; } },
-        { name: 'Native Client', filename: 'internal-nacl-plugin',
-          description: '', length: 2, item: () => null, namedItem: () => null,
-          [Symbol.iterator]: function*() { yield {type: 'application/x-nacl'}; yield {type: 'application/x-pnacl'}; } },
-    ],
-});
-
-// Fake languages
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-
-// Fake chrome.runtime to look like a real Chrome browser
-if (!window.chrome) { window.chrome = {}; }
-if (!window.chrome.runtime) {
-    window.chrome.runtime = {
-        connect: function() {},
-        sendMessage: function() {},
-        onMessage: { addListener: function() {} },
-    };
-}
-
-// Remove Playwright-specific properties
-delete window.__playwright;
-delete window.__pw_manual;
-
-// Patch permissions query for notifications
-const originalQuery = window.Notification && Notification.permission
-    ? Notification.permission : 'default';
-if (navigator.permissions && navigator.permissions.query) {
-    const origQuery = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (params) => {
-        if (params.name === 'notifications') {
-            return Promise.resolve({ state: originalQuery, onchange: null });
-        }
-        return origQuery(params);
-    };
-}
-"""
-
-# Google's time filter parameter values
-TIME_RANGE_MAP = {
-    "past_hour": "qdr:h",
-    "past_day": "qdr:d",
-    "past_week": "qdr:w",
-    "past_month": "qdr:m",
-    "past_year": "qdr:y",
-}
-
-
-async def _launch_browser(pw, viewport=None):
-    """Launch a headless Chromium browser with stealth settings to avoid bot detection.
-
-    Uses a persistent user data directory (~/.config/google-mcp-browser/) so that
-    browser fingerprint, localStorage, and session data remain consistent across
-    restarts — this helps Google see a returning browser profile.
-    """
-    user_data_dir = os.path.join(os.path.expanduser("~"), ".config", "google-mcp-browser")
-    os.makedirs(user_data_dir, exist_ok=True)
-
-    browser = await pw.chromium.launch_persistent_context(
-        user_data_dir,
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-infobars",
-            "--window-size=1280,800",
-            "--enable-webgl",
-            "--use-gl=desktop",
-        ],
-        user_agent=USER_AGENT,
-        viewport=viewport or {"width": 1280, "height": 800},
-        locale="en-US",
-    )
-    # Inject stealth patches before any page loads
-    await browser.add_init_script(STEALTH_JS)
-    return browser
-
-
-COOKIE_PATH = os.path.join(os.path.expanduser("~"), ".google_mcp_cookies.json")
-# COOKIE_DIR = os.path.join(os.path.expanduser("~"), ".config", "google-mcp-cookies")
-COOKIE_DIR = os.path.join(os.path.expanduser("."), "cookies")
-
-
-async def _human_delay(page):
-    """Add a small random delay to mimic human interaction timing."""
-    await page.wait_for_timeout(random.randint(500, 1500))
-
-
-async def _save_cookies(context):
-    """Persist browser cookies to disk so Google sees a returning user."""
-    try:
-        cookies = await context.cookies()
-        with open(COOKIE_PATH, "w") as f:
-            json.dump(cookies, f)
-    except Exception:
-        pass
-
-
-def _parse_netscape_cookie_file(filepath: str) -> list[dict]:
-    """Parse a Netscape-format cookie file (exported by browser extensions).
-
-    This is the standard format produced by:
-      - 'Get cookies.txt' (Chrome extension)
-      - 'cookies.txt' (Firefox export)
-      - 'EditThisCookie' export
-      - curl's --cookie-jar output
-
-    Format (tab-separated):
-      domain  domain_flag  path  secure  expiry_epoch  name  value
-
-    Returns a list of dicts compatible with Playwright's add_cookies().
-    """
-    cookies = []
-    try:
-        with open(filepath, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 7:
-                    continue
-                domain, _, path, secure_str, expiry_str, name, value = parts[:7]
-                # Convert secure flag
-                secure = secure_str.lower() == "true"
-                # Convert expiry to int (0 = session cookie, skip those)
-                try:
-                    expiry = int(expiry_str)
-                except ValueError:
-                    expiry = 0
-                # Build Playwright-compatible cookie dict
-                cookie = {
-                    "name": name,
-                    "value": value,
-                    "domain": domain,
-                    "path": path,
-                    "secure": secure,
-                    "httpOnly": False,
-                    "sameSite": "Lax",
-                }
-                if expiry > 0:
-                    cookie["expires"] = expiry
-                cookies.append(cookie)
-    except Exception:
-        return []
-    return cookies
-
-
-async def _load_cookies(context):
-    """Load cookies into the browser context.
-
-    Priority order (first found wins per cookie):
-      1. ~/.config/google-mcp-cookies/  — any .txt file in Netscape format
-      2. ~/.google_mcp_cookies.json     — auto-saved JSON from previous sessions
-
-    This lets you export cookies from your real browser and drop them in
-    the cookies folder for instant Google access without CAPTCHAs.
-    """
-    loaded = 0
-    try:
-        # Priority 1: user-provided Netscape cookie files
-        if os.path.isdir(COOKIE_DIR):
-            for fname in sorted(os.listdir(COOKIE_DIR)):
-                if fname.endswith(".txt"):
-                    fpath = os.path.join(COOKIE_DIR, fname)
-                    cookies = _parse_netscape_cookie_file(fpath)
-                    if cookies:
-                        await context.add_cookies(cookies)
-                        loaded += len(cookies)
-    except Exception:
-        pass
-
-    try:
-        # Priority 2: auto-saved JSON cookies (from previous sessions)
-        if os.path.isfile(COOKIE_PATH):
-            with open(COOKIE_PATH, "r") as f:
-                cookies = json.load(f)
-            if cookies:
-                await context.add_cookies(cookies)
-                loaded += len(cookies)
-    except Exception:
-        pass
-
-    return loaded
+# ---------------------------------------------------------------------------
+# check_cookies — diagnostic tool
+# ---------------------------------------------------------------------------
 
 
 @mcp.tool()
 async def check_cookies() -> str:
     """Check the status of Google cookies loaded from your browser export.
 
-    This tool tells you:
-      - Whether you have cookie files in ~/.config/google-mcp-cookies/
-      - How many cookies are loaded from each source
-      - Which Google domains are covered (e.g. .google.com, .google.co.uk)
-      - Whether auto-saved session cookies exist
-
-    Use this to verify your cookie setup is working before making search calls.
-
-    Sample prompts that trigger this tool:
-        - "Check my Google cookies"
-        - "Are my cookies working?"
-        - "Verify cookie setup"
-        - "Do I have valid Google cookies?"
-
-    Returns:
-        A detailed report of cookie status.
+    Verifies cookie files exist, shows domain coverage, and reports
+    auto-saved session cookies. Use this to debug CAPTCHA/block issues.
     """
     lines = ["=== Google MCP Cookie Status ===\n"]
 
-    # Check user-provided Netscape cookie files
     user_files = []
     if os.path.isdir(COOKIE_DIR):
         for fname in sorted(os.listdir(COOKIE_DIR)):
@@ -311,8 +114,7 @@ async def check_cookies() -> str:
     if user_files:
         lines.append(f"User cookie files ({COOKIE_DIR}):")
         for name, size in user_files:
-            lines.append(f"  ✅ {name} ({size:,} bytes)")
-        # Parse and show domain coverage
+            lines.append(f"  {name} ({size:,} bytes)")
         all_domains = set()
         for name, _ in user_files:
             fpath = os.path.join(COOKIE_DIR, name)
@@ -326,552 +128,30 @@ async def check_cookies() -> str:
             for d in sorted(all_domains):
                 lines.append(f"    - {d}")
         else:
-            lines.append("\n  ⚠️  No Google domains found in cookie files!")
-            lines.append("     Make sure you exported cookies while logged into Google.")
+            lines.append("\n  No Google domains found in cookie files!")
     else:
         lines.append(f"User cookie files ({COOKIE_DIR}):")
-        lines.append("  ❌ No .txt cookie files found.")
-        lines.append(f"  Create the directory and add your exported cookies:")
-        lines.append(f"  mkdir -p {COOKIE_DIR}")
-        lines.append(f"  # Then copy your cookies.txt file there")
+        lines.append("  No .txt cookie files found.")
 
-    # Check auto-saved session cookies
-    if os.path.isfile(COOKIE_PATH):
+    if os.path.isfile(COOKIE_JSON_PATH):
         try:
-            with open(COOKIE_PATH, "r") as f:
+            with open(COOKIE_JSON_PATH) as f:
                 session_cookies = json.load(f)
-            lines.append(f"\nAuto-saved session cookies ({COOKIE_PATH}):")
-            lines.append(f"  ✅ {len(session_cookies)} cookies from previous sessions")
-            google_session = [c for c in session_cookies if "google" in c.get("domain", "")]
-            if google_session:
-                lines.append(f"  Google-specific: {len(google_session)} cookies")
+            lines.append(f"\nAuto-saved session cookies ({COOKIE_JSON_PATH}):")
+            lines.append(f"  {len(session_cookies)} cookies from previous sessions")
         except Exception:
-            lines.append(f"\nAuto-saved session cookies: ⚠️  File exists but could not be read")
+            lines.append(f"\nAuto-saved session cookies: file exists but could not be read")
     else:
-        lines.append(f"\nAuto-saved session cookies: ℹ️  None yet (will be created after first search)")
-
-    lines.append("\n=== Tips ===")
-    lines.append("1. Export cookies from Chrome with 'Get cookies.txt' extension")
-    lines.append("2. Save the file to ~/.config/google-mcp-cookies/cookies.txt")
-    lines.append("3. Run check_cookies again to verify")
-    lines.append("4. Then try google_search — Google will see you as a logged-in user")
+        lines.append(f"\nAuto-saved session cookies: none yet")
 
     return "\n".join(lines)
-
-
-async def _is_blocked(page) -> bool:
-    """Check if the current page is a Google CAPTCHA or rate-limit block."""
-    url = page.url
-    if "/sorry/" in url:
-        return True
-    try:
-        captcha = await page.locator(
-            "iframe[src*='recaptcha'], #captcha-form, "
-            "form[action*='sorry'], div.g-recaptcha"
-        ).count()
-        if captcha > 0:
-            return True
-    except Exception:
-        pass
-    return False
-
-
-async def _try_solve_captcha(page) -> bool:
-    """Attempt to solve reCAPTCHA: first try checkbox click, then image challenge with neural net."""
-    try:
-        # Step 1: Try clicking the reCAPTCHA checkbox with human-like movement
-        recaptcha_frame = page.frame_locator("iframe[src*='recaptcha']")
-        checkbox = recaptcha_frame.locator("#recaptcha-anchor, .recaptcha-checkbox-border")
-        if await checkbox.count() > 0:
-            box = await checkbox.first.bounding_box()
-            if box:
-                x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
-                y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
-
-                await page.mouse.move(x - random.randint(50, 150), y - random.randint(50, 150))
-                await page.wait_for_timeout(random.randint(100, 300))
-                await page.mouse.move(x, y, steps=random.randint(10, 25))
-                await page.wait_for_timeout(random.randint(200, 500))
-                await page.mouse.click(x, y)
-                await page.wait_for_timeout(random.randint(2000, 4000))
-
-                if not await _is_blocked(page):
-                    return True
-
-        # Step 2: Checkbox wasn't enough, try solving the image challenge
-        solved = await _solve_image_challenge(page)
-        if solved:
-            return True
-
-        return False
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Neural net CAPTCHA image challenge solver
-# ---------------------------------------------------------------------------
-
-CAPTCHA_MODEL_DIR = os.path.join(os.path.expanduser("~"), ".google_mcp_models")
-MOBILENET_ONNX = os.path.join(CAPTCHA_MODEL_DIR, "mobilenetv2-12.onnx")
-IMAGENET_LABELS_PATH = os.path.join(CAPTCHA_MODEL_DIR, "imagenet_labels.json")
-
-# Compact mapping of common reCAPTCHA prompt keywords to ImageNet class indices
-# ImageNet class index → label: https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a
-CAPTCHA_CLASS_MAP = {
-    "traffic light": [920],
-    "bus": [654, 779, 874],
-    "bicycle": [444, 671],
-    "motorcycle": [670, 665],
-    "car": [436, 468, 511, 609, 656, 717, 751, 817],
-    "taxi": [468],
-    "cab": [468],
-    "crosswalk": [],
-    "bridge": [839],
-    "boat": [472, 484, 554, 625, 814, 914],
-    "airplane": [404, 405],
-    "plane": [404, 405],
-    "train": [466, 547, 820, 829],
-    "truck": [555, 569, 656, 675, 717, 864, 867],
-    "fire hydrant": [],
-    "hydrant": [],
-    "parking meter": [705],
-    "stair": [],
-    "mountain": [970, 972, 976, 979, 980],
-    "palm": [],
-    "chimney": [],
-    "tractor": [866],
-}
-
-# ImageNet mean/std for preprocessing
-_IMAGENET_MEAN = [0.485, 0.456, 0.406]
-_IMAGENET_STD = [0.229, 0.224, 0.225]
-
-
-def _ensure_captcha_model() -> bool:
-    """Download MobileNetV2 ONNX model if not present. Returns True if model is available."""
-    os.makedirs(CAPTCHA_MODEL_DIR, exist_ok=True)
-    if os.path.isfile(MOBILENET_ONNX):
-        return True
-    try:
-        model_url = (
-            "https://github.com/onnx/models/raw/main/validated/vision/"
-            "classification/mobilenet/model/mobilenetv2-12.onnx"
-        )
-        req = urllib.request.Request(model_url, headers={"User-Agent": "NoAPI-MCP/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = resp.read()
-        with open(MOBILENET_ONNX, "wb") as f:
-            f.write(data)
-        return True
-    except Exception:
-        return False
-
-
-def _classify_cells(cells: list[bytes], prompt_keywords: list[str]) -> list[bool]:
-    """Classify a list of image cell bytes against CAPTCHA prompt keywords using MobileNetV2.
-
-    Returns a list of booleans indicating which cells match the prompt.
-    """
-    try:
-        import cv2
-        import numpy as np
-        import onnxruntime as ort
-    except ImportError:
-        return [False] * len(cells)
-
-    if not _ensure_captcha_model():
-        return [False] * len(cells)
-
-    session = ort.InferenceSession(MOBILENET_ONNX)
-    input_name = session.get_inputs()[0].name
-
-    # Build set of target class indices from prompt keywords
-    target_classes = set()
-    for keyword in prompt_keywords:
-        kw_lower = keyword.lower()
-        for captcha_key, class_indices in CAPTCHA_CLASS_MAP.items():
-            if captcha_key in kw_lower or kw_lower in captcha_key:
-                target_classes.update(class_indices)
-
-    if not target_classes:
-        return [False] * len(cells)
-
-    results = []
-    for cell_bytes in cells:
-        arr = np.frombuffer(cell_bytes, np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
-            results.append(False)
-            continue
-
-        # Preprocess: resize to 224x224, normalize, CHW, batch
-        img = cv2.resize(img, (224, 224))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = img.astype(np.float32) / 255.0
-        for c in range(3):
-            img[:, :, c] = (img[:, :, c] - _IMAGENET_MEAN[c]) / _IMAGENET_STD[c]
-        img = np.transpose(img, (2, 0, 1))  # CHW
-        img = np.expand_dims(img, 0)  # NCHW
-
-        outputs = session.run(None, {input_name: img})
-        logits = outputs[0][0]
-
-        # Softmax
-        exp_logits = np.exp(logits - np.max(logits))
-        probs = exp_logits / exp_logits.sum()
-
-        # Check if any target class is in top-10 predictions with decent confidence
-        top_indices = np.argsort(probs)[::-1][:10]
-        match = any(idx in target_classes for idx in top_indices)
-        # Also check if the top target class has > 5% probability
-        target_probs = [probs[idx] for idx in target_classes if idx < len(probs)]
-        if target_probs and max(target_probs) > 0.05:
-            match = True
-
-        results.append(match)
-
-    return results
-
-
-async def _solve_image_challenge(page) -> bool:
-    """Attempt to solve a reCAPTCHA image challenge using MobileNetV2 neural net."""
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return False
-
-    try:
-        # Find the challenge iframe (different from the checkbox iframe)
-        challenge_frame = None
-        for frame in page.frames:
-            if "recaptcha" in (frame.url or "") and "bframe" in (frame.url or ""):
-                challenge_frame = frame
-                break
-
-        if not challenge_frame:
-            return False
-
-        # Read the challenge prompt text
-        prompt_el = challenge_frame.locator(
-            ".rc-imageselect-desc-no-canonical, .rc-imageselect-desc, "
-            ".rc-imageselect-instructions"
-        )
-        if await prompt_el.count() == 0:
-            return False
-
-        prompt_text = (await prompt_el.first.inner_text()).lower()
-        # Extract keywords from prompt like "Select all images with traffic lights"
-        prompt_keywords = [prompt_text]
-
-        # Find the image grid
-        grid = challenge_frame.locator("table.rc-imageselect-table, .rc-imageselect-target")
-        if await grid.count() == 0:
-            return False
-
-        # Take screenshot of the grid
-        grid_screenshot = await grid.first.screenshot()
-        if not grid_screenshot:
-            return False
-
-        # Determine grid size (3x3 or 4x4)
-        tiles = challenge_frame.locator("td.rc-imageselect-tile, .rc-image-tile-wrapper")
-        tile_count = await tiles.count()
-
-        if tile_count == 16:
-            grid_size = 4
-        else:
-            grid_size = 3  # default
-
-        # Split screenshot into grid cells
-        arr = np.frombuffer(grid_screenshot, np.uint8)
-        grid_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if grid_img is None:
-            return False
-
-        h, w = grid_img.shape[:2]
-        cell_h, cell_w = h // grid_size, w // grid_size
-        cells = []
-        for row in range(grid_size):
-            for col in range(grid_size):
-                y1, y2 = row * cell_h, (row + 1) * cell_h
-                x1, x2 = col * cell_w, (col + 1) * cell_w
-                cell = grid_img[y1:y2, x1:x2]
-                _, cell_bytes = cv2.imencode(".png", cell)
-                cells.append(cell_bytes.tobytes())
-
-        # Classify each cell with the neural net
-        matches = _classify_cells(cells, prompt_keywords)
-
-        if not any(matches):
-            return False
-
-        # Click matching cells with human-like delays
-        for i, should_click in enumerate(matches):
-            if should_click:
-                row, col = divmod(i, grid_size)
-                tile_locator = tiles.nth(i)
-                if await tile_locator.count() > 0:
-                    box = await tile_locator.bounding_box()
-                    if box:
-                        x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
-                        y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
-                        await page.mouse.click(x, y)
-                        await page.wait_for_timeout(random.randint(300, 700))
-
-        # Wait for any new tiles to load (Google sometimes refreshes clicked tiles)
-        await page.wait_for_timeout(random.randint(1500, 3000))
-
-        # Click the verify button
-        verify_btn = challenge_frame.locator("#recaptcha-verify-button")
-        if await verify_btn.count() > 0:
-            await verify_btn.first.click()
-            await page.wait_for_timeout(random.randint(3000, 5000))
-
-        # Check if we passed
-        return not await _is_blocked(page)
-
-    except Exception:
-        return False
-
-
-async def _dismiss_consent(page):
-    """Dismiss Google consent banner if present (supports multiple languages)."""
-    try:
-        consent_btn = page.locator(
-            "button:has-text('Accept all'), "
-            "button:has-text('Accept All'), "
-            "button:has-text('I agree'), "
-            "button:has-text('Reject all'), "
-            "button:has-text('Reject All'), "
-            "button:has-text('Alle akzeptieren'), "
-            "button:has-text('Alle ablehnen'), "
-            "button:has-text('Tout accepter'), "
-            "button:has-text('Tout refuser'), "
-            "button:has-text('Aceptar todo'), "
-            "button:has-text('Rechazar todo'), "
-            "button:has-text('Accetta tutto'), "
-            "button:has-text('Rifiuta tutto')"
-        )
-        if await consent_btn.count() > 0:
-            await consent_btn.first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=5000)
-    except Exception:
-        pass
-    # Small random delay to mimic human interaction timing
-    await _human_delay(page)
-
-
-async def _wait_for_google_results_ready(page, timeout_ms: int = 15000):
-    """Wait until Google SERP has results or a terminal no-result/block state."""
-    await page.wait_for_function(
-        """
-        () => {
-            const bodyText = (document.body?.innerText || '').toLowerCase();
-
-            if (bodyText.includes('our systems have detected unusual traffic') ||
-                bodyText.includes('unusual traffic from your computer network') ||
-                bodyText.includes('did not match any documents') ||
-                bodyText.includes('no results found for')) {
-                return true;
-            }
-
-            const hasResultCards = document.querySelectorAll(
-                'div#search div.g, #rso div.g, #rso div.MjjYud, a h3'
-            ).length > 0;
-
-            const hasSearchContainer = !!document.querySelector('div#search, #rso');
-            const hasEnoughLinks = document.querySelectorAll('a[href]').length > 20;
-
-            return hasResultCards || (hasSearchContainer && hasEnoughLinks);
-        }
-        """,
-        timeout=timeout_ms,
-    )
-
-
-def _fallback_duckduckgo_search(query: str, num_results: int = 5) -> list[dict]:
-    """Fallback web search used when Google blocks automated requests."""
-    try:
-        ddg_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-        req = urllib.request.Request(ddg_url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return []
-
-    matches = re.findall(
-        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    results = []
-    seen = set()
-    for href, title_html in matches:
-        if len(results) >= num_results:
-            break
-
-        parsed_href = href
-        if "duckduckgo.com/l/?" in href:
-            try:
-                q = parse_qs(urlparse(href).query)
-                parsed_href = unquote((q.get("uddg", [""])[0] or "").strip())
-            except Exception:
-                parsed_href = href
-
-        if not parsed_href.startswith("http"):
-            continue
-
-        title = re.sub(r"<[^>]+>", "", title_html)
-        title = re.sub(r"\s+", " ", title).strip()
-        if not title:
-            continue
-
-        key = (title.lower(), parsed_href)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        results.append({"title": title, "url": parsed_href, "snippet": ""})
-
-    return results
-
-
-def _fallback_bing_rss_search(query: str, num_results: int = 5) -> list[dict]:
-    """Second fallback when both Google and DuckDuckGo are blocked."""
-    try:
-        rss_url = f"https://www.bing.com/search?format=rss&q={quote_plus(query)}"
-        req = urllib.request.Request(rss_url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            xml_bytes = resp.read()
-        root = ET.fromstring(xml_bytes)
-    except Exception:
-        return []
-
-    results = []
-    seen = set()
-    for item in root.findall("./channel/item"):
-        if len(results) >= num_results:
-            break
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        desc = (item.findtext("description") or "").strip()
-        if not title or not link.startswith("http"):
-            continue
-        key = (title.lower(), link)
-        if key in seen:
-            continue
-        seen.add(key)
-        results.append({"title": title, "url": link, "snippet": desc})
-
-    return results
-
-
-def _fallback_web_search(query: str, num_results: int = 5) -> tuple[str, list[dict]]:
-    ddg = _fallback_duckduckgo_search(query, num_results)
-    if ddg:
-        return "DuckDuckGo", ddg
-    bing = _fallback_bing_rss_search(query, num_results)
-    if bing:
-        return "Bing RSS", bing
-    return "", []
-
-
-def _format_fallback_results(query: str, provider: str, results: list[dict]) -> str:
-    lines = [
-        "Google blocked by bot detection for this request.",
-        f"Showing fallback web results ({provider}):\n",
-        f"Web Results for: {query}\n",
-    ]
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r.get('title', '')}")
-        lines.append(f"   URL: {r.get('url', '')}")
-        if r.get("snippet"):
-            lines.append(f"   {r['snippet']}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _fallback_duckduckgo_news(query: str, num_results: int = 5) -> list[dict]:
-    """Fallback news search using DuckDuckGo HTML when Google News is blocked."""
-    try:
-        ddg_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}&t=h_&ia=news"
-        req = urllib.request.Request(ddg_url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return []
-
-    results = []
-    seen = set()
-    # DuckDuckGo news results use the same result__a class but with news snippets
-    matches = re.findall(
-        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    for href, title_html in matches:
-        if len(results) >= num_results:
-            break
-        parsed_href = href
-        if "duckduckgo.com/l/?" in href:
-            try:
-                q = parse_qs(urlparse(href).query)
-                parsed_href = unquote((q.get("uddg", [""])[0] or "").strip())
-            except Exception:
-                parsed_href = href
-        if not parsed_href.startswith("http"):
-            continue
-        title = re.sub(r"<[^>]+>", "", title_html)
-        title = re.sub(r"\s+", " ", title).strip()
-        if not title:
-            continue
-        key = (title.lower(), parsed_href)
-        if key in seen:
-            continue
-        seen.add(key)
-        results.append({"title": title, "url": parsed_href, "source": "DuckDuckGo News", "time": "", "snippet": ""})
-    return results
-
-
-def _fallback_duckduckgo_images(query: str, num_results: int = 5) -> list[dict]:
-    """Fallback image search using DuckDuckGo HTML when Google Images is blocked."""
-    try:
-        ddg_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}&t=h_&ia=images"
-        req = urllib.request.Request(ddg_url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return []
-
-    results = []
-    seen = set()
-    # DuckDuckGo image results: look for img tags with data-src
-    img_matches = re.findall(
-        r'<img[^>]*class="[^"]*tile__img[^"]*"[^>]*src="([^"]+)"[^>]*alt="([^"]*)"',
-        html,
-        flags=re.IGNORECASE,
-    )
-    for src, alt in img_matches:
-        if len(results) >= num_results:
-            break
-        if not src.startswith("http"):
-            continue
-        key = src.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        results.append({"title": alt or "Image", "thumbnail": src, "url": src})
-    return results
 
 
 # ---------------------------------------------------------------------------
 # google_search
 # ---------------------------------------------------------------------------
 
-async def _do_google_search(
+async def do_google_search(
     query: str,
     num_results: int = 5,
     time_range: str | None = None,
@@ -903,17 +183,17 @@ async def _do_google_search(
         url += f"&tbs={TIME_RANGE_MAP[time_range]}"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         browser_page = await context.new_page()
 
         try:
             await browser_page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(browser_page)
+            await dismiss_consent(browser_page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(browser_page):
-                solved = await _try_solve_captcha(browser_page)
+            if await is_blocked(browser_page):
+                solved = await try_solve_captcha(browser_page)
                 if not solved:
                     # One warm-up retry: open Google home first, then re-run query.
                     # This helps when the first direct SERP request gets a transient block.
@@ -923,26 +203,26 @@ async def _do_google_search(
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(browser_page)
-                        await _human_delay(browser_page)
+                        await dismiss_consent(browser_page)
+                        await human_delay(browser_page)
                         await browser_page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(browser_page)
+                        await dismiss_consent(browser_page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(browser_page):
-                        provider, fallback = _fallback_web_search(query, num_results)
+                    if await is_blocked(browser_page):
+                        provider, fallback = fallback_web_search(query, num_results)
                         if fallback:
-                            await _save_cookies(context)
-                            return _format_fallback_results(query, provider, fallback)
-                        await _save_cookies(context)
+                            await save_cookies(context)
+                            return format_fallback_results(query, provider, fallback)
+                        await save_cookies(context)
                         return (
                             "Search blocked by Google bot detection. "
                             "Your IP may be temporarily rate-limited. "
                             "Try again in a few minutes or from a different network."
                         )
 
-            await _wait_for_google_results_ready(browser_page, timeout_ms=15000)
+            await wait_for_google_results_ready(browser_page, timeout_ms=15000)
 
             results = await browser_page.evaluate(
                 """
@@ -1044,9 +324,9 @@ async def _do_google_search(
             )
 
             if not results:
-                provider, fallback = _fallback_web_search(query, num_results)
+                provider, fallback = fallback_web_search(query, num_results)
                 if fallback:
-                    return _format_fallback_results(query, provider, fallback)
+                    return format_fallback_results(query, provider, fallback)
                 return f"No results found for: {query}"
 
             header = f"Google Search Results for: {query}"
@@ -1074,12 +354,12 @@ async def _do_google_search(
 
         except Exception as e:
             # Check if the exception was due to bot detection
-            if await _is_blocked(browser_page):
-                provider, fallback = _fallback_web_search(query, num_results)
+            if await is_blocked(browser_page):
+                provider, fallback = fallback_web_search(query, num_results)
                 if fallback:
-                    await _save_cookies(context)
-                    return _format_fallback_results(query, provider, fallback)
-                await _save_cookies(context)
+                    await save_cookies(context)
+                    return format_fallback_results(query, provider, fallback)
+                await save_cookies(context)
                 return (
                     "Search blocked by Google bot detection. "
                     "Your IP may be temporarily rate-limited. "
@@ -1088,7 +368,7 @@ async def _do_google_search(
             return f"Search failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -1124,7 +404,7 @@ async def google_search(
     """
     num_results = max(1, min(num_results, 10))
     page = max(1, min(page, 10))
-    return await _do_google_search(
+    return await do_google_search(
         query,
         num_results,
         time_range=time_range or None,
@@ -1139,22 +419,22 @@ async def google_search(
 # google_news
 # ---------------------------------------------------------------------------
 
-async def _do_google_news(query: str, num_results: int = 5) -> list:
+async def do_google_news(query: str, num_results: int = 5) -> list:
     """Launch headless Chromium, search Google News, and scrape results."""
     encoded_query = quote_plus(query)
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=nws&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     # Warm-up retry: open Google home first, then re-run query
                     try:
@@ -1163,17 +443,17 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         # Try DuckDuckGo fallback for news
-                        ddg_news = _fallback_duckduckgo_news(query, num_results)
+                        ddg_news = fallback_duckduckgo_news(query, num_results)
                         if ddg_news:
                             content = [f"Google News blocked by bot detection. Showing fallback results (DuckDuckGo News):\n"]
                             content.append(f"News Results for: {query}\n")
@@ -1186,7 +466,7 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
                             return content
                         return [f"Google News blocked by bot detection for: {query}\nTry again later or use google_search with site:news.google.com"]
 
-            await _wait_for_google_results_ready(page, timeout_ms=15000)
+            await wait_for_google_results_ready(page, timeout_ms=15000)
 
             results = await page.evaluate(
                 """
@@ -1327,7 +607,7 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
             return [f"News search failed: {e}"]
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -1347,25 +627,25 @@ async def google_news(query: str, num_results: int = 5) -> list:
         num_results: Number of results to return (default 5, max 10).
     """
     num_results = max(1, min(num_results, 10))
-    return await _do_google_news(query, num_results)
+    return await do_google_news(query, num_results)
 
 
 # ---------------------------------------------------------------------------
 # google_scholar
 # ---------------------------------------------------------------------------
 
-async def _do_google_scholar(query: str, num_results: int = 5) -> str:
+async def do_google_scholar(query: str, num_results: int = 5) -> str:
     """Launch headless Chromium, search Google Scholar, and scrape results."""
     encoded_query = quote_plus(query)
     url = f"https://scholar.google.com/scholar?q={encoded_query}&hl=en&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
+        context = await launch_browser(pw)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
             await page.wait_for_selector("#gs_res_ccl", timeout=15000)
 
             results = await page.evaluate(
@@ -1448,7 +728,7 @@ async def google_scholar(query: str, num_results: int = 5) -> str:
         num_results: Number of results to return (default 5, max 10).
     """
     num_results = max(1, min(num_results, 10))
-    return await _do_google_scholar(query, num_results)
+    return await do_google_scholar(query, num_results)
 
 
 # ---------------------------------------------------------------------------
@@ -1479,17 +759,17 @@ async def google_images(query: str, num_results: int = 5) -> list:
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=isch"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     try:
                         await page.goto(
@@ -1497,17 +777,17 @@ async def google_images(query: str, num_results: int = 5) -> list:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         # Try DuckDuckGo fallback for images
-                        ddg_imgs = _fallback_duckduckgo_images(query, num_results)
+                        ddg_imgs = fallback_duckduckgo_images(query, num_results)
                         if ddg_imgs:
                             content = [f"Google Images blocked by bot detection. Showing fallback results (DuckDuckGo Images):\n"]
                             content.append(f"Image Results for: {query}\n")
@@ -1642,7 +922,7 @@ async def google_images(query: str, num_results: int = 5) -> list:
             return [f"Image search failed: {e}"]
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -1650,22 +930,22 @@ async def google_images(query: str, num_results: int = 5) -> list:
 # google_trends
 # ---------------------------------------------------------------------------
 
-async def _do_google_trends(query: str) -> str:
+async def do_google_trends(query: str) -> str:
     """Launch headless Chromium, check Google Trends, and scrape interest data."""
     encoded_query = quote_plus(query)
     url = f"https://trends.google.com/trends/explore?q={encoded_query}&hl=en"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     # Warm-up retry: open Google home first, then re-run query
                     try:
@@ -1674,14 +954,14 @@ async def _do_google_trends(query: str) -> str:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return (
                             f"Google Trends for: {query}\n\n"
                             f"Google Trends is currently rate-limiting this request (HTTP 429).\n"
@@ -1776,7 +1056,7 @@ async def _do_google_trends(query: str) -> str:
             return f"Trends lookup failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -1793,26 +1073,26 @@ async def google_trends(query: str) -> str:
     Args:
         query: The topic or search term to check trends for.
     """
-    return await _do_google_trends(query)
+    return await do_google_trends(query)
 
 
 # ---------------------------------------------------------------------------
 # google_maps
 # ---------------------------------------------------------------------------
 
-async def _do_google_maps(query: str, num_results: int = 5) -> list:
+async def do_google_maps(query: str, num_results: int = 5) -> list:
     """Search Google Maps for places and return results with a map screenshot."""
     encoded_query = quote_plus(query)
     # Navigate directly to Google Maps search (shows map with pins)
     url = f"https://www.google.com/maps/search/{encoded_query}/?hl=en"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw, viewport={"width": 1400, "height": 900})
+        context = await launch_browser(pw, viewport={"width": 1400, "height": 900})
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
             # Wait for results panel to appear
             await page.wait_for_timeout(3000)
             # Wait for the map canvas to render (tiles need time to load)
@@ -2034,7 +1314,7 @@ async def google_maps(query: str, num_results: int = 5) -> list:
         num_results: Number of results to return (default 5, max 10).
     """
     num_results = max(1, min(num_results, 10))
-    return await _do_google_maps(query, num_results)
+    return await do_google_maps(query, num_results)
 
 
 # ---------------------------------------------------------------------------
@@ -2042,7 +1322,7 @@ async def google_maps(query: str, num_results: int = 5) -> list:
 # ---------------------------------------------------------------------------
 
 
-async def _do_google_maps_directions(
+async def do_google_maps_directions(
     origin: str, destination: str, mode: str = "driving"
 ) -> list:
     """Get directions between two locations with a map screenshot."""
@@ -2058,12 +1338,12 @@ async def _do_google_maps_directions(
     )
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw, viewport={"width": 1400, "height": 900})
+        context = await launch_browser(pw, viewport={"width": 1400, "height": 900})
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
             # Wait for the map canvas and route to render
             await page.wait_for_timeout(5000)
 
@@ -2213,31 +1493,31 @@ async def google_maps_directions(
     valid_modes = {"driving", "walking", "transit", "cycling"}
     if mode not in valid_modes:
         mode = "driving"
-    return await _do_google_maps_directions(origin, destination, mode)
+    return await do_google_maps_directions(origin, destination, mode)
 
 
 # ---------------------------------------------------------------------------
 # google_finance
 # ---------------------------------------------------------------------------
 
-async def _do_google_finance(query: str) -> str:
+async def do_google_finance(query: str) -> str:
     """Search Google Finance for stock/market data."""
     encoded_query = quote_plus(query)
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             # Try search-based approach first (more reliable for simple tickers)
             search_url = f"https://www.google.com/search?q={encoded_query}+stock+price&hl=en"
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     try:
                         await page.goto(
@@ -2245,15 +1525,15 @@ async def _do_google_finance(query: str) -> str:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return f"Google Finance blocked by bot detection for: {query}\nTry again later."
 
             await page.wait_for_timeout(2000)
@@ -2405,7 +1685,7 @@ async def _do_google_finance(query: str) -> str:
             return f"Finance lookup failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -2423,30 +1703,30 @@ async def google_finance(query: str) -> str:
     Args:
         query: Stock ticker with exchange (e.g. "AAPL:NASDAQ", "TSLA:NASDAQ", "MSFT:NASDAQ", ".INX:INDEXSP") or company name.
     """
-    return await _do_google_finance(query)
+    return await do_google_finance(query)
 
 
 # ---------------------------------------------------------------------------
 # google_weather
 # ---------------------------------------------------------------------------
 
-async def _do_google_weather(location: str) -> str:
+async def do_google_weather(location: str) -> str:
     """Get weather data from Google's weather card."""
     encoded_location = quote_plus(f"weather {location}")
     url = f"https://www.google.com/search?q={encoded_location}&hl=en"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     try:
                         await page.goto(
@@ -2454,15 +1734,15 @@ async def _do_google_weather(location: str) -> str:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return f"Weather lookup blocked by bot detection for: {location}\nTry again later."
 
             await page.wait_for_timeout(2000)
@@ -2594,7 +1874,7 @@ async def _do_google_weather(location: str) -> str:
             return f"Weather lookup failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -2612,30 +1892,30 @@ async def google_weather(location: str) -> str:
     Args:
         location: The city or location to get weather for (e.g. "Dubai", "New York", "London, UK", "Tokyo").
     """
-    return await _do_google_weather(location)
+    return await do_google_weather(location)
 
 
 # ---------------------------------------------------------------------------
 # google_shopping
 # ---------------------------------------------------------------------------
 
-async def _do_google_shopping(query: str, num_results: int = 5) -> list:
+async def do_google_shopping(query: str, num_results: int = 5) -> list:
     """Search Google Shopping for products and prices."""
     encoded_query = quote_plus(query)
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=shop&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     try:
                         await page.goto(
@@ -2643,15 +1923,15 @@ async def _do_google_shopping(query: str, num_results: int = 5) -> list:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return [f"Google Shopping blocked by bot detection for: {query}\nTry again later."]
 
             await page.wait_for_timeout(2000)
@@ -2848,7 +2128,7 @@ async def _do_google_shopping(query: str, num_results: int = 5) -> list:
             return f"Shopping search failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -2868,30 +2148,30 @@ async def google_shopping(query: str, num_results: int = 5) -> list:
         num_results: Number of results to return (default 5, max 10).
     """
     num_results = max(1, min(num_results, 10))
-    return await _do_google_shopping(query, num_results)
+    return await do_google_shopping(query, num_results)
 
 
 # ---------------------------------------------------------------------------
 # google_books
 # ---------------------------------------------------------------------------
 
-async def _do_google_books(query: str, num_results: int = 5) -> str:
+async def do_google_books(query: str, num_results: int = 5) -> str:
     """Search Google Books for books and publications."""
     encoded_query = quote_plus(query)
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=bks&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     try:
                         await page.goto(
@@ -2899,15 +2179,15 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return f"Google Books blocked by bot detection for: {query}\nTry again later."
 
             await page.wait_for_timeout(2000)
@@ -3030,7 +2310,7 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
             return f"Book search failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -3050,111 +2330,17 @@ async def google_books(query: str, num_results: int = 5) -> str:
         num_results: Number of results to return (default 5, max 10).
     """
     num_results = max(1, min(num_results, 10))
-    return await _do_google_books(query, num_results)
+    return await do_google_books(query, num_results)
 
 
 # ---------------------------------------------------------------------------
 # google_translate
 # ---------------------------------------------------------------------------
 
-LANGUAGE_CODES = {
-    "english": "en", "spanish": "es", "french": "fr", "german": "de",
-    "italian": "it", "portuguese": "pt", "japanese": "ja", "korean": "ko",
-    "chinese": "zh-CN", "arabic": "ar", "russian": "ru", "hindi": "hi",
-    "marathi": "mr",
-    "dutch": "nl", "swedish": "sv", "turkish": "tr", "polish": "pl",
-    "thai": "th", "vietnamese": "vi", "indonesian": "id", "greek": "el",
-    "hebrew": "he", "czech": "cs", "danish": "da", "finnish": "fi",
-    "norwegian": "no", "romanian": "ro", "hungarian": "hu", "ukrainian": "uk",
-}
-
-LANG_DETECTION_CONFIDENCE_THRESHOLD = 0.80
-_LINGUA_DETECTOR = None
-
-
-def _get_lingua_detector():
-    """Build and cache detector lazily to avoid startup overhead."""
-    global _LINGUA_DETECTOR
-    if LanguageDetectorBuilder is None:
-        return None
-    if _LINGUA_DETECTOR is None:
-        _LINGUA_DETECTOR = LanguageDetectorBuilder.from_all_languages().build()
-    return _LINGUA_DETECTOR
-
-
-def _detect_source_language(text: str) -> tuple[str, float] | None:
-    """Detect source language code and confidence, if available."""
-    sample = (text or "").strip()
-    if len(sample) < 3:
-        return None
-
-    detector = _get_lingua_detector()
-    if detector is None:
-        return None
-
-    try:
-        values = detector.compute_language_confidence_values(sample)
-        if not values:
-            return None
-        top = values[0]
-        lang = getattr(top, "language", None)
-        confidence = float(getattr(top, "value", 0.0) or 0.0)
-        if lang is None:
-            return None
-
-        iso = None
-        try:
-            iso = lang.iso_code_639_1.name.lower()
-        except Exception:
-            try:
-                iso = str(lang.iso_code_639_1).lower()
-            except Exception:
-                iso = None
-        if not iso:
-            return None
-        if iso == "zh":
-            iso = "zh-CN"
-        return iso, confidence
-    except Exception:
-        return None
-
-
-def _split_translation_chunks(text: str, max_chars: int = 1500) -> list[str]:
-    """Split long text for fallback APIs with query-size limits."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= max_chars:
-        return [text]
-
-    parts = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= max_chars:
-            parts.append(remaining.strip())
-            break
-
-        cut = max(
-            remaining.rfind("\n", 0, max_chars),
-            remaining.rfind(". ", 0, max_chars),
-            remaining.rfind("! ", 0, max_chars),
-            remaining.rfind("? ", 0, max_chars),
-            remaining.rfind("; ", 0, max_chars),
-            remaining.rfind(", ", 0, max_chars),
-            remaining.rfind(" ", 0, max_chars),
-        )
-        if cut < max_chars // 3:
-            cut = max_chars
-
-        parts.append(remaining[:cut].strip())
-        remaining = remaining[cut:].lstrip()
-
-    return [p for p in parts if p]
-
 
 def _translate_via_google_http(text: str, sl: str, tl: str) -> str:
     """Fallback translator using Google HTTP endpoint (no browser scraping)."""
-    chunks = _split_translation_chunks(text)
+    chunks = split_translation_chunks(text)
     if not chunks:
         return ""
 
@@ -3183,7 +2369,7 @@ def _translate_via_google_http(text: str, sl: str, tl: str) -> str:
 
 def _translate_via_mymemory(text: str, sl: str, tl: str) -> str:
     """Secondary fallback translator via MyMemory public endpoint."""
-    chunks = _split_translation_chunks(text, max_chars=500)
+    chunks = split_translation_chunks(text, max_chars=500)
     if not chunks:
         return ""
 
@@ -3224,7 +2410,7 @@ def _translate_via_mymemory(text: str, sl: str, tl: str) -> str:
     return "\n".join(out).strip()
 
 
-async def _do_google_translate(text: str, to_language: str, from_language: str = "") -> str:
+async def do_google_translate(text: str, to_language: str, from_language: str = "") -> str:
     """Translate text using Google Translate directly."""
     # Resolve language names to codes
     tl = LANGUAGE_CODES.get(to_language.lower(), to_language.lower())
@@ -3232,7 +2418,7 @@ async def _do_google_translate(text: str, to_language: str, from_language: str =
     if from_language:
         sl = LANGUAGE_CODES.get(from_language.lower(), from_language.lower())
     else:
-        detected = _detect_source_language(text)
+        detected = detect_source_language(text)
         if detected and detected[1] >= LANG_DETECTION_CONFIDENCE_THRESHOLD:
             sl = detected[0]
             detection_note = f"Detected source language: {sl} (confidence {detected[1]:.2f})"
@@ -3248,12 +2434,12 @@ async def _do_google_translate(text: str, to_language: str, from_language: str =
     url = f"https://translate.google.com/?sl={sl}&tl={tl}&text={encoded_text}&op=translate"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
+        context = await launch_browser(pw)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
             # Wait for translation to load
             await page.wait_for_timeout(3000)
 
@@ -3365,14 +2551,14 @@ async def google_translate(text: str, to_language: str, from_language: str = "")
         to_language: Target language (e.g. "Spanish", "Japanese", "French", "German", "Korean", "Chinese", "Arabic").
         from_language: Source language (optional, auto-detected if empty).
     """
-    return await _do_google_translate(text, to_language, from_language or "")
+    return await do_google_translate(text, to_language, from_language or "")
 
 
 # ---------------------------------------------------------------------------
 # google_flights
 # ---------------------------------------------------------------------------
 
-async def _do_google_flights(
+async def do_google_flights(
     origin: str, destination: str, date: str = "", return_date: str = ""
 ) -> str:
     """Search Google Flights for flight information."""
@@ -3387,17 +2573,17 @@ async def _do_google_flights(
     url = f"https://www.google.com/search?q={encoded_query}&hl=en"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     try:
                         await page.goto(
@@ -3405,15 +2591,15 @@ async def _do_google_flights(
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return f"Google Flights blocked by bot detection for: {origin} to {destination}\nTry again later."
 
             await page.wait_for_timeout(3000)
@@ -3525,7 +2711,7 @@ async def _do_google_flights(
             return f"Flight search failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -3548,30 +2734,30 @@ async def google_flights(
         date: Departure date (optional, e.g. "March 15", "2025-03-15").
         return_date: Return date for round trips (optional).
     """
-    return await _do_google_flights(origin, destination, date or "", return_date or "")
+    return await do_google_flights(origin, destination, date or "", return_date or "")
 
 
 # ---------------------------------------------------------------------------
 # google_hotels
 # ---------------------------------------------------------------------------
 
-async def _do_google_hotels(query: str, num_results: int = 5) -> list:
+async def do_google_hotels(query: str, num_results: int = 5) -> list:
     """Search Google for hotel information."""
     encoded_query = quote_plus(f"hotels {query}")
     url = f"https://www.google.com/search?q={encoded_query}&hl=en"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     try:
                         await page.goto(
@@ -3579,15 +2765,15 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await _dismiss_consent(page)
+                        await dismiss_consent(page)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return [f"Google Hotels blocked by bot detection for: {query}\nTry again later."]
 
             await page.wait_for_timeout(3000)
@@ -3815,7 +3001,7 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
             return f"Hotel search failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
 
 
@@ -3835,14 +3021,14 @@ async def google_hotels(query: str, num_results: int = 5) -> list:
         num_results: Number of results to return (default 5, max 10).
     """
     num_results = max(1, min(num_results, 10))
-    return await _do_google_hotels(query, num_results)
+    return await do_google_hotels(query, num_results)
 
 
 # ---------------------------------------------------------------------------
 # google_lens (reverse image search)
 # ---------------------------------------------------------------------------
 
-def _is_base64_image(data: str) -> bool:
+def is_base64_image(data: str) -> bool:
     """Check if the input looks like base64-encoded image data."""
     # data:image/png;base64,... or raw base64 (very long string, no slashes/spaces)
     if data.startswith("data:image/"):
@@ -3859,7 +3045,7 @@ def _is_base64_image(data: str) -> bool:
     return False
 
 
-def _save_base64_image(data: str) -> str:
+def save_base64_image(data: str) -> str:
     """Save base64 image data to a temp file and return the path."""
     import base64
     import tempfile
@@ -3885,7 +3071,7 @@ def _save_base64_image(data: str) -> str:
     return tmp.name
 
 
-def _is_local_file(path: str) -> bool:
+def is_local_file(path: str) -> bool:
     """Check if the input looks like a local file path rather than a URL."""
     if path.startswith(("http://", "https://", "data:")):
         return False
@@ -3893,16 +3079,16 @@ def _is_local_file(path: str) -> bool:
     return path.startswith(("/", "~", "./", "../")) or os.path.exists(path)
 
 
-async def _do_google_lens(image_source: str) -> str:
+async def do_google_lens(image_source: str) -> str:
     """Reverse image search using Google Lens. Supports URLs, local files, and base64."""
     # Handle base64 input (from drag-and-drop in LM Studio)
     tmp_base64_path = None
-    if _is_base64_image(image_source):
+    if is_base64_image(image_source):
         os.makedirs(os.path.join(os.path.expanduser("~"), ".cache", "noapi-google-search-mcp"), exist_ok=True)
-        tmp_base64_path = _save_base64_image(image_source)
+        tmp_base64_path = save_base64_image(image_source)
         image_source = tmp_base64_path
 
-    is_local = _is_local_file(image_source)
+    is_local = is_local_file(image_source)
 
     if is_local:
         file_path = str(Path(image_source).expanduser().resolve())
@@ -3910,15 +3096,15 @@ async def _do_google_lens(image_source: str) -> str:
             return f"File not found: {image_source}\nPlease provide a valid file path or a public image URL."
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
-        await _load_cookies(context)
+        context = await launch_browser(pw)
+        await load_cookies(context)
         page = await context.new_page()
 
         try:
             if is_local:
                 # Local file: go to Google Images and upload via file chooser
                 await page.goto("https://images.google.com/?hl=en", wait_until="domcontentloaded", timeout=30000)
-                await _dismiss_consent(page)
+                await dismiss_consent(page)
                 await page.wait_for_timeout(1000)
 
                 # Click the camera/lens icon to open image search
@@ -3945,14 +3131,14 @@ async def _do_google_lens(image_source: str) -> str:
                 # Wait for Lens results to load
                 await page.wait_for_load_state("domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(5000)
-                await _dismiss_consent(page)
+                await dismiss_consent(page)
 
             else:
                 # URL-based: use uploadbyurl
                 encoded_url = quote_plus(image_source)
                 url = f"https://lens.google.com/uploadbyurl?url={encoded_url}&hl=en"
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                await _dismiss_consent(page)
+                await dismiss_consent(page)
                 await page.wait_for_timeout(2000)
 
             # Click "Change to English" if present
@@ -3961,7 +3147,7 @@ async def _do_google_lens(image_source: str) -> str:
                 if await eng_link.count() > 0:
                     await eng_link.first.click()
                     await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    await _dismiss_consent(page)
+                    await dismiss_consent(page)
             except Exception:
                 pass
 
@@ -3969,8 +3155,8 @@ async def _do_google_lens(image_source: str) -> str:
             await page.wait_for_timeout(4000)
 
             # Detect and handle CAPTCHA/rate-limit blocks
-            if await _is_blocked(page):
-                solved = await _try_solve_captcha(page)
+            if await is_blocked(page):
+                solved = await try_solve_captcha(page)
                 if not solved:
                     # Warm-up retry: go to Google home first, then re-run
                     try:
@@ -3979,11 +3165,11 @@ async def _do_google_lens(image_source: str) -> str:
                             wait_until="domcontentloaded",
                             timeout=30000,
                         )
-                        await _dismiss_consent(page)
-                        await _human_delay(page)
+                        await dismiss_consent(page)
+                        await human_delay(page)
                         if is_local:
                             await page.goto("https://images.google.com/?hl=en", wait_until="domcontentloaded", timeout=30000)
-                            await _dismiss_consent(page)
+                            await dismiss_consent(page)
                             await page.wait_for_timeout(1000)
                             lens_btn = page.locator("[aria-label='Search by image'], .Gdd5U, .nDcEnd, .tdAaF")
                             if await lens_btn.count() > 0:
@@ -3994,18 +3180,18 @@ async def _do_google_lens(image_source: str) -> str:
                                 await file_input.first.set_input_files(file_path)
                             await page.wait_for_load_state("domcontentloaded", timeout=30000)
                             await page.wait_for_timeout(5000)
-                            await _dismiss_consent(page)
+                            await dismiss_consent(page)
                         else:
                             encoded_url = quote_plus(image_source)
                             url = f"https://lens.google.com/uploadbyurl?url={encoded_url}&hl=en"
                             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                            await _dismiss_consent(page)
+                            await dismiss_consent(page)
                             await page.wait_for_timeout(2000)
                     except Exception:
                         pass
 
-                    if await _is_blocked(page):
-                        await _save_cookies(context)
+                    if await is_blocked(page):
+                        await save_cookies(context)
                         return (
                             f"Google Lens Results for image: {image_source}\n\n"
                             f"Google is currently blocking automated requests (CAPTCHA/rate-limit).\n"
@@ -4184,7 +3370,7 @@ async def _do_google_lens(image_source: str) -> str:
             return f"Google Lens search failed: {e}"
 
         finally:
-            await _save_cookies(context)
+            await save_cookies(context)
             await context.close()
             # Clean up base64 temp file
             if tmp_base64_path:
@@ -4210,14 +3396,12 @@ async def google_lens(image_source: str) -> str:
     Args:
         image_source: A public image URL, local file path, or base64-encoded image data.
     """
-    return await _do_google_lens(image_source)
+    return await do_google_lens(image_source)
 
 
 # ---------------------------------------------------------------------------
 # google_lens_detect (object detection + per-object Lens identification)
 # ---------------------------------------------------------------------------
-
-MAX_OBJECTS = 4
 
 
 def _detect_objects(image_path: str, min_area_ratio: float = 0.02) -> list[dict]:
@@ -4319,7 +3503,7 @@ async def _lens_upload_in_session(page, file_path: str) -> str:
     Navigates to images.google.com, uploads, and extracts results.
     """
     await page.goto("https://images.google.com/?hl=en", wait_until="domcontentloaded", timeout=30000)
-    await _dismiss_consent(page)
+    await dismiss_consent(page)
     await page.wait_for_timeout(1000)
 
     # Click the camera/lens icon
@@ -4337,7 +3521,7 @@ async def _lens_upload_in_session(page, file_path: str) -> str:
     # Wait for results
     await page.wait_for_load_state("domcontentloaded", timeout=30000)
     await page.wait_for_timeout(5000)
-    await _dismiss_consent(page)
+    await dismiss_consent(page)
 
     # Click "Change to English" if needed
     try:
@@ -4345,7 +3529,7 @@ async def _lens_upload_in_session(page, file_path: str) -> str:
         if await eng_link.count() > 0:
             await eng_link.first.click()
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            await _dismiss_consent(page)
+            await dismiss_consent(page)
     except Exception:
         pass
 
@@ -4429,7 +3613,7 @@ async def _lens_upload_in_session(page, file_path: str) -> str:
     return "\n".join(lines)
 
 
-async def _do_google_lens_detect(image_path: str) -> str:
+async def do_google_lens_detect(image_path: str) -> str:
     """Detect objects in an image and identify each via Google Lens."""
     try:
         import cv2
@@ -4460,11 +3644,11 @@ async def _do_google_lens_detect(image_path: str) -> str:
 
         if not crop_files:
             # Fallback: no objects detected, just pass original
-            return await _do_google_lens(file_path)
+            return await do_google_lens(file_path)
 
         # Run Lens on original + each crop in a single browser session
         async with async_playwright() as pw:
-            context = await _launch_browser(pw)
+            context = await launch_browser(pw)
             page = await context.new_page()
 
             results = []
@@ -4531,12 +3715,12 @@ async def google_lens_detect(image_source: str) -> str:
         image_source: Local file path or base64-encoded image data.
     """
     # Handle base64 input
-    if _is_base64_image(image_source):
+    if is_base64_image(image_source):
         os.makedirs(os.path.join(os.path.expanduser("~"), ".cache", "noapi-google-search-mcp"), exist_ok=True)
-        image_source = _save_base64_image(image_source)
+        image_source = save_base64_image(image_source)
     elif image_source.startswith(("http://", "https://")):
         return "google_lens_detect only works with local files. Use google_lens for URLs."
-    return await _do_google_lens_detect(image_source)
+    return await do_google_lens_detect(image_source)
 
 
 # ---------------------------------------------------------------------------
@@ -4628,9 +3812,9 @@ async def ocr_image(image_source: str) -> str:
     # Handle base64 input
     tmp_base64_path = None
     try:
-        if _is_base64_image(image_source):
+        if is_base64_image(image_source):
             os.makedirs(os.path.join(os.path.expanduser("~"), ".cache", "noapi-google-search-mcp"), exist_ok=True)
-            tmp_base64_path = _save_base64_image(image_source)
+            tmp_base64_path = save_base64_image(image_source)
             image_source = tmp_base64_path
 
         file_path = str(Path(image_source).expanduser().resolve())
@@ -4697,19 +3881,6 @@ async def ocr_image(image_source: str) -> str:
 # ---------------------------------------------------------------------------
 # transcribe_video (YouTube/video transcription with timestamps)
 # ---------------------------------------------------------------------------
-
-TRANSCRIBE_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "noapi-google-search-mcp")
-TRANSCRIPT_CACHE_DIR = os.path.join(TRANSCRIBE_CACHE_DIR, "transcripts")
-
-
-def _format_timestamp(seconds: float) -> str:
-    """Format seconds into H:MM:SS or M:SS."""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    if h > 0:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
 
 
 def _transcript_cache_path(url: str, model_size: str) -> str:
@@ -4890,7 +4061,7 @@ async def transcribe_video(
             f"Video Transcript",
             f"Title: {title}",
             f"Channel: {uploader}",
-            f"Duration: {_format_timestamp(duration)}",
+            f"Duration: {format_timestamp(duration)}",
             f"Language: {whisper_result['language']} (confidence: {whisper_result['language_probability']:.0%})",
             f"URL: {url}",
             f"",
@@ -4898,8 +4069,8 @@ async def transcribe_video(
         ]
 
         for seg in segments:
-            start = _format_timestamp(seg["start"])
-            end = _format_timestamp(seg["end"])
+            start = format_timestamp(seg["start"])
+            end = format_timestamp(seg["end"])
             full_lines.append(f"[{start} - {end}] {seg['text']}")
 
         full_lines.append("")
@@ -4928,7 +4099,7 @@ async def transcribe_video(
                 f"Video Transcript (condensed - {len(segments)} segments total)",
                 f"Title: {title}",
                 f"Channel: {uploader}",
-                f"Duration: {_format_timestamp(duration)}",
+                f"Duration: {format_timestamp(duration)}",
                 f"Language: {whisper_result['language']} (confidence: {whisper_result['language_probability']:.0%})",
                 f"URL: {url}",
                 f"",
@@ -4936,8 +4107,8 @@ async def transcribe_video(
             ]
             for seg in segments[:preview_count]:
                 preview_lines.append(
-                    f"[{_format_timestamp(seg['start'])} - "
-                    f"{_format_timestamp(seg['end'])}] {seg['text']}"
+                    f"[{format_timestamp(seg['start'])} - "
+                    f"{format_timestamp(seg['end'])}] {seg['text']}"
                 )
             preview_lines.append(f"")
             preview_lines.append(f"... ({len(segments) - preview_count * 2} more segments) ...")
@@ -4945,8 +4116,8 @@ async def transcribe_video(
             preview_lines.append(f"--- Last {preview_count} segments ---")
             for seg in segments[-preview_count:]:
                 preview_lines.append(
-                    f"[{_format_timestamp(seg['start'])} - "
-                    f"{_format_timestamp(seg['end'])}] {seg['text']}"
+                    f"[{format_timestamp(seg['start'])} - "
+                    f"{format_timestamp(seg['end'])}] {seg['text']}"
                 )
             preview_lines.append("")
             preview_lines.append(
@@ -5054,15 +4225,15 @@ async def search_transcript(
         section_end = segments[end_idx]["end"]
         lines.append(
             f"--- Section {r_idx + 1}: "
-            f"{_format_timestamp(section_start)} - {_format_timestamp(section_end)} "
+            f"{format_timestamp(section_start)} - {format_timestamp(section_end)} "
             f"(start_seconds={section_start:.1f}, end_seconds={section_end:.1f}) ---"
         )
         for i in range(start_idx, end_idx + 1):
             seg = segments[i]
             marker = " >>>" if i in matches else "    "
             lines.append(
-                f"{marker} [{_format_timestamp(seg['start'])} - "
-                f"{_format_timestamp(seg['end'])}] {seg['text']}"
+                f"{marker} [{format_timestamp(seg['start'])} - "
+                f"{format_timestamp(seg['end'])}] {seg['text']}"
             )
         lines.append("")
 
@@ -5077,11 +4248,6 @@ async def search_transcript(
 # ---------------------------------------------------------------------------
 # extract_video_clip (cut a segment from a video by topic)
 # ---------------------------------------------------------------------------
-
-CLIPS_DIR = os.path.join(os.path.expanduser("~"), "clips")
-
-
-VIDEO_CACHE_DIR = os.path.join(TRANSCRIBE_CACHE_DIR, "videos")
 
 
 def _video_cache_path(url: str) -> str:
@@ -5258,8 +4424,8 @@ async def extract_video_clip(
     if output_filename:
         safe_title = re.sub(r'[^\w\s-]', '', output_filename)[:50].strip().replace(' ', '_')
 
-    start_str = _format_timestamp(clip_start).replace(':', '-')
-    end_str = _format_timestamp(clip_end).replace(':', '-')
+    start_str = format_timestamp(clip_start).replace(':', '-')
+    end_str = format_timestamp(clip_end).replace(':', '-')
     out_name = f"{safe_title}_{start_str}_to_{end_str}.mp4"
     out_path = os.path.join(CLIPS_DIR, out_name)
 
@@ -5279,9 +4445,9 @@ async def extract_video_clip(
             f"Video clip extracted successfully!",
             f"",
             f"Source: {title}",
-            f"Segment: {_format_timestamp(clip_start)} - {_format_timestamp(clip_end)} "
-            f"(requested {_format_timestamp(start_seconds)} - {_format_timestamp(end_seconds)} + {buffer_seconds}s buffer)",
-            f"Duration: {_format_timestamp(clip_dur)}",
+            f"Segment: {format_timestamp(clip_start)} - {format_timestamp(clip_end)} "
+            f"(requested {format_timestamp(start_seconds)} - {format_timestamp(end_seconds)} + {buffer_seconds}s buffer)",
+            f"Duration: {format_timestamp(clip_dur)}",
             f"Size: {clip_size / (1024*1024):.1f} MB",
             f"Saved to: {out_path}",
         ]
@@ -5295,13 +4461,11 @@ async def extract_video_clip(
 # visit_page
 # ---------------------------------------------------------------------------
 
-MAX_PAGE_CHARS = 8000
-
 
 async def _fetch_page_text(url: str) -> str:
     """Fetch a URL with headless Chromium and extract readable text."""
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
+        context = await launch_browser(pw)
         page = await context.new_page()
 
         try:
@@ -5442,8 +4606,8 @@ async def transcribe_local(
         "--- Transcript ---",
     ]
     for seg in segments:
-        start = _format_timestamp(seg["start"])
-        end = _format_timestamp(seg["end"])
+        start = format_timestamp(seg["start"])
+        end = format_timestamp(seg["end"])
         full_lines.append(f"[{start} - {end}] {seg['text']}")
 
     full_lines.append("")
@@ -5711,7 +4875,7 @@ async def read_document(
             raw = await asyncio.to_thread(
                 Path(file_path).read_text, "latin-1",
             )
-        text = _strip_html(raw)
+        text = strip_html(raw)
         return f"Document: {filename} ({size_kb:.0f} KB)\n\n{text}"
 
     # --- Plain text formats ---
@@ -5741,7 +4905,7 @@ async def read_document(
 # Email — IMAP fetch (stdlib, works with Gmail/Outlook/Yahoo/any IMAP)
 # ---------------------------------------------------------------------------
 
-_IMAP_SERVERS: dict[str, str] = {
+IMAP_SERVERS: dict[str, str] = {
     "gmail.com": "imap.gmail.com",
     "googlemail.com": "imap.gmail.com",
     "outlook.com": "imap-mail.outlook.com",
@@ -5794,7 +4958,7 @@ async def fetch_emails(
     # Auto-detect IMAP server from email domain
     if not imap_server:
         domain = email_address.split("@")[-1].lower()
-        imap_server = _IMAP_SERVERS.get(domain, "")
+        imap_server = IMAP_SERVERS.get(domain, "")
         if not imap_server:
             return (
                 f"Cannot auto-detect IMAP server for '{domain}'.\n"
@@ -5840,13 +5004,13 @@ async def fetch_emails(
                             if ct == "text/html":
                                 payload = part.get_content()
                                 if isinstance(payload, str):
-                                    body = _strip_html(payload)
+                                    body = strip_html(payload)
                                     break
                 else:
                     payload = msg.get_content()
                     if isinstance(payload, str):
                         ct = msg.get_content_type()
-                        body = _strip_html(payload) if ct == "text/html" else payload
+                        body = strip_html(payload) if ct == "text/html" else payload
 
                 emails.append({
                     "from": str(msg.get("From", "")),
@@ -6533,19 +5697,6 @@ def _init_feeds_db(conn: sqlite3.Connection) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_url_bytes(url: str, timeout: int = 15) -> bytes:
-    """Fetch URL using stdlib urllib (no extra deps)."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
-
-
-def _strip_html(text: str) -> str:
-    """Remove HTML tags from feed content."""
-    if not text:
-        return ""
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).strip()
-
 
 def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
     """Parse RSS 2.0 or Atom feed XML into a flat list of items."""
@@ -6557,7 +5708,7 @@ def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
         items.append({
             "title": (item.findtext("title") or "").strip(),
             "url": (item.findtext("link") or "").strip(),
-            "content": _strip_html(item.findtext("description") or ""),
+            "content": strip_html(item.findtext("description") or ""),
             "published": (item.findtext("pubDate") or "").strip(),
             "author": (
                 item.findtext("{http://purl.org/dc/elements/1.1/}creator")
@@ -6590,7 +5741,7 @@ def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
         items.append({
             "title": (entry.findtext(f"{{{atom}}}title") or "").strip(),
             "url": link_el.get("href", "") if link_el is not None else "",
-            "content": _strip_html(
+            "content": strip_html(
                 content_el.text if content_el is not None and content_el.text else ""
             ),
             "published": (
@@ -6621,7 +5772,7 @@ def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
         items.append({
             "title": (entry.findtext("title") or "").strip(),
             "url": link_el.get("href", "") if link_el is not None else "",
-            "content": _strip_html(
+            "content": strip_html(
                 content_el.text if content_el is not None and content_el.text else ""
             ),
             "published": (
@@ -6712,7 +5863,7 @@ async def _check_source_hackernews(
             "url": s.get(
                 "url", f"https://news.ycombinator.com/item?id={s['id']}"
             ),
-            "content": _strip_html(s.get("text", "")),
+            "content": strip_html(s.get("text", "")),
             "published": (
                 datetime.fromtimestamp(s["time"], tz=timezone.utc).isoformat()
                 if s.get("time") else ""
@@ -6756,7 +5907,7 @@ async def _check_source_arxiv(
     return _parse_rss_atom(data)
 
 
-async def _resolve_yt_channel(identifier: str) -> dict:
+async def resolve_yt_channel(identifier: str) -> dict:
     """Resolve a YouTube handle/URL/ID to {channel_id, name, feed_url}."""
     if re.match(r"^UC[\w-]{22}$", identifier):
         return {
@@ -6882,11 +6033,11 @@ async def _auto_transcribe_youtube(
             transcript_lines = [
                 "Video Transcript",
                 f"Title: {dl_info['title']}",
-                f"Duration: {_format_timestamp(dl_info['duration'])}",
+                f"Duration: {format_timestamp(dl_info['duration'])}",
                 f"Language: {whisper_result['language']}\n",
             ]
             for seg in segments:
-                ts = _format_timestamp(seg["start"])
+                ts = format_timestamp(seg["start"])
                 transcript_lines.append(f"[{ts}] {seg['text']}")
             full_transcript = "\n".join(transcript_lines)
 
@@ -6945,7 +6096,7 @@ async def _check_source_podcast(feed_url: str) -> list[dict]:
         items.append({
             "title": (item.findtext("title") or "").strip(),
             "url": (item.findtext("link") or audio_url).strip(),
-            "content": _strip_html(item.findtext("description") or ""),
+            "content": strip_html(item.findtext("description") or ""),
             "published": (item.findtext("pubDate") or "").strip(),
             "author": (
                 item.findtext(f"{{{itunes}}}author")
@@ -6962,7 +6113,7 @@ async def _check_source_twitter(handle: str) -> list[dict]:
     url = f"https://x.com/{handle}"
 
     async with async_playwright() as pw:
-        context = await _launch_browser(pw)
+        context = await launch_browser(pw)
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -7144,7 +6295,7 @@ async def subscribe(
 
     elif source_type == "youtube":
         try:
-            info = await _resolve_yt_channel(identifier)
+            info = await resolve_yt_channel(identifier)
             identifier = info["channel_id"]
             feed_url = info["feed_url"]
             display_name = display_name or info["name"]

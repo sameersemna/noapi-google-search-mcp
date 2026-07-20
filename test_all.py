@@ -35,7 +35,6 @@ os.environ["FEEDS_DB_PATH"] = "/tmp/test_all_feeds.db"
 from google_search_mcp.server import (
     _auto_transcribe_youtube,
     _get_feeds_db,
-    _strip_html,
     _parse_rss_atom,
     _store_items,
     _check_source_rss,
@@ -46,9 +45,6 @@ from google_search_mcp.server import (
     _check_source_youtube,
     _check_source_podcast,
     _transcript_cache_path,
-    _IMAP_SERVERS,
-    TRANSCRIPT_CACHE_DIR,
-    TRANSCRIBE_CACHE_DIR,
     subscribe,
     unsubscribe,
     list_subscriptions,
@@ -58,6 +54,14 @@ from google_search_mcp.server import (
     transcribe_local,
     convert_media,
     read_document,
+)
+from google_search_mcp.config import (
+    IMAP_SERVERS,
+    TRANSCRIPT_CACHE_DIR,
+    TRANSCRIBE_CACHE_DIR,
+)
+from google_search_mcp.utils.text import strip_html as _strip_html
+from google_search_mcp.server import (
     fetch_emails,
     paste_text,
     shorten_url,
@@ -570,9 +574,9 @@ async def test_fetch_emails():
     log("    Testing email fetch:")
 
     # IMAP server auto-detection
-    check("Gmail detected", _IMAP_SERVERS["gmail.com"] == "imap.gmail.com")
-    check("Outlook detected", _IMAP_SERVERS["outlook.com"] == "imap-mail.outlook.com")
-    check("Yahoo detected", _IMAP_SERVERS["yahoo.com"] == "imap.mail.yahoo.com")
+    check("Gmail detected", IMAP_SERVERS["gmail.com"] == "imap.gmail.com")
+    check("Outlook detected", IMAP_SERVERS["outlook.com"] == "imap-mail.outlook.com")
+    check("Yahoo detected", IMAP_SERVERS["yahoo.com"] == "imap.mail.yahoo.com")
 
     # Unknown domain
     r = await fetch_emails("user@unknowndomain.xyz", "pass123")

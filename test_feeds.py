@@ -20,8 +20,6 @@ import textwrap
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from google_search_mcp.server import (
-    FEEDS_DB_PATH,
-    PRESET_NEWS_FEEDS,
     _check_source_arxiv,
     _check_source_github,
     _check_source_hackernews,
@@ -29,11 +27,9 @@ from google_search_mcp.server import (
     _check_source_reddit,
     _check_source_rss,
     _check_source_youtube,
-    _fetch_url_bytes,
     _get_feeds_db,
     _parse_rss_atom,
     _store_items,
-    _strip_html,
     check_feeds,
     get_feed_items,
     list_subscriptions,
@@ -41,6 +37,12 @@ from google_search_mcp.server import (
     subscribe,
     unsubscribe,
 )
+from google_search_mcp.config import (
+    FEEDS_DB_PATH,
+    PRESET_NEWS_FEEDS,
+)
+from google_search_mcp.utils.network import fetch_url_bytes
+from google_search_mcp.utils.text import strip_html as _strip_html
 
 # ---------------------------------------------------------------------------
 # Test infrastructure
