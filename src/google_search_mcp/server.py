@@ -139,8 +139,17 @@ TIME_RANGE_MAP = {
 
 
 async def _launch_browser(pw, viewport=None):
-    """Launch a headless Chromium browser with stealth settings to avoid bot detection."""
-    browser = await pw.chromium.launch(
+    """Launch a headless Chromium browser with stealth settings to avoid bot detection.
+
+    Uses a persistent user data directory (~/.config/google-mcp-browser/) so that
+    browser fingerprint, localStorage, and session data remain consistent across
+    restarts — this helps Google see a returning browser profile.
+    """
+    user_data_dir = os.path.join(os.path.expanduser("~"), ".config", "google-mcp-browser")
+    os.makedirs(user_data_dir, exist_ok=True)
+
+    browser = await pw.chromium.launch_persistent_context(
+        user_data_dir,
         headless=True,
         args=[
             "--disable-blink-features=AutomationControlled",
@@ -151,19 +160,18 @@ async def _launch_browser(pw, viewport=None):
             "--enable-webgl",
             "--use-gl=desktop",
         ],
-    )
-    vp = viewport or {"width": 1280, "height": 800}
-    context = await browser.new_context(
         user_agent=USER_AGENT,
-        viewport=vp,
+        viewport=viewport or {"width": 1280, "height": 800},
         locale="en-US",
     )
     # Inject stealth patches before any page loads
-    await context.add_init_script(STEALTH_JS)
-    return browser, context
+    await browser.add_init_script(STEALTH_JS)
+    return browser
 
 
 COOKIE_PATH = os.path.join(os.path.expanduser("~"), ".google_mcp_cookies.json")
+# COOKIE_DIR = os.path.join(os.path.expanduser("~"), ".config", "google-mcp-cookies")
+COOKIE_DIR = os.path.join(os.path.expanduser("."), "cookies")
 
 
 async def _human_delay(page):
@@ -181,16 +189,174 @@ async def _save_cookies(context):
         pass
 
 
-async def _load_cookies(context):
-    """Load previously saved cookies into the browser context."""
+def _parse_netscape_cookie_file(filepath: str) -> list[dict]:
+    """Parse a Netscape-format cookie file (exported by browser extensions).
+
+    This is the standard format produced by:
+      - 'Get cookies.txt' (Chrome extension)
+      - 'cookies.txt' (Firefox export)
+      - 'EditThisCookie' export
+      - curl's --cookie-jar output
+
+    Format (tab-separated):
+      domain  domain_flag  path  secure  expiry_epoch  name  value
+
+    Returns a list of dicts compatible with Playwright's add_cookies().
+    """
+    cookies = []
     try:
+        with open(filepath, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain, _, path, secure_str, expiry_str, name, value = parts[:7]
+                # Convert secure flag
+                secure = secure_str.lower() == "true"
+                # Convert expiry to int (0 = session cookie, skip those)
+                try:
+                    expiry = int(expiry_str)
+                except ValueError:
+                    expiry = 0
+                # Build Playwright-compatible cookie dict
+                cookie = {
+                    "name": name,
+                    "value": value,
+                    "domain": domain,
+                    "path": path,
+                    "secure": secure,
+                    "httpOnly": False,
+                    "sameSite": "Lax",
+                }
+                if expiry > 0:
+                    cookie["expires"] = expiry
+                cookies.append(cookie)
+    except Exception:
+        return []
+    return cookies
+
+
+async def _load_cookies(context):
+    """Load cookies into the browser context.
+
+    Priority order (first found wins per cookie):
+      1. ~/.config/google-mcp-cookies/  — any .txt file in Netscape format
+      2. ~/.google_mcp_cookies.json     — auto-saved JSON from previous sessions
+
+    This lets you export cookies from your real browser and drop them in
+    the cookies folder for instant Google access without CAPTCHAs.
+    """
+    loaded = 0
+    try:
+        # Priority 1: user-provided Netscape cookie files
+        if os.path.isdir(COOKIE_DIR):
+            for fname in sorted(os.listdir(COOKIE_DIR)):
+                if fname.endswith(".txt"):
+                    fpath = os.path.join(COOKIE_DIR, fname)
+                    cookies = _parse_netscape_cookie_file(fpath)
+                    if cookies:
+                        await context.add_cookies(cookies)
+                        loaded += len(cookies)
+    except Exception:
+        pass
+
+    try:
+        # Priority 2: auto-saved JSON cookies (from previous sessions)
         if os.path.isfile(COOKIE_PATH):
             with open(COOKIE_PATH, "r") as f:
                 cookies = json.load(f)
             if cookies:
                 await context.add_cookies(cookies)
+                loaded += len(cookies)
     except Exception:
         pass
+
+    return loaded
+
+
+@mcp.tool()
+async def check_cookies() -> str:
+    """Check the status of Google cookies loaded from your browser export.
+
+    This tool tells you:
+      - Whether you have cookie files in ~/.config/google-mcp-cookies/
+      - How many cookies are loaded from each source
+      - Which Google domains are covered (e.g. .google.com, .google.co.uk)
+      - Whether auto-saved session cookies exist
+
+    Use this to verify your cookie setup is working before making search calls.
+
+    Sample prompts that trigger this tool:
+        - "Check my Google cookies"
+        - "Are my cookies working?"
+        - "Verify cookie setup"
+        - "Do I have valid Google cookies?"
+
+    Returns:
+        A detailed report of cookie status.
+    """
+    lines = ["=== Google MCP Cookie Status ===\n"]
+
+    # Check user-provided Netscape cookie files
+    user_files = []
+    if os.path.isdir(COOKIE_DIR):
+        for fname in sorted(os.listdir(COOKIE_DIR)):
+            if fname.endswith(".txt"):
+                fpath = os.path.join(COOKIE_DIR, fname)
+                size = os.path.getsize(fpath)
+                user_files.append((fname, size))
+    if user_files:
+        lines.append(f"User cookie files ({COOKIE_DIR}):")
+        for name, size in user_files:
+            lines.append(f"  ✅ {name} ({size:,} bytes)")
+        # Parse and show domain coverage
+        all_domains = set()
+        for name, _ in user_files:
+            fpath = os.path.join(COOKIE_DIR, name)
+            cookies = _parse_netscape_cookie_file(fpath)
+            for c in cookies:
+                d = c.get("domain", "")
+                if "google" in d:
+                    all_domains.add(d)
+        if all_domains:
+            lines.append(f"\n  Google domains covered: {len(all_domains)}")
+            for d in sorted(all_domains):
+                lines.append(f"    - {d}")
+        else:
+            lines.append("\n  ⚠️  No Google domains found in cookie files!")
+            lines.append("     Make sure you exported cookies while logged into Google.")
+    else:
+        lines.append(f"User cookie files ({COOKIE_DIR}):")
+        lines.append("  ❌ No .txt cookie files found.")
+        lines.append(f"  Create the directory and add your exported cookies:")
+        lines.append(f"  mkdir -p {COOKIE_DIR}")
+        lines.append(f"  # Then copy your cookies.txt file there")
+
+    # Check auto-saved session cookies
+    if os.path.isfile(COOKIE_PATH):
+        try:
+            with open(COOKIE_PATH, "r") as f:
+                session_cookies = json.load(f)
+            lines.append(f"\nAuto-saved session cookies ({COOKIE_PATH}):")
+            lines.append(f"  ✅ {len(session_cookies)} cookies from previous sessions")
+            google_session = [c for c in session_cookies if "google" in c.get("domain", "")]
+            if google_session:
+                lines.append(f"  Google-specific: {len(google_session)} cookies")
+        except Exception:
+            lines.append(f"\nAuto-saved session cookies: ⚠️  File exists but could not be read")
+    else:
+        lines.append(f"\nAuto-saved session cookies: ℹ️  None yet (will be created after first search)")
+
+    lines.append("\n=== Tips ===")
+    lines.append("1. Export cookies from Chrome with 'Get cookies.txt' extension")
+    lines.append("2. Save the file to ~/.config/google-mcp-cookies/cookies.txt")
+    lines.append("3. Run check_cookies again to verify")
+    lines.append("4. Then try google_search — Google will see you as a logged-in user")
+
+    return "\n".join(lines)
 
 
 async def _is_blocked(page) -> bool:
@@ -628,6 +794,79 @@ def _format_fallback_results(query: str, provider: str, results: list[dict]) -> 
     return "\n".join(lines)
 
 
+def _fallback_duckduckgo_news(query: str, num_results: int = 5) -> list[dict]:
+    """Fallback news search using DuckDuckGo HTML when Google News is blocked."""
+    try:
+        ddg_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}&t=h_&ia=news"
+        req = urllib.request.Request(ddg_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    results = []
+    seen = set()
+    # DuckDuckGo news results use the same result__a class but with news snippets
+    matches = re.findall(
+        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for href, title_html in matches:
+        if len(results) >= num_results:
+            break
+        parsed_href = href
+        if "duckduckgo.com/l/?" in href:
+            try:
+                q = parse_qs(urlparse(href).query)
+                parsed_href = unquote((q.get("uddg", [""])[0] or "").strip())
+            except Exception:
+                parsed_href = href
+        if not parsed_href.startswith("http"):
+            continue
+        title = re.sub(r"<[^>]+>", "", title_html)
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title:
+            continue
+        key = (title.lower(), parsed_href)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({"title": title, "url": parsed_href, "source": "DuckDuckGo News", "time": "", "snippet": ""})
+    return results
+
+
+def _fallback_duckduckgo_images(query: str, num_results: int = 5) -> list[dict]:
+    """Fallback image search using DuckDuckGo HTML when Google Images is blocked."""
+    try:
+        ddg_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}&t=h_&ia=images"
+        req = urllib.request.Request(ddg_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    results = []
+    seen = set()
+    # DuckDuckGo image results: look for img tags with data-src
+    img_matches = re.findall(
+        r'<img[^>]*class="[^"]*tile__img[^"]*"[^>]*src="([^"]+)"[^>]*alt="([^"]*)"',
+        html,
+        flags=re.IGNORECASE,
+    )
+    for src, alt in img_matches:
+        if len(results) >= num_results:
+            break
+        if not src.startswith("http"):
+            continue
+        key = src.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({"title": alt or "Image", "thumbnail": src, "url": src})
+    return results
+
+
 # ---------------------------------------------------------------------------
 # google_search
 # ---------------------------------------------------------------------------
@@ -664,7 +903,7 @@ async def _do_google_search(
         url += f"&tbs={TIME_RANGE_MAP[time_range]}"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
         await _load_cookies(context)
         browser_page = await context.new_page()
 
@@ -850,7 +1089,7 @@ async def _do_google_search(
 
         finally:
             await _save_cookies(context)
-            await browser.close()
+            await context.close()
 
 
 @mcp.tool()
@@ -906,7 +1145,7 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=nws&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
         await _load_cookies(context)
         page = await context.new_page()
 
@@ -917,8 +1156,35 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
             if await _is_blocked(page):
                 solved = await _try_solve_captcha(page)
                 if not solved:
-                    await _save_cookies(context)
-                    return []
+                    # Warm-up retry: open Google home first, then re-run query
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        # Try DuckDuckGo fallback for news
+                        ddg_news = _fallback_duckduckgo_news(query, num_results)
+                        if ddg_news:
+                            content = [f"Google News blocked by bot detection. Showing fallback results (DuckDuckGo News):\n"]
+                            content.append(f"News Results for: {query}\n")
+                            for i, r in enumerate(ddg_news[:num_results], 1):
+                                desc = f"{i}. {r['title']}"
+                                desc += f"\n   URL: {r['url']}"
+                                if r.get("source"):
+                                    desc += f"\n   Source: {r['source']}"
+                                content.append(desc)
+                            return content
+                        return [f"Google News blocked by bot detection for: {query}\nTry again later or use google_search with site:news.google.com"]
 
             await _wait_for_google_results_ready(page, timeout_ms=15000)
 
@@ -926,16 +1192,18 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
                 """
                 (numResults) => {
                     const results = [];
+                    // Primary: modern Google News containers
                     const containers = document.querySelectorAll(
-                        'div#search div.SoaBEf, div#search div.g, #rso div.SoaBEf, #rso div.g, div.SoaBEf, div.g'
+                        'div#search div.SoaBEf, div#search div.g, #rso div.SoaBEf, #rso div.g, div.SoaBEf, div.g, ' +
+                        'div[data-sokoban-container], div.Ww4FFb, div.vY6njf, div.dURjMd'
                     );
                     for (const el of containers) {
                         if (results.length >= numResults) break;
                         const linkEl = el.querySelector('a[href^="http"]');
-                        const titleEl = el.querySelector('div[role="heading"], h3');
-                        const sourceEl = el.querySelector('.NUnG9d, .CEMjEf, .UPmit');
-                        const timeEl = el.querySelector('.OSrXXb, .WG9SHc, .ZE0LJd span, time, [datetime]');
-                        const snippetEl = el.querySelector('.GI74Re, .Y3v8qd, div.VwiC3b');
+                        const titleEl = el.querySelector('div[role="heading"], h3, a.Ww4FFb, a.JheGif');
+                        const sourceEl = el.querySelector('.NUnG9d, .CEMjEf, .UPmit, .Y3v8qd, .gH_JQd');
+                        const timeEl = el.querySelector('.OSrXXb, .WG9SHc, .ZE0LJd span, time, [datetime], .LfYrUe');
+                        const snippetEl = el.querySelector('.GI74Re, .Y3v8qd, div.VwiC3b, .f5cPye');
                         if (linkEl && titleEl) {
                             // Extract article thumbnail
                             let thumbnail = '';
@@ -957,11 +1225,12 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
                             });
                         }
                     }
+                    // Fallback: any h3 + link in the search area
                     if (results.length === 0) {
                         const allLinks = document.querySelectorAll('#search a[href^="http"], #rso a[href^="http"], a[href^="http"]');
                         for (const a of allLinks) {
                             if (results.length >= numResults) break;
-                            const heading = a.querySelector('div[role="heading"], h3');
+                            const heading = a.querySelector('div[role="heading"], h3, span[role="heading"]');
                             if (heading) {
                                 results.push({
                                     title: heading.innerText.trim(),
@@ -971,6 +1240,14 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
                             }
                         }
                     }
+                    // Last resort: raw page text
+                    if (results.length === 0) {
+                        const searchArea = document.querySelector('#search, #rso, [role="main"]');
+                        if (searchArea) {
+                            const text = searchArea.innerText.substring(0, 3000);
+                            results.push({ title: 'Raw page content', url: '', source: '', time: '', snippet: text, raw_text: true });
+                        }
+                    }
                     return results;
                 }
                 """,
@@ -978,7 +1255,11 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
             )
 
             if not results:
-                return f"No news results found for: {query}"
+                return [f"No news results found for: {query}"]
+
+            # Check if we got raw text fallback
+            if results[0].get("raw_text"):
+                return [f"Google News Results for: {query}\n\n(Could not extract structured results. Raw page content:)\n{results[0]['snippet']}"]
 
             # Download article thumbnail images
             import base64 as b64mod
@@ -1043,10 +1324,11 @@ async def _do_google_news(query: str, num_results: int = 5) -> list:
             return content
 
         except Exception as e:
-            return f"News search failed: {e}"
+            return [f"News search failed: {e}"]
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -1078,7 +1360,7 @@ async def _do_google_scholar(query: str, num_results: int = 5) -> str:
     url = f"https://scholar.google.com/scholar?q={encoded_query}&hl=en&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
         page = await context.new_page()
 
         try:
@@ -1147,7 +1429,7 @@ async def _do_google_scholar(query: str, num_results: int = 5) -> str:
             return f"Scholar search failed: {e}"
 
         finally:
-            await browser.close()
+            await context.close()
 
 
 @mcp.tool()
@@ -1197,12 +1479,46 @@ async def google_images(query: str, num_results: int = 5) -> list:
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=isch"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await _dismiss_consent(page)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        # Try DuckDuckGo fallback for images
+                        ddg_imgs = _fallback_duckduckgo_images(query, num_results)
+                        if ddg_imgs:
+                            content = [f"Google Images blocked by bot detection. Showing fallback results (DuckDuckGo Images):\n"]
+                            content.append(f"Image Results for: {query}\n")
+                            for i, r in enumerate(ddg_imgs[:num_results], 1):
+                                desc = f"{i}. {r.get('title', 'Image')}"
+                                if r.get("url"):
+                                    desc += f"\n   URL: {r['url']}"
+                                content.append(desc)
+                            return content
+                        return [f"Google Images blocked by bot detection for: {query}\nTry again later or use a different query."]
+
             await page.wait_for_timeout(2000)
 
             results = await page.evaluate(
@@ -1210,7 +1526,11 @@ async def google_images(query: str, num_results: int = 5) -> list:
                 (numResults) => {
                     const results = [];
 
-                    const imgLinks = document.querySelectorAll('div[data-id] a[href^="/imgres"], a[jsname]');
+                    // Primary: modern Google Images result links
+                    const imgLinks = document.querySelectorAll(
+                        'div[data-id] a[href^="/imgres"], a[jsname], ' +
+                        'div[data-ri] a, div.isv-r a, a[jsaction*="click"]'
+                    );
                     for (const a of imgLinks) {
                         if (results.length >= numResults) break;
 
@@ -1234,16 +1554,30 @@ async def google_images(query: str, num_results: int = 5) -> list:
                         });
                     }
 
+                    // Fallback: any visible image in the search results area
                     if (results.length === 0) {
-                        const allImgs = document.querySelectorAll('#search img[src^="http"], #islrg img[src^="http"]');
+                        const allImgs = document.querySelectorAll(
+                            '#search img[src^="http"], #islrg img[src^="http"], ' +
+                            '#search img[data-src^="http"], #islrg img[data-src^="http"], ' +
+                            'div[data-ri] img[src^="http"]'
+                        );
                         for (const img of allImgs) {
                             if (results.length >= numResults) break;
                             if (img.width < 50 || img.height < 50) continue;
                             results.push({
                                 title: img.alt || '',
-                                thumbnail: img.src,
-                                url: img.src,
+                                thumbnail: img.src || img.dataset.src || '',
+                                url: img.src || img.dataset.src || '',
                             });
+                        }
+                    }
+
+                    // Last resort: raw page text
+                    if (results.length === 0) {
+                        const searchArea = document.querySelector('#search, #islrg, [role="main"]');
+                        if (searchArea) {
+                            const text = searchArea.innerText.substring(0, 3000);
+                            results.push({ title: 'Raw page content', url: '', thumbnail: '', raw_text: true, snippet: text });
                         }
                     }
 
@@ -1254,7 +1588,11 @@ async def google_images(query: str, num_results: int = 5) -> list:
             )
 
             if not results:
-                return f"No image results found for: {query}"
+                return [f"No image results found for: {query}"]
+
+            # Check if we got raw text fallback
+            if results[0].get("raw_text"):
+                return [f"Google Image Results for: {query}\n\n(Could not extract structured results. Raw page content:)\n{results[0]['snippet']}"]
 
             # Download full-size images for inline display (fall back to thumbnail)
             for r in results[:num_results]:
@@ -1301,10 +1639,11 @@ async def google_images(query: str, num_results: int = 5) -> list:
             return content
 
         except Exception as e:
-            return f"Image search failed: {e}"
+            return [f"Image search failed: {e}"]
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1317,11 +1656,39 @@ async def _do_google_trends(query: str) -> str:
     url = f"https://trends.google.com/trends/explore?q={encoded_query}&hl=en"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    # Warm-up retry: open Google home first, then re-run query
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return (
+                            f"Google Trends for: {query}\n\n"
+                            f"Google Trends is currently rate-limiting this request (HTTP 429).\n"
+                            f"Try again in a few minutes, or visit the page directly:\n"
+                            f"https://trends.google.com/trends/explore?q={encoded_query}"
+                        )
+
             # Trends takes longer to load its widgets
             await page.wait_for_timeout(5000)
 
@@ -1409,7 +1776,8 @@ async def _do_google_trends(query: str) -> str:
             return f"Trends lookup failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -1439,7 +1807,7 @@ async def _do_google_maps(query: str, num_results: int = 5) -> list:
     url = f"https://www.google.com/maps/search/{encoded_query}/?hl=en"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw, viewport={"width": 1400, "height": 900})
+        context = await _launch_browser(pw, viewport={"width": 1400, "height": 900})
         page = await context.new_page()
 
         try:
@@ -1647,7 +2015,7 @@ async def _do_google_maps(query: str, num_results: int = 5) -> list:
             return [f"Maps search failed: {e}"]
 
         finally:
-            await browser.close()
+            await context.close()
 
 
 @mcp.tool()
@@ -1690,7 +2058,7 @@ async def _do_google_maps_directions(
     )
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw, viewport={"width": 1400, "height": 900})
+        context = await _launch_browser(pw, viewport={"width": 1400, "height": 900})
         page = await context.new_page()
 
         try:
@@ -1819,7 +2187,7 @@ async def _do_google_maps_directions(
             return [f"Directions lookup failed: {e}"]
 
         finally:
-            await browser.close()
+            await context.close()
 
 
 @mcp.tool()
@@ -1855,56 +2223,69 @@ async def google_maps_directions(
 async def _do_google_finance(query: str) -> str:
     """Search Google Finance for stock/market data."""
     encoded_query = quote_plus(query)
-    url = f"https://www.google.com/finance/quote/{encoded_query}"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
-            # First try direct quote URL
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # Try search-based approach first (more reliable for simple tickers)
+            search_url = f"https://www.google.com/search?q={encoded_query}+stock+price&hl=en"
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
             await _dismiss_consent(page)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return f"Google Finance blocked by bot detection for: {query}\nTry again later."
+
             await page.wait_for_timeout(2000)
 
             data = await page.evaluate(
                 """
                 () => {
                     const data = {};
+                    const priceEl = document.querySelector(
+                        '[data-attrid*="Price"], .YMlKec, .kCrYT .IsqQVc, ' +
+                        '[data-last-price], .fxKbKc, .kf1m0'
+                    );
+                    data.price = priceEl ? priceEl.innerText.trim() : '';
 
-                    // Price - use data attribute (most reliable)
-                    const dataEl = document.querySelector('[data-last-price]');
-                    if (dataEl) {
-                        data.price = dataEl.getAttribute('data-last-price');
-                    }
+                    const nameEl = document.querySelector(
+                        '.oPhL2e .PZPZlf, [data-attrid*="title"], .zzDege'
+                    );
+                    data.name = nameEl ? nameEl.innerText.trim() : '';
 
-                    // Currency and exchange from data attributes
+                    const changeEl = document.querySelector(
+                        '[data-attrid*="change"], .JwB6zf, .rPF6Lc'
+                    );
+                    data.change = changeEl ? changeEl.innerText.trim() : '';
+
+                    // Currency and exchange
                     const currencyEl = document.querySelector('[data-currency-code]');
                     data.currency = currencyEl ? currencyEl.getAttribute('data-currency-code') : 'USD';
 
                     const exchangeEl = document.querySelector('[data-exchange]');
                     data.exchange = exchangeEl ? exchangeEl.getAttribute('data-exchange') : '';
 
-                    // Displayed price with currency symbol
-                    const displayEl = document.querySelector('.fxKbKc, .kf1m0');
-                    data.display_price = displayEl ? displayEl.innerText.trim() : '';
-
-                    // Change percentage and absolute
-                    const rPF6Lc = document.querySelector('.rPF6Lc');
-                    if (rPF6Lc) {
-                        const text = rPF6Lc.innerText.trim();
-                        const lines = text.split('\\n');
-                        if (lines.length >= 2) {
-                            data.change_pct = lines[1] ? lines[1].trim() : '';
-                            data.change_abs = lines[2] ? lines[2].trim() : '';
-                        }
-                    }
-
-                    // Company name
-                    const nameEl = document.querySelector('.zzDege');
-                    data.name = nameEl ? nameEl.innerText.trim() : '';
-
-                    // Key stats - use first line only (labels include tooltip descriptions)
+                    // Key stats
                     const stats = {};
                     const statRows = document.querySelectorAll('.gyFHrc .P6K39c, .eYanAe .P6K39c, table.slpEwd tr');
                     for (const row of statRows) {
@@ -1918,9 +2299,9 @@ async def _do_google_finance(query: str) -> str:
                     }
                     data.stats = stats;
 
-                    // About/description
-                    const aboutEl = document.querySelector('.bLLb2d, .Yfwt5');
-                    data.about = aboutEl ? aboutEl.innerText.trim().substring(0, 500) : '';
+                    // Get the knowledge panel text as fallback
+                    const panel = document.querySelector('.kp-wholepage, .knowledge-panel, .f5cPye');
+                    data.panel_text = panel ? panel.innerText.substring(0, 1500) : '';
 
                     return data;
                 }
@@ -1928,27 +2309,58 @@ async def _do_google_finance(query: str) -> str:
             )
 
             if not data.get("price") and not data.get("name"):
-                # Fallback: try Google search for finance info
-                search_url = f"https://www.google.com/search?q={encoded_query}+stock+price&hl=en"
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                # Fallback: try direct finance URL
+                direct_url = f"https://www.google.com/finance/quote/{encoded_query}"
+                await page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)
 
                 data = await page.evaluate(
                     """
                     () => {
                         const data = {};
-                        const priceEl = document.querySelector('[data-attrid*="Price"], .YMlKec, .kCrYT .IsqQVc');
-                        data.price = priceEl ? priceEl.innerText.trim() : '';
 
-                        const nameEl = document.querySelector('.oPhL2e .PZPZlf, [data-attrid*="title"]');
+                        const dataEl = document.querySelector('[data-last-price]');
+                        if (dataEl) {
+                            data.price = dataEl.getAttribute('data-last-price');
+                        }
+
+                        const currencyEl = document.querySelector('[data-currency-code]');
+                        data.currency = currencyEl ? currencyEl.getAttribute('data-currency-code') : 'USD';
+
+                        const exchangeEl = document.querySelector('[data-exchange]');
+                        data.exchange = exchangeEl ? exchangeEl.getAttribute('data-exchange') : '';
+
+                        const displayEl = document.querySelector('.fxKbKc, .kf1m0');
+                        data.display_price = displayEl ? displayEl.innerText.trim() : '';
+
+                        const nameEl = document.querySelector('.zzDege');
                         data.name = nameEl ? nameEl.innerText.trim() : '';
 
-                        const changeEl = document.querySelector('[data-attrid*="change"], .JwB6zf');
-                        data.change = changeEl ? changeEl.innerText.trim() : '';
+                        const rPF6Lc = document.querySelector('.rPF6Lc');
+                        if (rPF6Lc) {
+                            const text = rPF6Lc.innerText.trim();
+                            const lines = text.split('\\n');
+                            if (lines.length >= 2) {
+                                data.change_pct = lines[1] ? lines[1].trim() : '';
+                                data.change_abs = lines[2] ? lines[2].trim() : '';
+                            }
+                        }
 
-                        // Get the knowledge panel text as fallback
-                        const panel = document.querySelector('.kp-wholepage, .knowledge-panel');
-                        data.panel_text = panel ? panel.innerText.substring(0, 1500) : '';
+                        const stats = {};
+                        const statRows = document.querySelectorAll('.gyFHrc .P6K39c, .eYanAe .P6K39c, table.slpEwd tr');
+                        for (const row of statRows) {
+                            const label = row.querySelector('.mfs7Fc, td:first-child');
+                            const value = row.querySelector('.QXDnM, td:last-child');
+                            if (label && value) {
+                                const k = label.innerText.trim().split('\\n')[0];
+                                const v = value.innerText.trim().split('\\n')[0];
+                                if (k && v) stats[k] = v;
+                            }
+                        }
+                        data.stats = stats;
+
+                        const aboutEl = document.querySelector('.bLLb2d, .Yfwt5');
+                        data.about = aboutEl ? aboutEl.innerText.trim().substring(0, 500) : '';
 
                         return data;
                     }
@@ -1981,7 +2393,10 @@ async def _do_google_finance(query: str) -> str:
             if data.get("about"):
                 lines.append(f"\nAbout: {data['about']}")
 
-            if not data.get("price"):
+            if data.get("panel_text") and not data.get("price"):
+                lines.append(f"\n{data['panel_text']}")
+
+            if not data.get("price") and not data.get("panel_text"):
                 lines.append("Could not find financial data. Try a stock ticker like 'AAPL:NASDAQ' or 'TSLA:NASDAQ'.")
 
             return "\n".join(lines)
@@ -1990,7 +2405,8 @@ async def _do_google_finance(query: str) -> str:
             return f"Finance lookup failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -2020,12 +2436,35 @@ async def _do_google_weather(location: str) -> str:
     url = f"https://www.google.com/search?q={encoded_location}&hl=en"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await _dismiss_consent(page)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return f"Weather lookup blocked by bot detection for: {location}\nTry again later."
+
             await page.wait_for_timeout(2000)
 
             data = await page.evaluate(
@@ -2033,34 +2472,28 @@ async def _do_google_weather(location: str) -> str:
                 () => {
                     const data = {};
 
-                    // Location
+                    // Primary: Google's weather widget IDs
                     const locEl = document.querySelector('#wob_loc');
                     data.location = locEl ? locEl.innerText.trim() : '';
 
-                    // Current temperature
                     const tempEl = document.querySelector('#wob_tm');
                     data.temp_c = tempEl ? tempEl.innerText.trim() : '';
 
                     const tempFEl = document.querySelector('#wob_ttm');
                     data.temp_f = tempFEl ? tempFEl.innerText.trim() : '';
 
-                    // Condition (e.g. "Sunny", "Partly cloudy")
                     const condEl = document.querySelector('#wob_dc');
                     data.condition = condEl ? condEl.innerText.trim() : '';
 
-                    // Precipitation
                     const precipEl = document.querySelector('#wob_pp');
                     data.precipitation = precipEl ? precipEl.innerText.trim() : '';
 
-                    // Humidity
                     const humidEl = document.querySelector('#wob_hm');
                     data.humidity = humidEl ? humidEl.innerText.trim() : '';
 
-                    // Wind
                     const windEl = document.querySelector('#wob_ws');
                     data.wind = windEl ? windEl.innerText.trim() : '';
 
-                    // Day/time
                     const timeEl = document.querySelector('#wob_dts');
                     data.time = timeEl ? timeEl.innerText.trim() : '';
 
@@ -2069,18 +2502,13 @@ async def _do_google_weather(location: str) -> str:
                     const forecastDays = document.querySelectorAll('.wob_df');
                     for (const day of forecastDays) {
                         const dayName = day.querySelector('.Z1VzSb, .QrNVmd');
-                        const highEl = day.querySelector('.wob_t:first-of-type .wob_t');
-                        const lowEl = day.querySelector('.wob_t:last-of-type .wob_t');
-                        const iconEl = day.querySelector('img');
-
-                        // Get high and low from the spans
                         const temps = day.querySelectorAll('.wob_t span:first-child');
                         let high = '', low = '';
                         if (temps.length >= 2) {
                             high = temps[0].innerText.trim();
                             low = temps[1].innerText.trim();
                         }
-
+                        const iconEl = day.querySelector('img');
                         if (dayName) {
                             data.forecast.push({
                                 day: dayName.innerText.trim(),
@@ -2091,10 +2519,36 @@ async def _do_google_weather(location: str) -> str:
                         }
                     }
 
+                    // Fallback: try alternative weather widget selectors
+                    if (!data.temp_c && !data.location) {
+                        const weatherWidget = document.querySelector(
+                            'div#wob_wrap, [data-attrid*="weather"], .wob_wrap, ' +
+                            '.kp-wholepage, .liYKde'
+                        );
+                        if (weatherWidget) {
+                            data.raw_text = weatherWidget.innerText.substring(0, 2000);
+                        }
+                    }
+
+                    // Last resort: search page text
+                    if (!data.temp_c && !data.location && !data.raw_text) {
+                        const searchArea = document.querySelector('#search, #rso, [role="main"]');
+                        if (searchArea) {
+                            const text = searchArea.innerText.substring(0, 2000);
+                            if (text.toLowerCase().includes('°') || text.toLowerCase().includes('weather')) {
+                                data.raw_text = text;
+                            }
+                        }
+                    }
+
                     return data;
                 }
                 """
             )
+
+            if data.get("raw_text") and not data.get("temp_c"):
+                raw = re.sub(r'\n{3,}', '\n\n', data["raw_text"]).strip()
+                return f"Weather for: {location}\n\n(Could not extract structured weather data. Raw page content:)\n{raw}"
 
             if not data.get("temp_c") and not data.get("location"):
                 return f"Could not find weather data for: {location}"
@@ -2140,7 +2594,8 @@ async def _do_google_weather(location: str) -> str:
             return f"Weather lookup failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -2170,12 +2625,35 @@ async def _do_google_shopping(query: str, num_results: int = 5) -> list:
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=shop&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await _dismiss_consent(page)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return [f"Google Shopping blocked by bot detection for: {query}\nTry again later."]
+
             await page.wait_for_timeout(2000)
 
             results = await page.evaluate(
@@ -2187,7 +2665,9 @@ async def _do_google_shopping(query: str, num_results: int = 5) -> list:
                     const items = document.querySelectorAll(
                         '.sh-dgr__content, .sh-dlr__list-result, ' +
                         '.KZmu8e, .i0X6df, .xcR77, ' +
-                        '[data-docid], .sh-pr__product-result'
+                        '[data-docid], .sh-pr__product-result, ' +
+                        'div[data-docid], div.sh-pr__product-result, ' +
+                        'div.i0X6df, div.xcR77'
                     );
 
                     for (const el of items) {
@@ -2368,7 +2848,8 @@ async def _do_google_shopping(query: str, num_results: int = 5) -> list:
             return f"Shopping search failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -2400,12 +2881,35 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=bks&num={num_results + 5}"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await _dismiss_consent(page)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return f"Google Books blocked by bot detection for: {query}\nTry again later."
+
             await page.wait_for_timeout(2000)
 
             results = await page.evaluate(
@@ -2424,7 +2928,7 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
                         if (title === 'Search Results' || title === 'Filters and topics') continue;
 
                         // Walk up to find the result container
-                        let container = h3.closest('.g') || h3.parentElement?.parentElement?.parentElement;
+                        let container = h3.closest('.g, .MjjYud, .byrV5b, div[data-ved]') || h3.parentElement?.parentElement?.parentElement;
                         if (!container) continue;
 
                         // Get the link
@@ -2432,12 +2936,12 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
                         const url = linkEl ? linkEl.href : '';
 
                         // Get snippet
-                        const snippetEl = container.querySelector('.VwiC3b, .cmlJmd, [data-sncf]');
+                        const snippetEl = container.querySelector('.VwiC3b, .cmlJmd, [data-sncf], .f5cPye');
                         const snippet = snippetEl ? snippetEl.innerText.trim() : '';
 
                         // Get author - look for text between the title and snippet
                         let author = '';
-                        const metaEls = container.querySelectorAll('span, cite');
+                        const metaEls = container.querySelectorAll('span, cite, .Y3v8qd');
                         for (const el of metaEls) {
                             const t = el.innerText.trim();
                             if (t && t !== title && !t.includes('http') &&
@@ -2483,6 +2987,16 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
 
                         results.push({ title, url, author, snippet, isbn });
                     }
+
+                    // Fallback: raw page text
+                    if (results.length === 0) {
+                        const searchArea = document.querySelector('#search, #rso, [role="main"]');
+                        if (searchArea) {
+                            const text = searchArea.innerText.substring(0, 3000);
+                            results.push({ title: '__raw__', url: '', author: '', snippet: text, isbn: '' });
+                        }
+                    }
+
                     return results;
                 }
                 """,
@@ -2491,6 +3005,11 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
 
             if not results:
                 return f"No book results found for: {query}"
+
+            # Handle raw text fallback
+            if len(results) == 1 and results[0].get("title") == "__raw__":
+                raw = re.sub(r'\n{3,}', '\n\n', results[0]["snippet"]).strip()
+                return f"Google Books Results for: {query}\n\n(Could not extract structured results. Raw page content:)\n{raw}"
 
             lines = [f"Google Books Results for: {query}\n"]
             for i, r in enumerate(results[:num_results], 1):
@@ -2511,7 +3030,8 @@ async def _do_google_books(query: str, num_results: int = 5) -> str:
             return f"Book search failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -2728,7 +3248,7 @@ async def _do_google_translate(text: str, to_language: str, from_language: str =
     url = f"https://translate.google.com/?sl={sl}&tl={tl}&text={encoded_text}&op=translate"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
         page = await context.new_page()
 
         try:
@@ -2826,7 +3346,7 @@ async def _do_google_translate(text: str, to_language: str, from_language: str =
             return f"Translation failed: {e}"
 
         finally:
-            await browser.close()
+            await context.close()
 
 
 @mcp.tool()
@@ -2867,12 +3387,35 @@ async def _do_google_flights(
     url = f"https://www.google.com/search?q={encoded_query}&hl=en"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await _dismiss_consent(page)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return f"Google Flights blocked by bot detection for: {origin} to {destination}\nTry again later."
+
             await page.wait_for_timeout(3000)
 
             data = await page.evaluate(
@@ -2886,7 +3429,8 @@ async def _do_google_flights(
                         '.zBTtmb, ' +
                         '[data-attrid*="flight"] .wUrVib, ' +
                         '.fltt-card, ' +
-                        '.gws-flights__result'
+                        '.gws-flights__result, ' +
+                        'div.VkpGBb, div[data-attrid*="flight"]'
                     );
 
                     for (const card of flightCards) {
@@ -2901,7 +3445,8 @@ async def _do_google_flights(
                         const widget = document.querySelector(
                             '[data-attrid*="flight"], ' +
                             '.gws-flights, ' +
-                            '.VkpGBb[data-attrid*="flight"]'
+                            '.VkpGBb[data-attrid*="flight"], ' +
+                            'div[data-attrid*="flight"]'
                         );
                         if (widget) {
                             data.widget_text = widget.innerText.substring(0, 3000);
@@ -2913,11 +3458,19 @@ async def _do_google_flights(
                     data.flights_url = viewAll ? viewAll.href : '';
 
                     // Get the knowledge panel or featured snippet about flights
-                    const panel = document.querySelector('.kp-wholepage, .liYKde, .ULSxyf');
+                    const panel = document.querySelector('.kp-wholepage, .liYKde, .ULSxyf, .f5cPye');
                     if (panel) {
                         const flightInfo = panel.innerText.substring(0, 2000);
                         if (flightInfo.toLowerCase().includes('flight') || flightInfo.includes('$') || flightInfo.includes('hr')) {
                             data.panel_text = flightInfo;
+                        }
+                    }
+
+                    // Last resort: raw page text
+                    if (!data.flights.length && !data.widget_text && !data.panel_text) {
+                        const searchArea = document.querySelector('#search, #rso, [role="main"]');
+                        if (searchArea) {
+                            data.raw_text = searchArea.innerText.substring(0, 3000);
                         }
                     }
 
@@ -2957,6 +3510,11 @@ async def _do_google_flights(
             if data.get("flights_url"):
                 lines.append(f"\nView all flights: {data['flights_url']}")
 
+            if not has_data and data.get("raw_text"):
+                raw = re.sub(r'\n{3,}', '\n\n', data["raw_text"]).strip()
+                lines.append(f"(Raw page content:)\n{raw}")
+                has_data = True
+
             if not has_data and not data.get("flights_url"):
                 lines.append(f"No flight data found. Try searching directly:")
                 lines.append(f"https://www.google.com/travel/flights")
@@ -2967,7 +3525,8 @@ async def _do_google_flights(
             return f"Flight search failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -3002,12 +3561,35 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
     url = f"https://www.google.com/search?q={encoded_query}&hl=en"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await _dismiss_consent(page)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await _dismiss_consent(page)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return [f"Google Hotels blocked by bot detection for: {query}\nTry again later."]
+
             await page.wait_for_timeout(3000)
 
             data = await page.evaluate(
@@ -3018,12 +3600,16 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
                     // Strategy: .BTPx6e elements ARE the hotel name elements.
                     // Walk up to the row container to find price/rating/link/image.
                     // Images are in sibling elements with class "uhHOwf".
-                    const nameEls = document.querySelectorAll('.BTPx6e');
+                    const nameEls = document.querySelectorAll(
+                        '.BTPx6e, .cuQzEe, .p69s9e, ' +
+                        'div[data-ved] a[href*="hotel"], ' +
+                        'div[data-ved] a[href*="travel"]'
+                    );
 
                     // Collect hotel thumbnail images separately — they sit in
                     // .uhHOwf containers as siblings/cousins of the name elements.
                     // Pair them with hotels by index.
-                    const thumbImgs = document.querySelectorAll('.uhHOwf img, .taJbee img');
+                    const thumbImgs = document.querySelectorAll('.uhHOwf img, .taJbee img, .wI3pFd img');
                     const thumbSrcs = [];
                     for (const img of thumbImgs) {
                         const src = img.src || img.dataset?.src || '';
@@ -3047,7 +3633,7 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
 
                         // Extract price — look in the row and siblings
                         let price = '';
-                        const priceEl = row.querySelector('.kixHKb, .qeiSWe, .priceText, .hVE8ee');
+                        const priceEl = row.querySelector('.kixHKb, .qeiSWe, .priceText, .hVE8ee, .gJTvYb');
                         if (priceEl) {
                             price = priceEl.innerText.trim();
                         } else {
@@ -3060,12 +3646,12 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
 
                         // Extract rating
                         let rating = '';
-                        const ratingEl = row.querySelector('.KFi5wf, .MW4etd, .yi40Hd');
+                        const ratingEl = row.querySelector('.KFi5wf, .MW4etd, .yi40Hd, .F7XJmb');
                         if (ratingEl) rating = ratingEl.innerText.trim();
 
                         // Extract reviews
                         let reviews = '';
-                        const reviewsEl = row.querySelector('.jdzyld, .RDApEe');
+                        const reviewsEl = row.querySelector('.jdzyld, .RDApEe, .gRlVJ');
                         if (reviewsEl) reviews = reviewsEl.innerText.trim().replace(/[()]/g, '');
 
                         // Extract link
@@ -3111,7 +3697,7 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
                     // Fallback: get the hotel widget text
                     if (data.hotels.length === 0) {
                         const widget = document.querySelector(
-                            '[data-attrid*="hotel"], .kp-wholepage, .liYKde'
+                            '[data-attrid*="hotel"], .kp-wholepage, .liYKde, .f5cPye'
                         );
                         if (widget) {
                             const text = widget.innerText.substring(0, 3000);
@@ -3124,6 +3710,14 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
                     // "View all hotels" link
                     const viewAll = document.querySelector('a[href*="google.com/travel/hotels"]');
                     data.hotels_url = viewAll ? viewAll.href : '';
+
+                    // Last resort: raw page text
+                    if (data.hotels.length === 0 && !data.widget_text) {
+                        const searchArea = document.querySelector('#search, #rso, [role="main"]');
+                        if (searchArea) {
+                            data.raw_text = searchArea.innerText.substring(0, 3000);
+                        }
+                    }
 
                     return data;
                 }
@@ -3206,6 +3800,11 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
             if data.get("hotels_url"):
                 content.append(f"\nView all hotels: {data['hotels_url']}")
 
+            if not has_data and data.get("raw_text"):
+                raw = re.sub(r'\n{3,}', '\n\n', data["raw_text"]).strip()
+                content.append(f"(Raw page content:)\n{raw}")
+                has_data = True
+
             if not has_data and not data.get("hotels_url"):
                 content.append("No hotel data found. Try searching directly:")
                 content.append("https://www.google.com/travel/hotels")
@@ -3216,7 +3815,8 @@ async def _do_google_hotels(query: str, num_results: int = 5) -> list:
             return f"Hotel search failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
 
 
 @mcp.tool()
@@ -3310,7 +3910,8 @@ async def _do_google_lens(image_source: str) -> str:
             return f"File not found: {image_source}\nPlease provide a valid file path or a public image URL."
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
+        await _load_cookies(context)
         page = await context.new_page()
 
         try:
@@ -3366,6 +3967,50 @@ async def _do_google_lens(image_source: str) -> str:
 
             # Lens takes time to process the image
             await page.wait_for_timeout(4000)
+
+            # Detect and handle CAPTCHA/rate-limit blocks
+            if await _is_blocked(page):
+                solved = await _try_solve_captcha(page)
+                if not solved:
+                    # Warm-up retry: go to Google home first, then re-run
+                    try:
+                        await page.goto(
+                            "https://www.google.com/ncr",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await _dismiss_consent(page)
+                        await _human_delay(page)
+                        if is_local:
+                            await page.goto("https://images.google.com/?hl=en", wait_until="domcontentloaded", timeout=30000)
+                            await _dismiss_consent(page)
+                            await page.wait_for_timeout(1000)
+                            lens_btn = page.locator("[aria-label='Search by image'], .Gdd5U, .nDcEnd, .tdAaF")
+                            if await lens_btn.count() > 0:
+                                await lens_btn.first.click()
+                                await page.wait_for_timeout(1500)
+                            file_input = page.locator("input[type='file']")
+                            if await file_input.count() > 0:
+                                await file_input.first.set_input_files(file_path)
+                            await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                            await page.wait_for_timeout(5000)
+                            await _dismiss_consent(page)
+                        else:
+                            encoded_url = quote_plus(image_source)
+                            url = f"https://lens.google.com/uploadbyurl?url={encoded_url}&hl=en"
+                            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                            await _dismiss_consent(page)
+                            await page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+
+                    if await _is_blocked(page):
+                        await _save_cookies(context)
+                        return (
+                            f"Google Lens Results for image: {image_source}\n\n"
+                            f"Google is currently blocking automated requests (CAPTCHA/rate-limit).\n"
+                            f"Try again in a few minutes, or use a local file with google_lens_detect instead."
+                        )
 
             # Check for error
             page_text = await page.evaluate("() => document.body.innerText.substring(0, 500)")
@@ -3539,7 +4184,8 @@ async def _do_google_lens(image_source: str) -> str:
             return f"Google Lens search failed: {e}"
 
         finally:
-            await browser.close()
+            await _save_cookies(context)
+            await context.close()
             # Clean up base64 temp file
             if tmp_base64_path:
                 try:
@@ -3818,7 +4464,7 @@ async def _do_google_lens_detect(image_path: str) -> str:
 
         # Run Lens on original + each crop in a single browser session
         async with async_playwright() as pw:
-            browser, context = await _launch_browser(pw)
+            context = await _launch_browser(pw)
             page = await context.new_page()
 
             results = []
@@ -3839,7 +4485,7 @@ async def _do_google_lens_detect(image_path: str) -> str:
                 results.append(("Error", str(e)))
 
             finally:
-                await browser.close()
+                await context.close()
 
         # Format output
         lines = [
@@ -4655,7 +5301,7 @@ MAX_PAGE_CHARS = 8000
 async def _fetch_page_text(url: str) -> str:
     """Fetch a URL with headless Chromium and extract readable text."""
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
         page = await context.new_page()
 
         try:
@@ -4694,7 +5340,7 @@ async def _fetch_page_text(url: str) -> str:
             return f"Failed to fetch {url}: {e}"
 
         finally:
-            await browser.close()
+            await context.close()
 
 
 @mcp.tool()
@@ -6316,7 +6962,7 @@ async def _check_source_twitter(handle: str) -> list[dict]:
     url = f"https://x.com/{handle}"
 
     async with async_playwright() as pw:
-        browser, context = await _launch_browser(pw)
+        context = await _launch_browser(pw)
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -6392,7 +7038,7 @@ async def _check_source_twitter(handle: str) -> list[dict]:
         except Exception:
             return []  # Twitter scraping is best-effort
         finally:
-            await browser.close()
+            await context.close()
 
 
 # ---------------------------------------------------------------------------

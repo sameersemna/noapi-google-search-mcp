@@ -729,7 +729,7 @@ async def test_tool_count():
     log("    Verifying tool registration:")
     tools = mcp._tool_manager._tools
     count = len(tools)
-    check(f"Tool count == 38 (got {count})", count == 38)
+    check(f"Tool count == 39 (got {count})", count == 39)
     expected = [
         "transcribe_local", "convert_media", "read_document", "fetch_emails",
         "paste_text", "shorten_url", "generate_qr", "archive_webpage",
