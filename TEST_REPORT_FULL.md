@@ -1,6 +1,6 @@
 # noapi-google-search-mcp v0.3.0 — Full Regression Test Report
 
-**Date:** 2026-07-10 15:01:37
+**Date:** 2026-07-20 14:58:52
 **Python:** 3.11.15
 **Platform:** linux
 **Tools:** 38
@@ -16,27 +16,27 @@
 | 2 | _strip_html — HTML tag removal | 5 | 0.00s | PASS |
 | 3 | _parse_rss_atom — RSS 2.0 parsing | 7 | 0.00s | PASS |
 | 4 | _parse_rss_atom — Atom parsing | 8 | 0.00s | PASS |
-| 5 | SQLite + FTS5 database | 8 | 0.05s | PASS |
-| 6 | News RSS — BBC News | 4 | 0.30s | PASS |
-| 7 | Reddit — r/technology | 3 | 0.91s | PASS |
-| 8 | Hacker News — Top Stories | 6 | 1.12s | PASS |
-| 9 | GitHub — Releases | 4 | 0.61s | PASS |
-| 10 | arXiv — cs.AI Papers | 5 | 0.58s | PASS |
-| 11 | YouTube — 3Blue1Brown | 5 | 0.13s | PASS |
-| 12 | Podcast — Lex Fridman | 3 | 1.45s | PASS |
-| 13 | Full feed workflow | 13 | 2.33s | PASS |
-| 14 | transcribe_local — local audio/video | 3 | 2.79s | PASS |
-| 15 | convert_media — FFmpeg conversion | 2 | 0.79s | PASS |
+| 5 | SQLite + FTS5 database | 8 | 0.11s | PASS |
+| 6 | News RSS — BBC News | 4 | 0.52s | PASS |
+| 7 | Reddit — r/technology | 3 | 1.21s | PASS |
+| 8 | Hacker News — Top Stories | 6 | 0.72s | PASS |
+| 9 | GitHub — Releases | 4 | 0.74s | PASS |
+| 10 | arXiv — cs.AI Papers | 5 | 0.46s | PASS |
+| 11 | YouTube — 3Blue1Brown | 5 | 0.25s | PASS |
+| 12 | Podcast — Lex Fridman | 3 | 4.28s | PASS |
+| 13 | Full feed workflow | 13 | 2.82s | PASS |
+| 14 | transcribe_local — local audio/video | 3 | 3.73s | PASS |
+| 15 | convert_media — FFmpeg conversion | 2 | 0.86s | PASS |
 | 16 | read_document — PDF/DOCX/text/HTML | 7 | 0.01s | PASS |
-| 17 | fetch_emails — IMAP email pull | 5 | 0.17s | PASS |
-| 18 | paste_text — dpaste.org pastebin | 2 | 1.75s | PASS |
-| 19 | shorten_url — TinyURL | 1 | 0.41s | PASS |
-| 20 | generate_qr — QR code generation | 2 | 0.29s | PASS |
-| 21 | archive_webpage — Wayback Machine | 1 | 2.51s | PASS |
-| 22 | wikipedia — article lookup | 4 | 1.18s | PASS |
+| 17 | fetch_emails — IMAP email pull | 5 | 0.21s | PASS |
+| 18 | paste_text — dpaste.org pastebin | 2 | 1.12s | PASS |
+| 19 | shorten_url — TinyURL | 1 | 0.35s | PASS |
+| 20 | generate_qr — QR code generation | 2 | 0.31s | PASS |
+| 21 | archive_webpage — Wayback Machine | 1 | 1.63s | PASS |
+| 22 | wikipedia — article lookup | 4 | 1.77s | PASS |
 | 23 | upload_to_s3 — MinIO/S3 upload | 2 | 0.00s | PASS |
-| 24 | YouTube auto-transcription | 3 | 0.43s | PASS |
-| | **Total** | **120/120** | **17.81s** | **24/24** |
+| 24 | YouTube auto-transcription | 3 | 0.49s | PASS |
+| | **Total** | **120/120** | **21.60s** | **24/24** |
 
 ---
 

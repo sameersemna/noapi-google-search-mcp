@@ -1,7 +1,7 @@
 ======================================================================
   noapi-google-search-mcp — Full Regression Test Suite
 ======================================================================
-Date: 2026-07-10 15:01:19
+Date: 2026-07-20 14:58:31
 Python: 3.11.15
 Platform: linux
 
@@ -78,7 +78,7 @@ Platform: linux
     CHECK: PASS — FTS5 'Python' → 1 result
     CHECK: PASS — FTS5 'nonexistent' → 0 results
     CHECK: PASS — Cascade delete
-  -> PASS  (0.05s)
+  -> PASS  (0.11s)
 
 
 ======================================================================
@@ -87,13 +87,13 @@ Platform: linux
 
 --- News RSS — BBC News ---
     Source: BBC News RSS
-    Items fetched: 39
-    Sample: Bayeux Tapestry arrives in UK for first time in 900 years under police guard
+    Items fetched: 32
+    Sample: Burnham promises 'breathing space' for households. How might it affect your mone
     CHECK: PASS — ≥ 5 items
     CHECK: PASS — All have titles
     CHECK: PASS — All have URLs
     CHECK: PASS — URLs are HTTP(S)
-  -> PASS  (0.30s)
+  -> PASS  (0.52s)
 
 --- Reddit — r/technology ---
     Source: Reddit r/technology
@@ -101,51 +101,51 @@ Platform: linux
     CHECK: PASS — ≥ 5 items
     CHECK: PASS — All have titles
     CHECK: PASS — All have URLs
-  -> PASS  (0.91s)
+  -> PASS  (1.21s)
 
 --- Hacker News — Top Stories ---
     Source: Hacker News top stories
     Items fetched: 5
-    Sample: GPT-5.6
+    Sample: Airport Simulator
     CHECK: PASS — Got 5 stories
     CHECK: PASS — All have titles
     CHECK: PASS — All have URLs
     CHECK: PASS — All have authors
     CHECK: PASS — Metadata has score
     CHECK: PASS — Metadata has comments
-  -> PASS  (1.12s)
+  -> PASS  (0.72s)
 
 --- GitHub — Releases ---
     Source: GitHub anthropics/anthropic-sdk-python
     Items fetched: 10
-    Latest: v0.116.0
+    Latest: v0.117.0
     CHECK: PASS — ≥ 1 release
     CHECK: PASS — All have titles
     CHECK: PASS — All have URLs
     CHECK: PASS — URLs point to GitHub
-  -> PASS  (0.61s)
+  -> PASS  (0.74s)
 
 --- arXiv — cs.AI Papers ---
     Source: arXiv cs.AI
     Items fetched: 5
-    Sample: OpenCoF: Learning to Reason Through Video Generation
+    Sample: Evaluating Open-Weight LLMs for Generating Structured Threat Information for Aut
     CHECK: PASS — Got papers
     CHECK: PASS — All have titles
     CHECK: PASS — All have URLs
     CHECK: PASS — URLs contain arxiv
     CHECK: PASS — Has abstracts
-  -> PASS  (0.58s)
+  -> PASS  (0.46s)
 
 --- YouTube — 3Blue1Brown ---
     Source: YouTube 3Blue1Brown
     Items fetched: 15
-    Latest: 100 random chords, how many intersections?
+    Latest: But what is cross-entropy? | Compression is Intelligence Part 2
     CHECK: PASS — Got videos
     CHECK: PASS — All have titles
     CHECK: PASS — All have URLs
     CHECK: PASS — URLs are YouTube
     CHECK: PASS — Metadata has video_url
-  -> PASS  (0.13s)
+  -> PASS  (0.25s)
 
 --- Podcast — Lex Fridman ---
     Source: Lex Fridman Podcast
@@ -154,7 +154,7 @@ Platform: linux
     CHECK: PASS — Got episodes
     CHECK: PASS — All have titles
     CHECK: PASS — Has audio URLs
-  -> PASS  (1.45s)
+  -> PASS  (4.28s)
 
 
 ======================================================================
@@ -172,10 +172,10 @@ Run check_feeds to fetch content.
     CHECK: PASS — Both listed
     Output: Feed Check Complete
 
-  BBC News: 38 new items
-  Hacker News (top): 29 new items
+  BBC News: 29 new items
+  Hacker News (top): 30 new items
 
-Total: 67 new items across 2 sources
+Total: 59 new items across 2 sources
     CHECK: PASS — Feeds checked
     CHECK: PASS — News items returned
     CHECK: PASS — HN items returned (limit 3)
@@ -184,7 +184,7 @@ Total: 67 new items across 2 sources
     CHECK: PASS — Unsubscribed
     CHECK: PASS — BBC removed
     CHECK: PASS — Nonexistent handled
-  -> PASS  (2.33s)
+  -> PASS  (2.82s)
 
 
 ======================================================================
@@ -197,16 +197,16 @@ Total: 67 new items across 2 sources
     CHECK: PASS — Invalid model size handled
     CHECK: PASS — Non-audio file handled
     Output: Transcription failed: [Errno 1094995529] Invalid data found when processing inpu
-  -> PASS  (2.79s)
+  -> PASS  (3.73s)
 
 --- convert_media — FFmpeg conversion ---
     Testing media format conversion:
     CHECK: PASS — File not found
     CHECK: PASS — WAV→MP3 conversion
     Output: Converted successfully.
-Output: /tmp/tmpw2xsm7cr.mp3
+Output: /tmp/tmpge1o_tb2.mp3
 Size: 0.0 MB
-  -> PASS  (0.79s)
+  -> PASS  (0.86s)
 
 --- read_document — PDF/DOCX/text/HTML ---
     Testing document reader:
@@ -215,7 +215,7 @@ Size: 0.0 MB
     CHECK: PASS — TOML read
     CHECK: PASS — Unsupported format
     CHECK: PASS — DOCX parsed
-    DOCX output: Document: tmpwkb671mz.docx (0 KB)
+    DOCX output: Document: tmpeou502fb.docx (0 KB)
 
 Hello from DOCX!
 Second paragraph.
@@ -237,7 +237,7 @@ Second paragraph.
     CHECK: PASS — Bad auth handled
     Auth error: Authentication failed for test@gmail.com.
 For Gmail, make sure you're using an A
-  -> PASS  (0.17s)
+  -> PASS  (0.21s)
 
 
 ======================================================================
@@ -248,32 +248,32 @@ For Gmail, make sure you're using an A
     Testing pastebin posting:
     CHECK: PASS — Empty content handled
     CHECK: PASS — Paste created
-    Output: Paste created: https://paste.rs/mdYFM
+    Output: Paste created: https://paste.rs/lzCKZ
 Expires in 7 days.
-  -> PASS  (1.75s)
+  -> PASS  (1.12s)
 
 --- shorten_url — TinyURL ---
     Testing URL shortener:
     CHECK: PASS — URL shortened
     Output: Short URL: https://tinyurl.com/26fsy5zq
 Original: https://github.com/VincentKaufmann/noapi-google-search-mcp
-  -> PASS  (0.41s)
+  -> PASS  (0.35s)
 
 --- generate_qr — QR code generation ---
     Testing QR code generation:
     CHECK: PASS — QR code generated
-    Output: QR code saved to: /tmp/tmp9j41sdll.png
+    Output: QR code saved to: /tmp/tmploai_l58.png
 Data: https://example.com
     File size: 6.5 KB
     CHECK: PASS — Empty data handled
-  -> PASS  (0.29s)
+  -> PASS  (0.31s)
 
 --- archive_webpage — Wayback Machine ---
     Testing webpage archiving:
     CHECK: PASS — Archive response
-    Output: Archived: http://web.archive.org/web/20260710020401/https://example.com/
+    Output: Archived: https://web.archive.org/web/*/https://example.com
 Original: https://example.com
-  -> PASS  (2.51s)
+  -> PASS  (1.63s)
 
 --- wikipedia — article lookup ---
     Testing Wikipedia lookup:
@@ -289,7 +289,7 @@ Python is a high-level, general-purpose programming language that emp...
 
 Albert Einstein was a German-born theoretica...
     CHECK: PASS — Spanish Wikipedia
-  -> PASS  (1.18s)
+  -> PASS  (1.77s)
 
 
 ======================================================================
@@ -314,7 +314,7 @@ Albert Einstein was a German-born theoretica...
     CHECK: PASS — Empty items → empty string
     CHECK: PASS — Non-YouTube → empty string
     CHECK: PASS — Cached video skipped
-  -> PASS  (0.43s)
+  -> PASS  (0.49s)
 
 
 ======================================================================
@@ -334,24 +334,24 @@ Albert Einstein was a German-born theoretica...
     PASS |  0.00s | _strip_html — HTML tag removal
     PASS |  0.00s | _parse_rss_atom — RSS 2.0 parsing
     PASS |  0.00s | _parse_rss_atom — Atom parsing
-    PASS |  0.05s | SQLite + FTS5 database
-    PASS |  0.30s | News RSS — BBC News
-    PASS |  0.91s | Reddit — r/technology
-    PASS |  1.12s | Hacker News — Top Stories
-    PASS |  0.61s | GitHub — Releases
-    PASS |  0.58s | arXiv — cs.AI Papers
-    PASS |  0.13s | YouTube — 3Blue1Brown
-    PASS |  1.45s | Podcast — Lex Fridman
-    PASS |  2.33s | Full feed workflow
-    PASS |  2.79s | transcribe_local — local audio/video
-    PASS |  0.79s | convert_media — FFmpeg conversion
+    PASS |  0.11s | SQLite + FTS5 database
+    PASS |  0.52s | News RSS — BBC News
+    PASS |  1.21s | Reddit — r/technology
+    PASS |  0.72s | Hacker News — Top Stories
+    PASS |  0.74s | GitHub — Releases
+    PASS |  0.46s | arXiv — cs.AI Papers
+    PASS |  0.25s | YouTube — 3Blue1Brown
+    PASS |  4.28s | Podcast — Lex Fridman
+    PASS |  2.82s | Full feed workflow
+    PASS |  3.73s | transcribe_local — local audio/video
+    PASS |  0.86s | convert_media — FFmpeg conversion
     PASS |  0.01s | read_document — PDF/DOCX/text/HTML
-    PASS |  0.17s | fetch_emails — IMAP email pull
-    PASS |  1.75s | paste_text — dpaste.org pastebin
-    PASS |  0.41s | shorten_url — TinyURL
-    PASS |  0.29s | generate_qr — QR code generation
-    PASS |  2.51s | archive_webpage — Wayback Machine
-    PASS |  1.18s | wikipedia — article lookup
+    PASS |  0.21s | fetch_emails — IMAP email pull
+    PASS |  1.12s | paste_text — dpaste.org pastebin
+    PASS |  0.35s | shorten_url — TinyURL
+    PASS |  0.31s | generate_qr — QR code generation
+    PASS |  1.63s | archive_webpage — Wayback Machine
+    PASS |  1.77s | wikipedia — article lookup
     PASS |  0.00s | upload_to_s3 — MinIO/S3 upload
-    PASS |  0.43s | YouTube auto-transcription
-         | 17.81s | TOTAL
+    PASS |  0.49s | YouTube auto-transcription
+         | 21.60s | TOTAL
