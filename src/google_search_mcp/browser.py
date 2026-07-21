@@ -8,20 +8,90 @@ human-like interaction delays.
 import json
 import os
 import random
+from datetime import datetime
 
-from playwright.async_api import BrowserContext
+from playwright.async_api import BrowserContext, Page
 
 from .config import (
     BROWSER_DATA_DIR,
     COOKIE_JSON_PATH,
     COOKIE_DIR,
+    SCREENSHOTS_DIR,
     STEALTH_JS,
     USER_AGENT,
 )
 
 
+# ── Viewport randomization ──
+
+_BASE_VIEWPORT = {"width": 1280, "height": 800}
+
+
+def _randomized_viewport() -> dict:
+    """Return a viewport with slight randomization to avoid identical fingerprints."""
+    return {
+        "width": _BASE_VIEWPORT["width"] + random.randint(-30, 30),
+        "height": _BASE_VIEWPORT["height"] + random.randint(-20, 20),
+    }
+
+
+# ── Stealth-enhancing Chromium launch args ──
+
+_STEALTH_ARGS: list[str] = [
+    # Core stealth
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-infobars",
+    # Disable features that leak automation status
+    "--disable-features=IsolateOrigins,site-per-process,TranslateUI,BlinkGenPropertyTrees",
+    "--disable-site-isolation-trials",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-client-side-phishing-detection",
+    "--disable-sync",
+    "--disable-default-apps",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-breakpad",
+    "--disable-hang-monitor",
+    "--disable-prompt-on-repost",
+    "--disable-domain-reliability",
+    "--disable-ipc-flooding-protection",
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--disable-extensions",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--force-color-profile=srgb",
+    # Window size
+    "--window-size=1280,800",
+    # WebGL
+    "--enable-webgl",
+    "--use-gl=desktop",
+]
+
+# ── Extra HTTP headers to set on every page ──
+
+_EXTRA_HEADERS: dict[str, str] = {
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0",
+    "DNT": "1",
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Public API
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 async def launch_browser(pw, viewport: dict | None = None) -> BrowserContext:
-    """Launch a headless Chromium browser with stealth settings.
+    """Launch a headless Chromium browser with comprehensive stealth settings.
 
     Uses a persistent user data directory so browser fingerprint, localStorage,
     and session data remain consistent across restarts.
@@ -30,27 +100,65 @@ async def launch_browser(pw, viewport: dict | None = None) -> BrowserContext:
 
     context = await pw.chromium.launch_persistent_context(
         BROWSER_DATA_DIR,
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-infobars",
-            "--window-size=1280,800",
-            "--enable-webgl",
-            "--use-gl=desktop",
+        args=_STEALTH_ARGS + [
+            # Use the new headless mode (less detectable than old headless)
+            "--headless=new",
         ],
+        ignore_default_args=["--enable-automation"],
         user_agent=USER_AGENT,
-        viewport=viewport or {"width": 1280, "height": 800},
+        viewport=viewport or _randomized_viewport(),
         locale="en-US",
+        timezone_id="America/New_York",
+        bypass_csp=True,
     )
     await context.add_init_script(STEALTH_JS)
     return context
 
 
+async def setup_page_stealth(page: Page) -> None:
+    """Apply per-page stealth: extra HTTP headers and behavioral setup."""
+    await page.set_extra_http_headers(_EXTRA_HEADERS)
+
+
 async def human_delay(page, min_ms: int = 500, max_ms: int = 1500) -> None:
     """Add a small random delay to mimic human interaction timing."""
     await page.wait_for_timeout(random.randint(min_ms, max_ms))
+
+
+async def simulate_human_behavior(page: Page) -> None:
+    """Simulate subtle human-like behavior: micro-scrolls and mouse movement."""
+    try:
+        # Small random scroll
+        scroll_y = random.randint(10, 80)
+        await page.evaluate(f"window.scrollBy(0, {scroll_y})")
+        await page.wait_for_timeout(random.randint(100, 300))
+
+        # Random mouse movement to a non-interactive area
+        vp = page.viewport_size
+        if vp:
+            x = random.randint(100, vp["width"] - 100)
+            y = random.randint(100, vp["height"] - 100)
+            await page.mouse.move(x, y, steps=random.randint(5, 15))
+    except Exception:
+        pass
+
+
+async def take_debug_screenshot(page: Page, label: str) -> str | None:
+    """Take a debug screenshot if SCREENSHOTS_DIR is configured.
+
+    Returns the file path or None if screenshots are disabled.
+    """
+    if not SCREENSHOTS_DIR:
+        return None
+    try:
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%H%M%S%f")[:12]
+        fname = f"{label}_{ts}.png"
+        fpath = os.path.join(SCREENSHOTS_DIR, fname)
+        await page.screenshot(path=fpath, full_page=False)
+        return fpath
+    except Exception:
+        return None
 
 
 async def save_cookies(context: BrowserContext) -> None:

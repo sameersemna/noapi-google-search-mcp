@@ -8,6 +8,9 @@ in individual tool modules.
 import os
 from pathlib import Path
 
+# Import comprehensive stealth JS from its dedicated module
+from .stealth_js import STEALTH_JS  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # User agent
 # ---------------------------------------------------------------------------
@@ -157,59 +160,25 @@ IMAGENET_MEAN: list[float] = [0.485, 0.456, 0.406]
 IMAGENET_STD: list[float] = [0.229, 0.224, 0.225]
 
 # ---------------------------------------------------------------------------
-# Stealth JS — injected before every page load to hide automation signals
+# Screenshot debugging — set SCREENSHOTS_DIR to enable, or None to disable
 # ---------------------------------------------------------------------------
 
-STEALTH_JS: str = """
-// Overwrite navigator.webdriver to false
-Object.defineProperty(navigator, 'webdriver', { get: () => false });
+SCREENSHOTS_DIR: str | None = os.path.join(os.path.curdir, "screenshots")
+# Set to None to disable screenshot capture entirely:
+# SCREENSHOTS_DIR = None
 
-// Fake plugins array (headless Chrome has none by default)
-Object.defineProperty(navigator, 'plugins', {
-    get: () => [
-        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
-          description: 'Portable Document Format',
-          length: 1, item: () => null, namedItem: () => null,
-          [Symbol.iterator]: function*() { yield {type: 'application/pdf'}; } },
-        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-          description: '', length: 1, item: () => null, namedItem: () => null,
-          [Symbol.iterator]: function*() { yield {type: 'application/pdf'}; } },
-        { name: 'Native Client', filename: 'internal-nacl-plugin',
-          description: '', length: 2, item: () => null, namedItem: () => null,
-          [Symbol.iterator]: function*() { yield {type: 'application/x-nacl'}; yield {type: 'application/x-pnacl'}; } },
-    ],
-});
+# ---------------------------------------------------------------------------
+# Rate limiting — minimum gap (seconds) between requests to Google
+# ---------------------------------------------------------------------------
 
-// Fake languages
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+GOOGLE_REQUEST_MIN_GAP: float = 3.0  # seconds between Google requests
 
-// Fake chrome.runtime to look like a real Chrome browser
-if (!window.chrome) { window.chrome = {}; }
-if (!window.chrome.runtime) {
-    window.chrome.runtime = {
-        connect: function() {},
-        sendMessage: function() {},
-        onMessage: { addListener: function() {} },
-    };
-}
+# ---------------------------------------------------------------------------
+# Retry / backoff settings
+# ---------------------------------------------------------------------------
 
-// Remove Playwright-specific properties
-delete window.__playwright;
-delete window.__pw_manual;
-
-// Patch permissions query for notifications
-const originalQuery = window.Notification && Notification.permission
-    ? Notification.permission : 'default';
-if (navigator.permissions && navigator.permissions.query) {
-    const origQuery = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (params) => {
-        if (params.name === 'notifications') {
-            return Promise.resolve({ state: originalQuery, onchange: null });
-        }
-        return origQuery(params);
-    };
-}
-"""
+MAX_GOOGLE_RETRIES: int = 2
+RETRY_BACKOFF_SECONDS: list[float] = [1.0, 3.0, 5.0]
 
 # ---------------------------------------------------------------------------
 # General limits
