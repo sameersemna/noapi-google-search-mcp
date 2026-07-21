@@ -49,6 +49,13 @@ CLIPS_DIR: str = os.path.join(HOME, "clips")
 # Feeds database
 FEEDS_DB_PATH: str = os.path.join(CACHE_DIR, "feeds.db")
 
+# ---------------------------------------------------------------------------
+# Startup validation
+# ---------------------------------------------------------------------------
+
+# Set to "1" to skip cookie validation at server startup (for development/testing)
+SKIP_COOKIE_VALIDATION: bool = os.environ.get("SKIP_COOKIE_VALIDATION", "").strip().lower() in ("1", "true", "yes")
+
 # Image discovery
 IMAGE_EXTENSIONS: set[str] = {
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".tiff", ".tif",

@@ -14,8 +14,9 @@ StandardError=inherit
 
 ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -i -m google_search_mcp
 
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

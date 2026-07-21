@@ -14,8 +14,9 @@ StandardError=inherit
 
 ExecStart=/home/sameer/.local/bin/uvx duckduckgo-mcp-server --transport streamable-http --host 0.0.0.0 --port 11404
 
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

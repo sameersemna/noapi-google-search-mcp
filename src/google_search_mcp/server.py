@@ -14,9 +14,11 @@ import random
 import re
 import sqlite3
 import subprocess
+import sys
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from email import policy as email_policy
 from email.parser import BytesParser as EmailParser
@@ -43,6 +45,7 @@ from .config import (
     MOBILENET_ONNX_PATH,
     PRESET_NEWS_FEEDS,
     ARXIV_CATEGORIES,
+    SKIP_COOKIE_VALIDATION,
     TIME_RANGE_MAP,
     TRANSCRIBE_CACHE_DIR,
     TRANSCRIPT_CACHE_DIR,
@@ -56,10 +59,12 @@ from .browser import (
     human_delay,
     launch_browser,
     load_cookies,
+    login_and_save_cookies,
     save_cookies,
     setup_page_stealth,
     simulate_human_behavior,
     take_debug_screenshot,
+    validate_google_cookies,
     wait_for_google_results_ready,
     warmup_retry,
 )
@@ -91,7 +96,151 @@ from .utils.language import (
     resolve_language_code,
 )
 
-mcp = FastMCP("google-search")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Startup lifecycle — validate cookies before accepting any requests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _format_validation_error(result: dict) -> str:
+    """Format a cookie validation error into a human-readable message."""
+    lines = [
+        "=" * 60,
+        "  GOOGLE MCP — COOKIE VALIDATION FAILED",
+        "=" * 60,
+        "",
+        "The server cannot start because Google cookies are invalid or missing.",
+        "Without valid cookies, all Google tools will fail with bot detection.",
+        "",
+    ]
+
+    if result["errors"]:
+        lines.append("Errors:")
+        for err in result["errors"]:
+            lines.append(f"  ! {err}")
+        lines.append("")
+
+    if result["warnings"]:
+        lines.append("Warnings:")
+        for w in result["warnings"]:
+            lines.append(f"  ? {w}")
+        lines.append("")
+
+    g = result.get("google", {})
+    lines.append("Google cookie status:")
+    lines.append(f"  File found:      {g.get('file_found', False)}")
+    lines.append(f"  Cookies loaded:   {g.get('cookie_count', 0)}")
+    lines.append(f"  Auth cookies OK: {len(g.get('auth_cookies_present', []))}/{len(_REQUIRED_AUTH_COOKIES)}")
+    if g.get("auth_cookies_missing"):
+        lines.append(f"  Missing auth:    {', '.join(g['auth_cookies_missing'])}")
+    if g.get("expired_cookies"):
+        lines.append(f"  Expired:         {len(g['expired_cookies'])} cookie(s)")
+    lines.append(f"  Logged in:       {g.get('logged_in', False)}")
+    lines.append("")
+
+    yt = result.get("youtube", {})
+    lines.append("YouTube cookie status:")
+    lines.append(f"  File found:      {yt.get('file_found', False)}")
+    lines.append(f"  Cookies loaded:   {yt.get('cookie_count', 0)}")
+    lines.append(f"  Logged in:       {yt.get('logged_in', False)}")
+    lines.append("")
+
+    lines.append("How to fix:")
+    lines.append("  1. Open Chrome and sign into your Google account")
+    lines.append("  2. Run: node export_cookies.js")
+    lines.append("     (or use a cookie export extension to get Netscape-format .txt files)")
+    lines.append("  3. Place the exported files in: " + COOKIE_DIR)
+    lines.append("  4. Restart the MCP server")
+    lines.append("")
+    lines.append("To bypass this check (development only), set:")
+    lines.append("  export SKIP_COOKIE_VALIDATION=1")
+    lines.append("=" * 60)
+
+    return "\n".join(lines)
+
+
+# Reference for _format_validation_error — must match browser.py
+_REQUIRED_AUTH_COOKIES: set[str] = {
+    "SID", "SAPISID", "APISID",
+    "__Secure-1PAPISID", "__Secure-3PAPISID",
+}
+
+
+@asynccontextmanager
+async def app_lifespan(server: FastMCP):
+    """Validate Google cookies at server startup.
+
+    If cookies are invalid or show a logged-out session, the server offers
+    to open a headful browser for manual login. If the user declines or
+    login fails, the server exits with a non-zero code.
+    YouTube warnings are printed but don't block startup.
+    """
+    if SKIP_COOKIE_VALIDATION:
+        print("SKIP_COOKIE_VALIDATION is set — skipping cookie validation.", file=sys.stderr)
+        yield {}
+        return
+
+    print("Validating Google cookies at startup...", file=sys.stderr)
+    result = await validate_google_cookies()
+
+    if result.get("warnings"):
+        for w in result["warnings"]:
+            print(f"WARNING: {w}", file=sys.stderr)
+
+    if not result["valid"]:
+        msg = _format_validation_error(result)
+        print(msg, file=sys.stderr)
+
+        # ── Offer headful login flow ──
+        print("", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        print("  COOKIE VALIDATION FAILED", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Options:", file=sys.stderr)
+        print("  1. Auto-login — Open a browser window to log into Google", file=sys.stderr)
+        print("     (cookies will be saved automatically)", file=sys.stderr)
+        print("  2. Exit — Stop the server (you can fix cookies manually)", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Choose option 1 or 2 (default: 2): ", file=sys.stderr, end="", flush=True)
+
+        try:
+            # Read from /dev/tty directly — stdin is the MCP protocol pipe
+            with open("/dev/tty", "r") as tty:
+                choice = tty.readline().strip()
+        except (OSError, EOFError, KeyboardInterrupt):
+            choice = "2"
+
+        if choice == "1":
+            print("\nStarting headful login flow...", file=sys.stderr)
+            success = await login_and_save_cookies()
+            if success:
+                # Re-validate after login
+                print("\nRe-validating cookies after login...", file=sys.stderr)
+                result = await validate_google_cookies()
+                if result["valid"]:
+                    print("Cookie validation PASSED after login.", file=sys.stderr)
+                    yield {}
+                    return
+                else:
+                    print("Cookie validation still FAILED after login.", file=sys.stderr)
+                    for err in result.get("errors", []):
+                        print(f"  ! {err}", file=sys.stderr)
+            else:
+                print("Login flow did not complete successfully.", file=sys.stderr)
+        else:
+            print("Exiting. Please fix cookies manually and restart.", file=sys.stderr)
+
+        print("Cookie validation FAILED — exiting.", file=sys.stderr)
+        os._exit(1)
+
+    print("Cookie validation PASSED — Google session is active.", file=sys.stderr)
+    if result.get("youtube", {}).get("logged_in"):
+        print("YouTube session is also active.", file=sys.stderr)
+    yield {}
+
+
+mcp = FastMCP("google-search", lifespan=app_lifespan)
 
 
 # ---------------------------------------------------------------------------

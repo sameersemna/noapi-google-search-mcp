@@ -13,8 +13,9 @@ StandardError=inherit
 
 ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx @playwright/mcp@latest --config '/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/config_playwright.json'
 
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
