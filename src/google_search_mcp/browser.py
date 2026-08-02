@@ -9,6 +9,7 @@ import json
 import os
 import random
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -18,6 +19,10 @@ from .config import (
     BROWSER_DATA_DIR,
     COOKIE_JSON_PATH,
     COOKIE_DIR,
+    ENABLE_MANUAL_INTERVENTION,
+    MANUAL_INTERVENTION_POLL_SEC,
+    MANUAL_INTERVENTION_REASONS,
+    MANUAL_INTERVENTION_TIMEOUT_SEC,
     SCREENSHOTS_DIR,
     STEALTH_JS,
     USER_AGENT,
@@ -808,3 +813,476 @@ async def login_and_save_cookies() -> bool:
     except Exception as e:
         print(f"\n❌ Error during login flow: {e}", file=sys.stderr, flush=True)
         return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Runtime manual intervention — open headful browser when bot detection fires
+# ═══════════════════════════════════════════════════════════════════════════
+# This is the "smart fallback" requested by users: when stealth + auto
+# CAPTCHA solve + retries have all failed, instead of going straight to
+# DuckDuckGo we open a *visible* browser window and pause the request.
+# The user can solve the CAPTCHA, log into Google, or complete 2FA
+# directly, and the original request automatically retries once the
+# page no longer looks blocked.
+
+# Concurrency: only one headful intervention at a time across the server.
+_manual_intervention_lock = threading.Lock()
+_manual_intervention_active: bool = False
+_last_intervention_result: dict = {
+    "timestamp": 0.0,
+    "resolved": False,
+    "reason": "",
+    "url": "",
+    "elapsed_sec": 0.0,
+}
+
+
+def is_manual_intervention_active() -> bool:
+    """Return True if a headful intervention window is currently open."""
+    return _manual_intervention_active
+
+
+def get_last_intervention_result() -> dict:
+    """Return metadata about the most recent intervention (for diagnostics)."""
+    return dict(_last_intervention_result)
+
+
+def _check_display_available() -> bool:
+    """Check if a graphical display is available for a headful browser.
+
+    On Linux we need DISPLAY (X11) or WAYLAND_DISPLAY. On macOS / Windows
+    a display is always assumed (the user is on a desktop).
+    """
+    if sys.platform.startswith("linux"):
+        return bool(
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        )
+    # macOS, Windows, BSD
+    return True
+
+
+async def is_login_required(page) -> bool:
+    """Detect whether the current page is a Google sign-in page.
+
+    Returns True if the page looks like a Google login flow (email/password
+    input, sign-in button, or accounts.google.com signin URL).
+    """
+    try:
+        url = page.url.lower()
+        if "accounts.google.com" in url and ("signin" in url or "v3/signin" in url or "identifier" in url):
+            return True
+        state = await page.evaluate(
+            """
+            () => {
+                const body = (document.body?.innerText || '').toLowerCase();
+                const hasEmail = !!document.querySelector(
+                    'input[type="email"], input[name="identifier"], ' +
+                    'input[autocomplete="username"], input#identifierId'
+                );
+                const hasPassword = !!document.querySelector(
+                    'input[type="password"], input[name="password"]'
+                );
+                const isAccountsDomain = location.hostname === 'accounts.google.com';
+                const hasSignInText = body.includes('sign in') || body.includes('signin');
+                const hasChooseAccount = body.includes('choose an account') ||
+                                         body.includes('choose account');
+                return {
+                    hasEmail, hasPassword, isAccountsDomain, hasSignInText, hasChooseAccount,
+                };
+            }
+            """
+        )
+        # On accounts.google.com, treat any of these as "login required"
+        if state.get("isAccountsDomain"):
+            return bool(
+                state.get("hasEmail")
+                or state.get("hasPassword")
+                or state.get("hasSignInText")
+                or state.get("hasChooseAccount")
+            )
+        # Off-domain: only consider it a login page if it has clear sign-in UI
+        return bool(
+            (state.get("hasEmail") or state.get("hasPassword"))
+            and state.get("hasSignInText")
+        )
+    except Exception:
+        return False
+
+
+async def detect_block_reason(page) -> str:
+    """Classify why a page is blocked.
+
+    Returns one of the strings in MANUAL_INTERVENTION_REASONS.
+    """
+    try:
+        url = page.url.lower()
+        state = await page.evaluate(
+            """
+            () => {
+                const body = (document.body?.innerText || '').toLowerCase();
+                return {
+                    body,
+                    hasRecaptcha: !!document.querySelector('iframe[src*="recaptcha"]'),
+                    hasImageChallenge: !!document.querySelector(
+                        'table.rc-imageselect-table, .rc-imageselect-target'
+                    ),
+                    hasUnusualTraffic: body.includes('unusual traffic') ||
+                                       body.includes('our systems have detected'),
+                    hasNotARobot: body.includes('not a robot') ||
+                                  body.includes('i\\'m not a robot'),
+                    hasChooseAccount: body.includes('choose an account') ||
+                                      body.includes('choose account'),
+                    hasSignIn: body.includes('sign in') && !body.includes('signing'),
+                    hasEmail: !!document.querySelector(
+                        'input[type="email"], input[name="identifier"], ' +
+                        'input[autocomplete="username"], input#identifierId'
+                    ),
+                    hasPassword: !!document.querySelector(
+                        'input[type="password"], input[name="password"]'
+                    ),
+                    hasVerification: body.includes('2-step verification') ||
+                                     body.includes('verify it') ||
+                                     body.includes('verify it\'s you') ||
+                                     body.includes('enter the code'),
+                    hasConsent: body.includes('before you continue') ||
+                                body.includes('consent') ||
+                                body.includes('i agree'),
+                };
+            }
+            """
+        )
+        if "accounts.google.com" in url and (state.get("hasEmail") or state.get("hasPassword")):
+            return "login"
+        if state.get("hasRecaptcha") or state.get("hasImageChallenge"):
+            return "captcha"
+        if state.get("hasUnusualTraffic") or "/sorry/" in url:
+            return "rate_limit"
+        if state.get("hasVerification"):
+            return "verification"
+        if state.get("hasConsent") and "consent.google.com" in url:
+            return "consent"
+        if state.get("hasSignIn") and state.get("hasEmail"):
+            return "login"
+        if state.get("hasChooseAccount"):
+            return "login"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+async def manual_intervention_for_block(
+    pw,
+    blocked_url: str,
+    reason: str = "unknown",
+    initial_cookies: list[dict] | None = None,
+    timeout_sec: int | None = None,
+) -> list[dict] | None:
+    """Open a headful (visible) browser so the user can manually resolve a block.
+
+    This is the runtime equivalent of `login_and_save_cookies` — invoked
+    when anti-bot measures (stealth, auto CAPTCHA solve, retries) have
+    all failed and we want the user to take over before falling back to
+    a non-Google search provider.
+
+    Reuses the same persistent browser profile, so any cookies/sessions
+    already saved are loaded automatically. The user can:
+
+      - Solve a CAPTCHA / image challenge that the neural net couldn't
+      - Log into their Google account (if the session expired)
+      - Complete 2FA / phone verification
+      - Accept a consent dialog
+
+    The function blocks (up to `timeout_sec` seconds) until the user
+    resolves the page, closes the browser (cancel), or the timeout
+    expires. Cookies are saved to disk and returned on success so the
+    caller can apply them to its headless context and retry the request.
+
+    Args:
+        pw: The active Playwright instance (must outlive this call).
+        blocked_url: The URL the user was blocked on.
+        reason: Why we think we're blocked (one of MANUAL_INTERVENTION_REASONS).
+        initial_cookies: Cookies from the failed headless context. Transferred
+                         to the headful session so the user doesn't lose their state.
+        timeout_sec: Override MANUAL_INTERVENTION_TIMEOUT_SEC for this call.
+
+    Returns:
+        A list of fresh cookies (from the headful session) if the user
+        resolved the block, or None if cancelled / timed out.
+    """
+    global _manual_intervention_active, _last_intervention_result
+
+    if not ENABLE_MANUAL_INTERVENTION:
+        print(
+            "MANUAL INTERVENTION: disabled via ENABLE_MANUAL_INTERVENTION=0. "
+            "Falling back to alternative search provider.",
+            file=sys.stderr, flush=True,
+        )
+        _last_intervention_result.update({
+            "timestamp": time.time(),
+            "resolved": False,
+            "reason": reason,
+            "url": blocked_url,
+            "elapsed_sec": 0.0,
+            "outcome": "disabled",
+        })
+        return None
+
+    if not _check_display_available():
+        print(
+            "MANUAL INTERVENTION: no graphical display detected (DISPLAY / "
+            "WAYLAND_DISPLAY unset). A headful browser cannot be opened. "
+            "Falling back to alternative search provider. To enable, run the "
+            "server on a machine with a desktop session or use X-forwarding.",
+            file=sys.stderr, flush=True,
+        )
+        _last_intervention_result.update({
+            "timestamp": time.time(),
+            "resolved": False,
+            "reason": reason,
+            "url": blocked_url,
+            "elapsed_sec": 0.0,
+            "outcome": "no_display",
+        })
+        return None
+
+    if not _manual_intervention_lock.acquire(blocking=False):
+        print(
+            "MANUAL INTERVENTION: another headful window is already open. "
+            "Skipping to avoid multiple windows.",
+            file=sys.stderr, flush=True,
+        )
+        _last_intervention_result.update({
+            "timestamp": time.time(),
+            "resolved": False,
+            "reason": reason,
+            "url": blocked_url,
+            "elapsed_sec": 0.0,
+            "outcome": "concurrent_lock",
+        })
+        return None
+
+    _manual_intervention_active = True
+    start_time = time.time()
+    headful_context = None
+    resolved = False
+    new_cookies: list[dict] | None = None
+
+    if timeout_sec is None:
+        timeout_sec = MANUAL_INTERVENTION_TIMEOUT_SEC
+
+    try:
+        # ── Human-friendly reason text ──
+        reason_text = {
+            "captcha": "CAPTCHA challenge (reCAPTCHA / image selection)",
+            "login": "Google sign-in required",
+            "rate_limit": "rate limit / 'unusual traffic from your computer network'",
+            "consent": "consent dialog",
+            "verification": "2-step verification / phone / identity check",
+            "unknown": "blocked page (specific reason not identified)",
+        }.get(reason, "blocked page")
+
+        # ── Big banner so the user can't miss it ──
+        timeout_min = (timeout_sec // 60) if timeout_sec > 0 else "∞"
+        print("", file=sys.stderr, flush=True)
+        print("╔" + "═" * 68 + "╗", file=sys.stderr, flush=True)
+        print("║  ⚠️  GOOGLE BOT DETECTION — MANUAL INTERVENTION REQUIRED" + " " * 7 + "║", file=sys.stderr, flush=True)
+        print("╚" + "═" * 68 + "╝", file=sys.stderr, flush=True)
+        print("", file=sys.stderr, flush=True)
+        print(f"  Reason:    {reason_text}", file=sys.stderr, flush=True)
+        print(f"  URL:       {blocked_url}", file=sys.stderr, flush=True)
+        print(f"  Timeout:   {timeout_min} min (0 = wait forever)", file=sys.stderr, flush=True)
+        print("", file=sys.stderr, flush=True)
+        print("  A browser window is opening now. In it, please:", file=sys.stderr, flush=True)
+        print("    • solve the CAPTCHA / image challenge, OR", file=sys.stderr, flush=True)
+        print("    • log into your Google account, OR", file=sys.stderr, flush=True)
+        print("    • complete 2-step verification / phone check, OR", file=sys.stderr, flush=True)
+        print("    • accept any consent dialog that appears.", file=sys.stderr, flush=True)
+        print("", file=sys.stderr, flush=True)
+        print("  The system will detect when the page is unblocked and will", file=sys.stderr, flush=True)
+        print("  automatically retry your request with the fresh cookies.", file=sys.stderr, flush=True)
+        print("  To cancel, close the browser window.", file=sys.stderr, flush=True)
+        print("", file=sys.stderr, flush=True)
+
+        # ── Snapshot current cookies for transfer ──
+        if initial_cookies is None:
+            initial_cookies = []
+        try:
+            with open(COOKIE_JSON_PATH, "w") as f:
+                json.dump(initial_cookies, f)
+        except Exception:
+            pass
+
+        # ── Launch headful browser ──
+        try:
+            headful_context = await launch_browser(pw, headless=False)
+        except Exception as e:
+            print(f"  ❌ Could not launch headful browser: {e}", file=sys.stderr, flush=True)
+            _last_intervention_result.update({
+                "timestamp": time.time(),
+                "resolved": False,
+                "reason": reason,
+                "url": blocked_url,
+                "elapsed_sec": time.time() - start_time,
+                "outcome": "launch_failed",
+            })
+            return None
+
+        # Transfer cookies so the user doesn't lose their session
+        if initial_cookies:
+            try:
+                await headful_context.add_cookies(initial_cookies)
+            except Exception as e:
+                print(f"  ⚠️  Could not transfer cookies: {e}", file=sys.stderr, flush=True)
+
+        headful_page = await headful_context.new_page()
+
+        # ── Navigate to the blocked URL ──
+        print(f"  Opening {blocked_url} in headful browser...", file=sys.stderr, flush=True)
+        try:
+            await headful_page.goto(blocked_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            print(f"  ⚠️  Navigation warning: {e}", file=sys.stderr, flush=True)
+
+        # Give the page a moment to settle
+        await human_delay(headful_page, min_ms=1500, max_ms=3000)
+
+        # ── Poll for resolution ──
+        print("  Watching for resolution...", file=sys.stderr, flush=True)
+        effective_timeout = timeout_sec if timeout_sec and timeout_sec > 0 else float("inf")
+        last_status: str | None = None
+        last_logged: float = 0.0
+
+        while time.time() - start_time < effective_timeout:
+            await headful_page.wait_for_timeout(int(MANUAL_INTERVENTION_POLL_SEC * 1000))
+
+            try:
+                state = await headful_page.evaluate(
+                    """
+                    () => {
+                        const body = (document.body?.innerText || '').toLowerCase();
+                        const url = location.href.toLowerCase();
+                        const isCaptcha =
+                            url.includes('/sorry/') ||
+                            body.includes('unusual traffic') ||
+                            body.includes('not a robot') ||
+                            !!document.querySelector('iframe[src*="recaptcha"]');
+                        const isLogin =
+                            (url.includes('accounts.google.com') &&
+                             (body.includes('sign in') || body.includes('choose an account'))) ||
+                            (!!document.querySelector('input[type="email"], input[name="identifier"]') &&
+                             body.includes('sign in'));
+                        const isVerification =
+                            body.includes('2-step verification') ||
+                            body.includes('verify it\'s you') ||
+                            body.includes('enter the code we');
+                        const hasSearchBox = !!document.querySelector(
+                            'input[name="q"], textarea[name="q"], input[title="search"]'
+                        );
+                        const hasResults = document.querySelectorAll(
+                            'div#search div.g, #rso div.g, #rso div.MjjYud, h3'
+                        ).length > 0;
+                        const hasAvatar = !!document.querySelector(
+                            'img[src*="googleusercontent.com"], ' +
+                            'button#avatar-button, ' +
+                            'a[aria-label*="Google Account"]'
+                        );
+                        return {
+                            isCaptcha, isLogin, isVerification,
+                            hasSearchBox, hasResults, hasAvatar,
+                        };
+                    }
+                    """
+                )
+            except Exception:
+                # Page/browser closed by user
+                print("", file=sys.stderr, flush=True)
+                print("  ❌ Browser window was closed. Cancelling intervention.", file=sys.stderr, flush=True)
+                break
+
+            blocked = state.get("isCaptcha") or state.get("isLogin") or state.get("isVerification")
+            looks_ok = state.get("hasSearchBox") or state.get("hasResults") or state.get("hasAvatar")
+
+            if not blocked and looks_ok:
+                resolved = True
+                print("", file=sys.stderr, flush=True)
+                print("  ✅ Block resolved! Saving cookies and retrying...", file=sys.stderr, flush=True)
+                break
+
+            # Log a status update if the status changed, or every 15s
+            if blocked:
+                status = (
+                    "captcha" if state.get("isCaptcha")
+                    else "login" if state.get("isLogin")
+                    else "verification"
+                )
+            else:
+                status = "loading"
+            now = time.time()
+            if status != last_status or (now - last_logged) >= 15.0:
+                elapsed = int(now - start_time)
+                print(f"  ⏳ Waiting for you to solve... ({elapsed}s, page status: {status})", file=sys.stderr, flush=True)
+                last_status = status
+                last_logged = now
+
+        else:
+            # Timeout
+            print("", file=sys.stderr, flush=True)
+            print(f"  ⏱  Intervention timed out after {int(time.time() - start_time)}s.", file=sys.stderr, flush=True)
+
+        # ── Save cookies even if not resolved — user may have made progress ──
+        try:
+            new_cookies = await headful_context.cookies()
+            with open(COOKIE_JSON_PATH, "w") as f:
+                json.dump(new_cookies, f)
+            if resolved:
+                # Also refresh google_cookies.txt from the new state
+                google_path = os.path.join(COOKIE_DIR, "google_cookies.txt")
+                google_cookies = [
+                    c for c in new_cookies
+                    if "google" in c.get("domain", "").lower()
+                    or c.get("domain", "").endswith(".google.com")
+                    or c.get("domain", "").endswith(".youtube.com")
+                ]
+                if google_cookies:
+                    _write_netscape_cookie_file(google_path, google_cookies, "www.google.com")
+                    print(f"  💾 Updated {google_path} ({len(google_cookies)} cookies)", file=sys.stderr, flush=True)
+                print(f"  💾 Saved {len(new_cookies)} cookies to {COOKIE_JSON_PATH}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"  ⚠️  Could not save cookies: {e}", file=sys.stderr, flush=True)
+            new_cookies = None
+
+        # Give the user a moment to read the message
+        if resolved:
+            await headful_page.wait_for_timeout(500)
+
+        elapsed = time.time() - start_time
+        _last_intervention_result.update({
+            "timestamp": time.time(),
+            "resolved": resolved,
+            "reason": reason,
+            "url": blocked_url,
+            "elapsed_sec": elapsed,
+            "outcome": "resolved" if resolved else "timeout_or_cancelled",
+        })
+        return new_cookies if resolved else None
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"  ❌ Unexpected error during manual intervention: {e}", file=sys.stderr, flush=True)
+        _last_intervention_result.update({
+            "timestamp": time.time(),
+            "resolved": False,
+            "reason": reason,
+            "url": blocked_url,
+            "elapsed_sec": elapsed,
+            "outcome": f"error: {e}",
+        })
+        return None
+    finally:
+        if headful_context is not None:
+            try:
+                await headful_context.close()
+            except Exception:
+                pass
+        _manual_intervention_active = False
+        _manual_intervention_lock.release()

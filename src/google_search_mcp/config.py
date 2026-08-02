@@ -175,6 +175,64 @@ SCREENSHOTS_DIR: str | None = os.path.join(os.path.curdir, "screenshots")
 # SCREENSHOTS_DIR = None
 
 # ---------------------------------------------------------------------------
+# Manual intervention — open a headful browser when bot detection fails
+# ---------------------------------------------------------------------------
+# When all automatic anti-bot measures (stealth patches, CAPTCHA solve, retries)
+# have been exhausted and Google is still blocking us, the server can open a
+# visible (headful) browser window so the user can manually solve the
+# CAPTCHA, log into their Google account, or complete a 2FA/verification
+# challenge. The request is paused until the user resolves the issue (or
+# the timeout expires), and then it retries automatically.
+#
+# Set ENABLE_MANUAL_INTERVENTION=0 to disable and always fall back to
+# alternative search providers (DuckDuckGo, etc.) instead of opening a
+# headful window. Default: enabled.
+ENABLE_MANUAL_INTERVENTION: bool = os.environ.get(
+    "ENABLE_MANUAL_INTERVENTION", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# How long (seconds) to wait for the user to resolve the block before
+# giving up and falling back. Set to 0 to wait indefinitely.
+MANUAL_INTERVENTION_TIMEOUT_SEC: int = int(
+    os.environ.get("MANUAL_INTERVENTION_TIMEOUT_SEC", "300")
+)
+
+# How often (seconds) to poll the headful browser for resolution.
+MANUAL_INTERVENTION_POLL_SEC: float = float(
+    os.environ.get("MANUAL_INTERVENTION_POLL_SEC", "3.0")
+)
+
+# Reasons we may trigger manual intervention. Exposed for documentation and
+# the MCP `open_manual_browser` tool which can be called explicitly.
+MANUAL_INTERVENTION_REASONS: tuple[str, ...] = (
+    "captcha",      # reCAPTCHA / image challenge / checkbox
+    "login",        # Google sign-in page
+    "rate_limit",   # "unusual traffic from your computer network"
+    "consent",      # Persistent consent dialog
+    "verification", # 2FA / phone verification
+    "unknown",      # Fallback — page looks blocked but no specific indicator
+)
+
+# ---------------------------------------------------------------------------
+# Health server — separate HTTP endpoint for /health, /version, etc.
+# ---------------------------------------------------------------------------
+# Runs in the same Python process as the MCP server, on its own port
+# (default 11499). Independent of the MCP transport — works whether the
+# server is launched with stdio (mcp-proxy) or streamable_http.
+#
+# Set ENABLE_HEALTH_SERVER=0 to disable.
+ENABLE_HEALTH_SERVER: bool = os.environ.get(
+    "ENABLE_HEALTH_SERVER", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+HEALTH_HOST: str = os.environ.get("HEALTH_HOST", "0.0.0.0")
+HEALTH_PORT: int = int(os.environ.get("HEALTH_PORT", "11499"))
+
+# Optional bearer token for /health auth (e.g. for k8s probes that share
+# the endpoint publicly). Empty / unset = no auth required.
+HEALTH_AUTH_TOKEN: str = os.environ.get("HEALTH_AUTH_TOKEN", "").strip()
+
+# ---------------------------------------------------------------------------
 # Rate limiting — minimum gap (seconds) between requests to Google
 # ---------------------------------------------------------------------------
 

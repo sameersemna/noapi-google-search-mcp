@@ -7,11 +7,141 @@ If you want to support noapi-google-mcp or gpt-oss-20B/120B-Vision and other ope
 > <img src="images/btc-donate-qr.jpeg" alt="BTC" width="80" align="left" style="margin-right:12px"> If you find this useful, consider supporting continued development and new features.<br>**BTC:** `16DT4AHemLyn7C6P116YepjY518gu9wUUH`<br clear="all">
 > <img src="images/eth-donate-qr.png" alt="ETH" width="80" align="left" style="margin-right:12px"> **ETH:** `0x7287D1F9c77832cFF246937af0443622bFdACD04`<br clear="all">
 
-**38 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
+**41 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
 
 An MCP server that turns your local LLM into a fully connected assistant. Real Google results, live news and social feeds, reverse image search, offline OCR, YouTube transcription and clip extraction — all running locally through headless Chromium and open-source ML models. No API keys, no usage limits, no cloud dependency.
 
 Works with **LM Studio**, **Claude Desktop**, **OpenClaw**, **Ollama**, and any MCP-compatible client.
+
+---
+
+## What's New in v0.3.3 — `/health` Endpoint + Monitoring
+
+The MCP server now exposes a small HTTP health server on a separate port
+(default **`11499`**) so you can monitor the service with Prometheus,
+k8s probes, or any HTTP-aware monitoring tool. The endpoint runs
+alongside the MCP server in the same Python process — independent of
+the MCP transport (works whether you're behind `mcp-proxy`, running
+streamable HTTP, or stdio).
+
+**Endpoints:**
+
+| URL | Returns | Use for |
+|-----|---------|---------|
+| `GET /` | Index of available endpoints | Discovery |
+| `GET /health` | Full JSON snapshot | Dashboards, alerting |
+| `GET /health/live` | `{"status":"alive","uptime_sec":...}` | k8s liveness probe |
+| `GET /health/ready` | 200 if critical deps present, else 503 | k8s readiness probe |
+| `GET /version` | Version + git commit hash | "What's running where?" |
+
+**What the response includes:**
+
+- **Service status**: `ok` / `degraded` / `down` (HTTP 200 / 200 / 503)
+- **Version** + **git commit** (full hash, short, branch, dirty flag, `git describe`)
+- **Python & platform** info (version, executable, OS, machine, node, argv)
+- **Process metrics** (PID, PPID, RSS memory, VMS, CPU%, thread count, nice)
+- **MCP introspection** (tool count, prompt count, resource count, **full list of tool names**)
+- **Config snapshot** (env-driven settings: `ENABLE_MANUAL_INTERVENTION`, `SKIP_COOKIE_VALIDATION`, etc.)
+- **Dependency status** for every Python package: `playwright` (with chromium install path!), `opencv`, `onnxruntime`, `faster_whisper`, `yt_dlp`, `rapidocr`, `lingua`, `psutil`, `starlette`, `uvicorn`
+- **File presence & sizes** for `google_cookies.txt`, `youtube_cookies.txt`, auto-saved cookies, MobileNetV2 model, feeds DB, browser data dir
+- **Disk usage** for the cache directory (free / total / used %)
+- **Manual intervention state** (enabled, display available, currently active, last result)
+- **Startup info** (cookie validation outcome — skipped/passed/errors/warnings)
+
+**Configuration (env vars):**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ENABLE_HEALTH_SERVER` | `1` | Set to `0` to disable the health server |
+| `HEALTH_HOST` | `0.0.0.0` | Bind address |
+| `HEALTH_PORT` | `11499` | Bind port (set to `0` for OS-assigned) |
+| `HEALTH_AUTH_TOKEN` | _(empty)_ | Optional bearer token for auth |
+
+**Example call:**
+
+```bash
+$ curl http://localhost:11499/health/live
+{"status":"alive","uptime_sec":1234.5,"pid":4126492}
+
+$ curl http://localhost:11499/health
+{
+  "status": "ok",
+  "uptime_sec": 1234.5,
+  "loaded_at": "2026-08-02T20:25:45.188+00:00",
+  "version": "0.3.3",
+  "git": {
+    "commit": "15763fc9f77c762613ddfea7a4c759b7758ef416",
+    "short": "15763fc9",
+    "branch": "dev",
+    "dirty": false,
+    "describe": "v0.3.3-3-g15763fc"
+  },
+  "python": { ... },
+  "platform": { ... },
+  "process": { "pid": 4126492, "memory_rss_mb": 153.4, "threads": 7, ... },
+  "mcp": { "name": "google-search", "tools": 41, "tool_names": [...] },
+  "config": { "ENABLE_MANUAL_INTERVENTION": true, ... },
+  "dependencies": { "playwright": { "ok": true, "chromium_installed": true, ... }, ... },
+  "files": { "google_cookies": { "exists": true, "size_bytes": 4096 }, ... },
+  "disk": { "free_bytes": 12345678901, "free_human": "11.5 GB", "used_percent": 75.3 },
+  "manual_intervention": { "enabled": true, "display_available": true, ... },
+  "startup": { "cookie_validation_passed": true, ... }
+}
+```
+
+**Auth (optional):**
+
+```bash
+# Set HEALTH_AUTH_TOKEN in the environment
+export HEALTH_AUTH_TOKEN="my-secret-token"
+
+# Then call with the bearer token
+curl -H "Authorization: Bearer my-secret-token" http://localhost:11499/health
+
+# Or as a query parameter (for simple monitoring setups)
+curl "http://localhost:11499/health?token=my-secret-token"
+```
+
+**Ad-hoc /health snapshot (no server):**
+
+```bash
+python -m google_search_mcp.health_server --once | jq
+```
+
+This is great for k8s `livenessProbe` / `readinessProbe`, Prometheus
+blackbox exporter, Datadog HTTP checks, Grafana synthetic monitoring, or
+just a quick `curl` when debugging.
+
+---
+
+## What's New in v0.3.2 — Smart Bot-Detection Handling (Headful Fallback)
+
+Google is now blocking headless Chromium more aggressively: reCAPTCHAs, sign-in walls, 2-step verification, and "unusual traffic" rate-limits that no neural net can solve. v0.3.2 adds a **headful browser fallback** so you stay in control.
+
+**What it does:**
+- When all automatic anti-bot measures fail (stealth patches + auto CAPTCHA solve + retries), the server pops a **visible Chromium window** on your machine
+- The window stays open until you solve the block manually (CAPTCHA / login / 2FA / consent) or the configurable timeout fires
+- Fresh cookies are saved automatically and the original request is retried
+- If you can't / don't want to resolve it, the system gracefully falls back to DuckDuckGo
+
+**New MCP tools:**
+| Tool | What it does |
+|------|--------------|
+| `open_manual_browser` | Open a headful browser window right now for the user to handle a block |
+| `manual_intervention_status` | Check whether a headful window is open and view the last intervention result |
+
+**Auto-triggered by every Google tool:** when a Google tool gets blocked and all automatic measures fail, the system now opens a headful window before falling back. The LLM can also call `open_manual_browser` explicitly when it detects a block.
+
+**Tunable via env:**
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ENABLE_MANUAL_INTERVENTION` | `1` | Set to `0` to always fall back to DuckDuckGo without opening a window |
+| `MANUAL_INTERVENTION_TIMEOUT_SEC` | `300` | How long to wait for you to solve the block (0 = wait forever) |
+| `MANUAL_INTERVENTION_POLL_SEC` | `3.0` | How often to check if the page is resolved |
+
+**On a server with no display:** the headful window is auto-detected as unavailable (`DISPLAY`/`WAYLAND_DISPLAY` unset) and the system falls back to DuckDuckGo silently.
+
+**Concurrency safe:** a global lock prevents two headful windows from opening at once; the second call is rejected with a clear message.
 
 ---
 
@@ -132,7 +262,14 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 
 ---
 
-## All 38 Tools by Category
+## All 41 Tools by Category
+
+### Bot-Detection & Diagnostics
+| Tool | Description |
+|------|-------------|
+| `open_manual_browser` | Open a headful browser window so you can manually solve a Google block (CAPTCHA, login, 2FA) — fresh cookies are saved automatically |
+| `manual_intervention_status` | Check whether a headful intervention window is open and view the last intervention result |
+| `check_cookies` | Verify the cookie files / auto-saved session cookies loaded by the server |
 
 ### Live Feed Subscriptions
 | Tool | Description |
@@ -253,7 +390,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Setup time | **`pip install` + go** | Create Cloud project, enable API, configure | Multiple API keys |
 | Results quality | **Real Google results** | Custom Search Engine | Brave index |
 | JavaScript pages | **Renders them (Chromium)** | Cannot render JS | Cannot render JS |
-| Tools count | **38** | 1-3 | 2 (web_search, web_fetch) |
+| Tools count | **41** | 1-3 | 2 (web_search, web_fetch) |
 | Google Search | Built-in (with filters) | Basic only | Not available |
 | Google Shopping | Built-in | Not available | Not available |
 | Google Flights | Built-in | Not available | Not available |
@@ -288,10 +425,129 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Wikipedia | **Built-in** | Not available | Not available |
 | S3/MinIO upload | **Built-in** | Not available | Not available |
 | Page fetching | Built-in | Usually separate | Basic |
+| Headful bot-detection fallback | **Built-in (manual CAPTCHA/login)** | Not available | Not available |
+| Diagnostics (cookie/intervention status) | **Built-in** | Not available | Not available |
+| Health / readiness endpoint | **Built-in (`/health` on port 11499)** | Not available | Not available |
 
 ---
 
 ## Tool Details & Parameters
+
+### Health Endpoint
+
+The health endpoint is **not an MCP tool** — it's a plain HTTP endpoint
+on a separate port (default `11499`). It runs alongside the MCP server
+and is independent of the MCP transport. Use it for monitoring, k8s
+probes, and operational diagnostics.
+
+#### `GET /` — Index of endpoints
+
+Returns a small JSON listing all available endpoints and their purpose.
+Useful for discovery.
+
+```json
+{
+  "service": "noapi-google-search-mcp",
+  "version": "0.3.3",
+  "endpoints": {
+    "GET /":            "this index",
+    "GET /health":      "full health snapshot (JSON)",
+    "GET /health/live": "liveness probe (200 if process is alive)",
+    "GET /health/ready": "readiness probe (200 if critical deps present)",
+    "GET /version":     "just version + git commit info"
+  }
+}
+```
+
+#### `GET /health/live` — Liveness probe
+
+Minimal probe. Always 200 if the process is alive. Use for k8s
+`livenessProbe`.
+
+```json
+{"status": "alive", "uptime_sec": 1234.5, "pid": 4126492}
+```
+
+#### `GET /health/ready` — Readiness probe
+
+Returns 200 if all critical dependencies (starlette, uvicorn,
+playwright, opencv) are present. Returns 503 if any are missing. Use
+for k8s `readinessProbe`.
+
+```json
+{
+  "status": "ready",
+  "dependencies": {
+    "starlette":  {"ok": true, "version": "0.40.0"},
+    "uvicorn":    {"ok": true, "version": "0.30.1"},
+    "playwright": {"ok": true, "version": "1.45.0", "chromium_installed": true},
+    "opencv":     {"ok": true, "version": "4.10.0"}
+  }
+}
+```
+
+#### `GET /version` — Version + git
+
+```json
+{
+  "version": "0.3.3",
+  "git": {
+    "commit": "15763fc9f77c762613ddfea7a4c759b7758ef416",
+    "short": "15763fc9",
+    "branch": "dev",
+    "dirty": false,
+    "describe": "v0.3.3-3-g15763fc"
+  },
+  "python": {
+    "version": "3.11.15 ...",
+    "implementation": "CPython",
+    "executable": "/home/sameer/anaconda3/envs/mcp-google/bin/python"
+  }
+}
+```
+
+#### `GET /health` — Full snapshot
+
+The big one. Returns a comprehensive JSON snapshot of everything the
+operator might want to know about the service in a single call. See
+the v0.3.3 release notes above for the full schema.
+
+**Response status code:**
+- `200` if `status: ok` or `status: degraded`
+- `503` if `status: down` (a critical dependency is missing)
+
+**k8s probe example:**
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 11499
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 11499
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+**Environment variables:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ENABLE_HEALTH_SERVER` | `1` | Set to `0` to disable the health server |
+| `HEALTH_HOST` | `0.0.0.0` | Bind address |
+| `HEALTH_PORT` | `11499` | Bind port (set to `0` for OS-assigned) |
+| `HEALTH_AUTH_TOKEN` | _(empty)_ | Optional bearer token for auth |
+
+**Ad-hoc snapshot (no server started):**
+
+```bash
+python -m google_search_mcp.health_server --once | jq
+```
 
 ### Feed Subscription Tools
 
@@ -334,6 +590,60 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | `source` | Filter by source name (optional) | `"BBC"`, `"LocalLLaMA"` |
 | `source_type` | Filter by type (optional) | `"reddit"`, `"hackernews"` |
 | `limit` | Max items (default 20) | `10` |
+
+---
+
+### Bot-Detection & Diagnostics Tools
+
+#### `open_manual_browser` — Solve a Google Block Manually
+
+Opens a visible (headful) browser window so you can manually resolve a
+bot-detection block — CAPTCHA challenge, Google sign-in, 2-step
+verification, persistent consent dialog, or anything else that
+automated anti-bot measures couldn't handle.
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `url` | URL to open in the visible browser (default Google home) | `"https://www.google.com"`, `"https://www.google.com/sorry/index"` |
+| `reason` | Why intervention is needed (just for logging) | `"captcha"`, `"login"`, `"rate_limit"`, `"verification"`, `"unknown"` |
+| `timeout_sec` | Override the wait timeout; 0 = server default (300s) | `600` for slow 2FA, `0` for default |
+
+**What it does:**
+- Closes the current headless context (frees the browser profile lock)
+- Opens a real, visible Chromium window
+- Waits for you to interact with the page (solve CAPTCHA, log in, etc.)
+- Polls every `MANUAL_INTERVENTION_POLL_SEC` for resolution
+- Saves fresh cookies to disk when done
+- Returns so you can retry your original request with the new session
+
+**Auto-trigger:** Every Google tool (`google_search`, `google_news`,
+`google_images`, `visit_page`, `transcribe_video`, etc.) automatically
+calls this under the hood when its automatic anti-bot measures fail.
+You can also call it explicitly from the LLM.
+
+**Example user flow:**
+> *"Google is showing me a CAPTCHA. Please open a manual browser
+> so I can solve it."*
+>
+> → LLM calls `open_manual_browser(url="...", reason="captcha")`
+> → Visible Chromium window appears on your machine
+> → You solve the CAPTCHA in the window
+> → Tool returns: "✅ Manual intervention successful. 23 cookies saved. Please retry your previous request."
+
+**On a server without DISPLAY:** the call returns a clear message
+explaining no display is available, and the system falls back to
+DuckDuckGo.
+
+#### `manual_intervention_status` — Check Intervention State
+
+Returns the current state of the manual-intervention system: whether a
+window is open, last outcome, timeout / poll settings, and display
+availability. Useful for diagnostics without triggering anything.
+
+#### `check_cookies` — Inspect Loaded Cookies
+
+Verify which cookie files are present, the Google domains they cover,
+and whether auto-saved session cookies exist. No parameters.
 
 ---
 
@@ -535,6 +845,35 @@ Ask "extract the part about X" and the LLM finds timestamps from the transcript 
 
 ## Sample Prompts
 
+### Health & Monitoring
+| What you type | Tool / endpoint called |
+|--------------|------------------------|
+| *"Is the service healthy?"* | `GET /health/live` |
+| *"Are all critical dependencies ready?"* | `GET /health/ready` |
+| *"Give me the full health snapshot"* | `GET /health` |
+| *"What version of the server is running?"* | `GET /version` |
+| *"What's the current git commit?"* | `GET /version` |
+| *"How much memory is the server using?"* | `GET /health` (look at `process.memory_rss_mb`) |
+| *"Is Playwright's chromium installed?"* | `GET /health` (look at `dependencies.playwright.chromium_installed`) |
+| *"How many MCP tools are registered?"* | `GET /health` (look at `mcp.tools` and `mcp.tool_names`) |
+| *"Show me the cookie validation result from startup"* | `GET /health` (look at `startup.cookie_validation_passed`) |
+| *"When was the service started?"* | `GET /health` (look at `loaded_at` and `uptime_sec`) |
+
+> **Tip:** The health endpoint is independent of the MCP transport. You can curl it from any monitoring tool, k8s liveness/readiness probe, or shell script — no MCP client needed.
+
+### Bot-Detection & Manual Intervention
+| What you type | Tool called |
+|--------------|-------------|
+| *"Google is showing me a CAPTCHA. Open a manual browser so I can solve it."* | `open_manual_browser` |
+| *"I'm getting a sign-in page. Open a manual browser so I can log in."* | `open_manual_browser` |
+| *"I need to verify with 2FA. Open a headful browser with a 10-minute timeout."* | `open_manual_browser` (with `timeout_sec=600`) |
+| *"Are you currently showing a headful browser window?"* | `manual_intervention_status` |
+| *"What was the result of your last manual intervention attempt?"* | `manual_intervention_status` |
+| *"Check my Google cookies"* | `check_cookies` |
+| *"What Google domains are covered by my cookies?"* | `check_cookies` |
+
+> **Tip:** Manual intervention is auto-triggered by every Google tool when its automatic anti-bot measures fail. You don't need to call `open_manual_browser` explicitly — just be ready to interact with the visible window when it appears.
+
 ### Feed Subscriptions
 | What you type | Tool called |
 |--------------|-------------|
@@ -699,7 +1038,7 @@ mcp_servers:
       PYTHONUNBUFFERED: "1"
 ```
 
-This gives your OpenClaw agent access to all 38 tools — real Google search, live feeds, vision, OCR, and video intelligence — with zero API keys.
+This gives your OpenClaw agent access to all 41 tools — real Google search, live feeds, vision, OCR, video intelligence, the headful bot-detection fallback, and the built-in health endpoint — with zero API keys.
 
 ### As a CLI
 

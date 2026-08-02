@@ -33,6 +33,7 @@ from .config import (
     CLIPS_DIR,
     COOKIE_DIR,
     COOKIE_JSON_PATH,
+    ENABLE_MANUAL_INTERVENTION,
     FEEDS_DB_PATH,
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -40,6 +41,9 @@ from .config import (
     DEFAULT_IMAGE_DIR,
     LANGUAGE_CODES,
     LANG_DETECTION_CONFIDENCE_THRESHOLD,
+    MANUAL_INTERVENTION_POLL_SEC,
+    MANUAL_INTERVENTION_REASONS,
+    MANUAL_INTERVENTION_TIMEOUT_SEC,
     MAX_PAGE_CHARS,
     MAX_OBJECTS,
     MOBILENET_ONNX_PATH,
@@ -54,12 +58,18 @@ from .config import (
     IMAP_SERVERS,
 )
 from .browser import (
+    _check_display_available,
     _parse_netscape_cookie_file,
+    detect_block_reason,
     dismiss_consent,
+    get_last_intervention_result,
     human_delay,
+    is_login_required,
+    is_manual_intervention_active,
     launch_browser,
     load_cookies,
     login_and_save_cookies,
+    manual_intervention_for_block,
     save_cookies,
     setup_page_stealth,
     simulate_human_behavior,
@@ -95,6 +105,7 @@ from .utils.language import (
     detect_source_language,
     resolve_language_code,
 )
+from . import health_server
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -174,10 +185,31 @@ async def app_lifespan(server: FastMCP):
     to open a headful browser for manual login. If the user declines or
     login fails, the server exits with a non-zero code.
     YouTube warnings are printed but don't block startup.
+
+    Also starts a small HTTP health server on a separate port (default
+    11499) so monitoring tools / k8s probes can check liveness, readiness,
+    and pull a full status snapshot without going through the MCP proxy.
     """
+    # Register the FastMCP server so /health can introspect its tools
+    health_server.set_mcp_server(server)
+
+    # ── Health server (started first so probes work even during cookie
+    # validation) ──
+    health = health_server.HealthServer()
+    await health.start()
+    # Mark start time so uptime_sec is accurate
+    health_server.set_loaded_at()
+
     if SKIP_COOKIE_VALIDATION:
         print("SKIP_COOKIE_VALIDATION is set — skipping cookie validation.", file=sys.stderr)
-        yield {}
+        health_server.set_startup_result(
+            skipped=True, passed=None,
+            errors=[], warnings=[],
+        )
+        try:
+            yield {}
+        finally:
+            await health.stop()
         return
 
     print("Validating Google cookies at startup...", file=sys.stderr)
@@ -190,6 +222,11 @@ async def app_lifespan(server: FastMCP):
     if not result["valid"]:
         msg = _format_validation_error(result)
         print(msg, file=sys.stderr)
+        health_server.set_startup_result(
+            skipped=False, passed=False,
+            errors=result.get("errors", []),
+            warnings=result.get("warnings", []),
+        )
 
         # ── Offer headful login flow ──
         print("", file=sys.stderr)
@@ -220,24 +257,45 @@ async def app_lifespan(server: FastMCP):
                 result = await validate_google_cookies()
                 if result["valid"]:
                     print("Cookie validation PASSED after login.", file=sys.stderr)
-                    yield {}
+                    health_server.set_startup_result(
+                        skipped=False, passed=True,
+                        errors=[], warnings=result.get("warnings", []),
+                    )
+                    try:
+                        yield {}
+                    finally:
+                        await health.stop()
                     return
                 else:
                     print("Cookie validation still FAILED after login.", file=sys.stderr)
                     for err in result.get("errors", []):
                         print(f"  ! {err}", file=sys.stderr)
+                    health_server.set_startup_result(
+                        skipped=False, passed=False,
+                        errors=result.get("errors", []),
+                        warnings=result.get("warnings", []),
+                    )
             else:
                 print("Login flow did not complete successfully.", file=sys.stderr)
         else:
             print("Exiting. Please fix cookies manually and restart.", file=sys.stderr)
 
         print("Cookie validation FAILED — exiting.", file=sys.stderr)
+        # Stop the health server before exiting so the process is clean
+        await health.stop()
         os._exit(1)
 
     print("Cookie validation PASSED — Google session is active.", file=sys.stderr)
     if result.get("youtube", {}).get("logged_in"):
         print("YouTube session is also active.", file=sys.stderr)
-    yield {}
+    health_server.set_startup_result(
+        skipped=False, passed=True,
+        errors=[], warnings=result.get("warnings", []),
+    )
+    try:
+        yield {}
+    finally:
+        await health.stop()
 
 
 mcp = FastMCP("google-search", lifespan=app_lifespan)
@@ -296,6 +354,152 @@ async def check_cookies() -> str:
             lines.append(f"\nAuto-saved session cookies: file exists but could not be read")
     else:
         lines.append(f"\nAuto-saved session cookies: none yet")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Manual intervention — open a headful browser when bot detection fires
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def open_manual_browser(
+    url: str = "https://www.google.com",
+    reason: str = "unknown",
+    timeout_sec: int = 0,
+) -> str:
+    """Open a visible (headful) browser window so you can manually resolve
+    a Google bot-detection block (CAPTCHA, login, 2FA, consent dialog, ...).
+
+    When this tool is called, the server closes its current headless browser,
+    opens a real visible Chromium window, and waits for you to interact with
+    the page. Once the page is no longer blocked (search results visible,
+    avatar showing, etc.) the system saves the fresh cookies and you can
+    retry your previous request — it will use the updated session.
+
+    When to call this:
+      - You (or a previous tool result) noticed a CAPTCHA or login page
+      - Automatic anti-bot measures failed and you want to take over
+      - Cookies look stale and you want to refresh them via the GUI
+      - You're using this MCP server for the first time and want to log in
+
+    What you can do in the window:
+      - Solve any reCAPTCHA / image challenge
+      - Log into your Google account
+      - Complete 2-step verification / phone check
+      - Accept consent dialogs
+
+    Args:
+        url: The URL to open in the visible browser. Default is Google home
+             which is the right page for logging in.
+        reason: One of the supported reasons for documentation purposes:
+                "captcha", "login", "rate_limit", "consent", "verification",
+                "unknown". Just helps the system log what you're doing.
+        timeout_sec: How long to wait (seconds) before giving up. 0 = use
+                     the server default (MANUAL_INTERVENTION_TIMEOUT_SEC env var,
+                     default 300 = 5 minutes). Set to a higher value for
+                     long 2FA flows, or 0 to wait forever.
+
+    Returns a status message describing the outcome.
+    """
+    if not ENABLE_MANUAL_INTERVENTION:
+        return (
+            "Manual intervention is disabled. Set ENABLE_MANUAL_INTERVENTION=1 "
+            "in the server environment to enable headful browser fallback."
+        )
+    if not _check_display_available():
+        return (
+            "Cannot open headful browser: no graphical display detected "
+            "(DISPLAY / WAYLAND_DISPLAY unset). The server is likely running "
+            "headless on a remote machine. Run the server on a machine with "
+            "a desktop session or use X-forwarding."
+        )
+    if is_manual_intervention_active():
+        return (
+            "Another manual-intervention window is already open. "
+            "Please close the existing window (or wait for it to finish) "
+            "before opening a new one."
+        )
+
+    actual_timeout = timeout_sec if timeout_sec and timeout_sec > 0 else MANUAL_INTERVENTION_TIMEOUT_SEC
+    print(
+        f"\n[open_manual_browser] Opening headful browser for manual "
+        f"intervention (reason={reason}, timeout={actual_timeout}s)...",
+        file=sys.stderr, flush=True,
+    )
+
+    # Run the headful flow. The function returns the new cookies if the
+    # user resolved the block, or None otherwise.
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            # Capture any existing auto-saved cookies so the user doesn't
+            # lose their session
+            initial_cookies: list[dict] = []
+            try:
+                if os.path.isfile(COOKIE_JSON_PATH):
+                    with open(COOKIE_JSON_PATH) as f:
+                        initial_cookies = json.load(f)
+            except Exception:
+                initial_cookies = []
+
+            new_cookies = await manual_intervention_for_block(
+                pw,
+                blocked_url=url,
+                reason=reason,
+                initial_cookies=initial_cookies,
+                timeout_sec=actual_timeout,
+            )
+    except Exception as e:
+        return f"❌ Failed to open headful browser: {e}"
+
+    last = get_last_intervention_result()
+    if new_cookies is not None:
+        return (
+            f"✅ Manual intervention successful. "
+            f"{len(new_cookies)} cookies saved to disk. "
+            f"Please retry your previous request — it should now pass the "
+            f"block. (elapsed {last.get('elapsed_sec', 0):.1f}s)"
+        )
+    outcome = last.get("outcome", "unknown")
+    return (
+        f"⚠️  Manual intervention ended without resolution "
+        f"(outcome: {outcome}, elapsed {last.get('elapsed_sec', 0):.1f}s). "
+        f"You can call `open_manual_browser` again to retry, or run "
+        f"`check_cookies` to see the current cookie state."
+    )
+
+
+@mcp.tool()
+async def manual_intervention_status() -> str:
+    """Report whether a headful intervention window is open, plus info
+    about the most recent one (if any).
+
+    Useful for the LLM to check the state without triggering anything.
+    """
+    lines = ["=== Manual intervention status ===\n"]
+    lines.append(f"ENABLE_MANUAL_INTERVENTION: {ENABLE_MANUAL_INTERVENTION}")
+    lines.append(f"Currently active:           {is_manual_intervention_active()}")
+    lines.append(f"Timeout (sec):               {MANUAL_INTERVENTION_TIMEOUT_SEC}")
+    lines.append(f"Poll interval (sec):         {MANUAL_INTERVENTION_POLL_SEC}")
+    lines.append(f"Display available:           {_check_display_available()}")
+    lines.append("")
+
+    last = get_last_intervention_result()
+    if last.get("timestamp", 0) > 0:
+        lines.append("Most recent intervention:")
+        ts = last.get("timestamp", 0)
+        if ts:
+            from datetime import datetime as _dt
+            lines.append(f"  Time:     {_dt.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"  URL:      {last.get('url', '')}")
+        lines.append(f"  Reason:   {last.get('reason', '')}")
+        lines.append(f"  Resolved: {last.get('resolved', False)}")
+        lines.append(f"  Outcome:  {last.get('outcome', 'unknown')}")
+        lines.append(f"  Elapsed:  {last.get('elapsed_sec', 0):.1f}s")
+    else:
+        lines.append("No manual intervention has run yet.")
 
     return "\n".join(lines)
 

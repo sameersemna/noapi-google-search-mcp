@@ -8,6 +8,13 @@ User=sameer
 WorkingDirectory=/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp
 Environment=PYTHONUNBUFFERED=1
 Environment=SKIP_COOKIE_VALIDATION=1
+# Health server: separate HTTP endpoint for monitoring/k8s probes.
+# Listens on 0.0.0.0:11499. Disable with ENABLE_HEALTH_SERVER=0.
+Environment=ENABLE_HEALTH_SERVER=1
+Environment=HEALTH_HOST=0.0.0.0
+Environment=HEALTH_PORT=11499
+# Set HEALTH_AUTH_TOKEN to require a bearer token (empty = no auth).
+# Environment=HEALTH_AUTH_TOKEN=
 Environment=PATH=/home/sameer/.n/n/versions/node/26.3.0/bin:/home/sameer/anaconda3/envs/mcp-google/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 StandardOutput=append:/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/service.log
