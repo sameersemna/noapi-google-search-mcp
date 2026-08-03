@@ -155,19 +155,34 @@ async def human_delay(page, min_ms: int = 500, max_ms: int = 1500) -> None:
 
 
 async def simulate_human_behavior(page: Page) -> None:
-    """Simulate subtle human-like behavior: micro-scrolls and mouse movement."""
+    """Simulate subtle human-like behavior: micro-scrolls and mouse movement.
+
+    Delegates to ``human_sim`` for the heavy lifting — Bezier-curve
+    mouse moves, smooth scroll with momentum decay, etc. The behavior
+    intensity is controlled by ``HUMAN_BEHAVIOR_LEVEL``.
+    """
     try:
-        # Small random scroll
+        from . import human_sim
+        # Random scroll (10-80px) with smooth momentum, occasional
+        # overshoot/back-scroll on higher levels.
         scroll_y = random.randint(10, 80)
-        await page.evaluate(f"window.scrollBy(0, {scroll_y})")
-        await page.wait_for_timeout(random.randint(100, 300))
+        backscroll = 0.1 if human_sim._level() in ("medium", "high") else 0.0
+        await human_sim.human_scroll(
+            page,
+            scroll_y,
+            backscroll_chance=backscroll,
+        )
 
         # Random mouse movement to a non-interactive area
         vp = page.viewport_size
         if vp:
             x = random.randint(100, vp["width"] - 100)
             y = random.randint(100, vp["height"] - 100)
-            await page.mouse.move(x, y, steps=random.randint(5, 15))
+            await human_sim.human_mouse_move(page, x, y)
+
+        # Small idle jitter (humans' hands aren't perfectly still)
+        if human_sim._level() in ("medium", "high") and not config.HUMAN_BEHAVIOR_DISABLE_JITTER:
+            await human_sim.human_idle(page, duration_sec=random.uniform(0.1, 0.4))
     except Exception:
         pass
 

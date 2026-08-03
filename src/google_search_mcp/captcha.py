@@ -4,6 +4,7 @@ Detects Google reCAPTCHA/rate-limit blocks and attempts to solve them
 using a MobileNetV2 ONNX model for image classification challenges.
 """
 
+import math
 import os
 import random
 import urllib.request
@@ -44,16 +45,48 @@ async def try_solve_captcha(page) -> bool:
         recaptcha_frame = page.frame_locator("iframe[src*='recaptcha']")
         checkbox = recaptcha_frame.locator("#recaptcha-anchor, .recaptcha-checkbox-border")
         if await checkbox.count() > 0:
+            # Focus the iframe so subsequent mouse events land in it
+            try:
+                iframe_el = page.locator("iframe[src*='recaptcha']").first
+                box = await iframe_el.bounding_box()
+                if box:
+                    # Click into the iframe at a non-interactive spot to
+                    # give it focus before the real click.
+                    await page.mouse.click(
+                        box["x"] + 5, box["y"] + 5
+                    )
+                    await page.wait_for_timeout(random.randint(150, 350))
+            except Exception:
+                pass
+
+            # Use the human_click primitive for a natural Bezier
+            # approach, hover, aim, then click.
+            from . import human_sim
             box = await checkbox.first.bounding_box()
             if box:
-                x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
-                y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
-
-                await page.mouse.move(x - random.randint(50, 150), y - random.randint(50, 150))
-                await page.wait_for_timeout(random.randint(100, 300))
-                await page.mouse.move(x, y, steps=random.randint(10, 25))
-                await page.wait_for_timeout(random.randint(200, 500))
-                await page.mouse.click(x, y)
+                cx = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+                cy = box["y"] + box["height"] * random.uniform(0.3, 0.7)
+                # Approach: move to a point ~30-50px away, then click.
+                # human_click expects coordinates in the *page* frame, but
+                # the reCAPTCHA checkbox lives inside an iframe. We pass
+                # the iframe-relative coordinates directly to
+                # page.mouse.click which Playwright handles correctly when
+                # the iframe is focused.
+                try:
+                    angle = random.uniform(0, 2 * 3.14159)
+                    radius = random.uniform(30, 55)
+                    ax = cx + math.cos(angle) * radius
+                    ay = cy + math.sin(angle) * radius
+                    await human_sim.human_mouse_move(page, ax, ay)
+                    await page.wait_for_timeout(random.randint(180, 480))
+                    await human_sim.human_mouse_move(
+                        page, cx, cy, duration_ms=random.randint(140, 280)
+                    )
+                    await page.wait_for_timeout(random.randint(100, 320))
+                    await page.mouse.click(cx, cy)
+                except Exception:
+                    # Fallback to the old method if Bezier move fails
+                    await page.mouse.click(cx, cy)
                 await page.wait_for_timeout(random.randint(2000, 4000))
 
                 if not await is_blocked(page):

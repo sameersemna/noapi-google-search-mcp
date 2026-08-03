@@ -36,6 +36,7 @@ from typing import Callable
 
 from playwright.async_api import async_playwright
 
+from . import human_sim
 from .browser import (
     detect_block_reason,
     dismiss_consent,
@@ -242,6 +243,11 @@ async def browse_google(
             # ── First attempt ──
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await dismiss_consent(page)
+            # Dwell on the page before checking for blocks / scraping
+            # results. Without this, the page is "scraped" 50ms after it
+            # loads, which is a strong bot signal (real users take
+            # 1-3 seconds to orient themselves on a new page).
+            await human_sim.human_read(page)
             await simulate_human_behavior(page)
             await take_debug_screenshot(page, f"{screenshot_label}_01_first")
 
@@ -283,9 +289,13 @@ async def browse_google(
                         timeout=30000,
                     )
                     await dismiss_consent(page)
-                    await human_delay(page)
+                    await human_sim.human_idle(page, duration_sec=random.uniform(0.4, 1.2))
                     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     await dismiss_consent(page)
+                    # Wait + simulate human interaction before checking
+                    # whether the block persists. This gives the page time
+                    # to load results and lets us look like a real user.
+                    await human_sim.human_read(page, duration_sec=random.uniform(0.8, 2.0))
                     await simulate_human_behavior(page)
                 except Exception:
                     pass

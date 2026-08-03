@@ -214,6 +214,34 @@ MANUAL_INTERVENTION_REASONS: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
+# Human-like behavior — controls how much "real human" simulation we add
+# ---------------------------------------------------------------------------
+# Bot-detection systems (Google reCAPTCHA, "unusual traffic" checks)
+# fingerprint automation by looking at *behavior* — not just by inspecting
+# the JS environment. Real humans have:
+#   - Bezier-curve mouse trajectories with variable speed (not straight lines)
+#   - Hover + aim + pause + click (not instant clicks)
+#   - Smooth scroll with momentum decay (not jump scrolls)
+#   - Variable typing speed with bursts and pauses
+#   - Idle micro-movements when "reading"
+#   - Dwell time on links before clicking
+#
+# We simulate all of this. The level is tunable:
+#   off    — no extra delays or movements (fastest, most detectable)
+#   low    — short delays, single mouse move per page
+#   medium — full Bezier, smooth scroll, natural typing (default)
+#   high   — all of the above + idle micro-movements + reading pauses
+#              + occasional back-scroll (slowest, most realistic)
+HUMAN_BEHAVIOR_LEVEL: str = os.environ.get("HUMAN_BEHAVIOR_LEVEL", "medium").strip().lower()
+if HUMAN_BEHAVIOR_LEVEL not in ("off", "low", "medium", "high"):
+    HUMAN_BEHAVIOR_LEVEL = "medium"
+
+# Optional: disable mouse-jitter completely (for very fast / scripted use)
+HUMAN_BEHAVIOR_DISABLE_JITTER: bool = os.environ.get(
+    "HUMAN_BEHAVIOR_DISABLE_JITTER", ""
+).strip().lower() in ("1", "true", "yes", "on")
+
+# ---------------------------------------------------------------------------
 # Health server — separate HTTP endpoint for /health, /version, etc.
 # ---------------------------------------------------------------------------
 # Runs in the same Python process as the MCP server, on its own port
