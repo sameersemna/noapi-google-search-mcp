@@ -15,6 +15,133 @@ Works with **LM Studio**, **Claude Desktop**, **OpenClaw**, **Ollama**, and any 
 
 ---
 
+## What's New in v0.3.4 — Advanced Anti-Detection (Be One Step Ahead of the Bot)
+
+The new "human-like activity" (`human_sim` module) made CAPTCHAs less
+frequent, but Google reCAPTCHA and "unusual traffic" filters also look
+at signals that have nothing to do with how you move the mouse. v0.3.4
+adds a **strategic anti-detect layer** that goes beyond behavior:
+
+  1. **Search via typing** — instead of going directly to
+     `/search?q=...`, the server navigates to `google.com` and *types* the
+     query in the search box (with autocomplete pause, human-like
+     keyboard rhythm, optional suggestion click, then Enter). This is the
+     single biggest signal reduction — bots hit `/search` directly, real
+     humans never do.
+
+  2. **Per-session fingerprint randomization** — every browser session
+     gets a consistent but unique fingerprint (GPU, screen, locale,
+     timezone, Client Hints, etc.). Two sessions never look the same,
+     but each session is stable so Google can't correlate individual
+     requests within a session.
+
+  3. **Per-session canvas / WebGL / AudioContext noise** — the
+     fingerprint patches in `init_script` read per-session noise bytes
+     so the same canvas pixels produce a different hash each session.
+     Importantly, the noise is **not** applied to every render (that
+     would itself be a fingerprint).
+
+  4. **Client Hints headers** — modern Chrome sends `Sec-CH-UA`,
+     `Sec-CH-UA-Platform`, `Sec-Fetch-*`, etc. Without them, Google
+     sees a request that looks like an old browser.
+
+  5. **Screen + viewport consistency** — `screen.availWidth`,
+     `window.outerWidth`, etc. all match the actual viewport (instead
+     of being hard-coded to 1280×800).
+
+  6. **Tab focus / blur events** — fire occasional `blur` + `focus`
+     events on the page (simulating the user switching tabs). Bots
+     don't do this.
+
+  7. **Reading mouse track** — move the mouse along result titles
+     like a real user browsing.
+
+  8. **Session warmup** — on the first request in a fresh process,
+     do a benign search (e.g. "weather today") and briefly click a
+     result, then return. This builds up cookie diversity and trust
+     tokens so the first REAL search on a fresh session doesn't look
+     suspicious.
+
+**New config (env vars):**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ANTIDETECT_LEVEL` | `medium` | `off` \| `low` \| `medium` \| `high` |
+| `ANTIDETECT_SEARCH_VIA_TYPING` | `1` | Type query in search box instead of going to `/search?q=...` |
+| `ANTIDETECT_WARMUP_ON_FIRST_REQUEST` | `1` | Do a benign first search on fresh sessions |
+| `ANTIDETECT_TAB_FOCUS_EVENTS` | `1` | Fire occasional `blur`/`focus` events |
+| `ANTIDETECT_CLIENT_HINTS` | `1` | Add `Sec-CH-UA` and `Sec-Fetch-*` headers |
+| `ANTIDETECT_RANDOMIZE_FINGERPRINT` | `1` | Per-session fingerprint randomization |
+| `ANTIDETECT_VISIT_HOMEPAGE_FIRST` | `1` | Visit `google.com` before navigating to search |
+| `ANTIDETECT_WARMUP_QUERIES` | `weather today,news today,...` | Comma-separated queries for warmup |
+
+**Auto-flow:**
+
+Every Google tool (`google_search`, `google_news`, `google_images`,
+`visit_page`, etc.) now goes through this flow:
+
+```
+1.  enforce rate-limit
+2.  launch headless browser (per-session fingerprint)
+3.  load cookies
+4.  WARMUP (first request in this process only):
+      - visit google.com
+      - mouse around / scroll a bit
+      - type a benign query (e.g. "weather today")
+      - submit, wait for results
+      - click on one result, dwell, go back
+5.  for retryable URLs that match /^https?:\/\/[^/]*google\.[^/]*\/search/:
+      - navigate to google.com
+      - type the query in the search box
+      - hover on suggestions briefly (30% chance)
+      - press Enter / click suggestion
+      - wait for navigation + results
+6.  for non-Google URLs (YouTube, Maps, etc.): direct goto
+7.  dwell on the page (human_read = 0.5-2.0s)
+8.  reading mouse track (hover on result titles)
+9.  simulate_human_behavior (micro-scroll, mouse move)
+10. occasional tab focus/blur event
+11. check for blocks (CAPTCHA, login, rate-limit)
+12. ... rest of the existing flow (CAPTCHA solve, retries, etc.)
+```
+
+**New `anti_detect` section in `/health`:**
+
+```json
+{
+  "anti_detect": {
+    "level": "medium",
+    "search_via_typing": true,
+    "warmup_on_first_request": true,
+    "tab_focus_events": true,
+    "client_hints": true,
+    "randomize_fingerprint": true,
+    "visit_homepage_first": true,
+    "warmup_queries": ["weather today", "news today", "..."],
+    "session_warmed_up": false,
+    "session_fingerprint": {
+      "viewport": {"width": 1440, "height": 900},
+      "platform": "Linux x86_64",
+      "chrome_version": "147.0.0.0",
+      "webgl_vendor": "NVIDIA Corporation",
+      "webgl_renderer": "NVIDIA GeForce RTX 3060/PCIe/SSE2",
+      "hardware_concurrency": 16,
+      "device_memory": 8,
+      "locale": "en-US",
+      "timezone": "America/New_York"
+    }
+  }
+}
+```
+
+The fingerprint is **process-stable** (changes only when the process
+restarts), so you can see at a glance what session this server is
+running with. If two different `mcp-google.service` instances show
+different fingerprints, that's expected (and good — they're not
+correlatable).
+
+---
+
 ## What's New in v0.3.3 — `/health` Endpoint + Monitoring
 
 The MCP server now exposes a small HTTP health server on a separate port
@@ -428,6 +555,9 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Headful bot-detection fallback | **Built-in (manual CAPTCHA/login)** | Not available | Not available |
 | Diagnostics (cookie/intervention status) | **Built-in** | Not available | Not available |
 | Health / readiness endpoint | **Built-in (`/health` on port 11499)** | Not available | Not available |
+| Per-session fingerprint randomization | **Built-in (canvas/WebGL/audio)** | Not available | Not available |
+| Search-via-typing (homepage → search box) | **Built-in (highest-signal fix)** | Not available | Not available |
+| Profile warmup (benign first search) | **Built-in (trust tokens)** | Not available | Not available |
 
 ---
 
@@ -844,6 +974,21 @@ Ask "extract the part about X" and the LLM finds timestamps from the transcript 
 ---
 
 ## Sample Prompts
+
+### Anti-Detection (v0.3.4)
+| What you type | Tool / endpoint called |
+|--------------|------------------------|
+| *"What anti-detect level is the server running?"* | `GET /health` (look at `anti_detect.level`) |
+| *"What's the current session fingerprint?"* | `GET /health` (look at `anti_detect.session_fingerprint`) |
+| *"Has the session done its warmup yet?"* | `GET /health` (look at `anti_detect.session_warmed_up`) |
+| *"Disable search-via-typing and use direct goto"* | `ANTIDETECT_SEARCH_VIA_TYPING=0` env var |
+| *"Bump anti-detect to high for stronger fingerprinting"* | `ANTIDETECT_LEVEL=high` env var |
+| *"Show me what warmup queries would be used"* | `GET /health` (look at `anti_detect.warmup_queries`) |
+| *"What GPU is the current session pretending to have?"* | `GET /health` (look at `anti_detect.session_fingerprint.webgl_renderer`) |
+| *"What Chrome version is the session using?"* | `GET /health` (look at `anti_detect.session_fingerprint.chrome_version`) |
+| *"Disable the profile warmup to make the first request faster"* | `ANTIDETECT_WARMUP_ON_FIRST_REQUEST=0` env var |
+
+> **Tip:** The anti-detect layer is automatic — every Google tool goes through search-via-typing + warmup + reading mouse track without you needing to do anything. Just check `/health` to see what session fingerprint is currently in use.
 
 ### Health & Monitoring
 | What you type | Tool / endpoint called |

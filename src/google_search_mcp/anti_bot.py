@@ -240,18 +240,87 @@ async def browse_google(
             page = page_holder[0]
             context = context_holder[0]
 
+            # ── Anti-detect warmup (first request in this session) ──
+            # On a fresh browser context, do a benign search first to
+            # build up cookie diversity and trust tokens. This is the
+            # single biggest signal reduction for Google reCAPTCHA.
+            try:
+                from . import anti_detect
+                await anti_detect.warmup_session(context, page)
+            except Exception as e:
+                print(
+                    f"[anti_detect] Warmup failed (continuing): {e}",
+                    file=sys.stderr, flush=True,
+                )
+
             # ── First attempt ──
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # Use search-via-typing when the URL is a Google /search?q=
+            # URL — this is the single biggest anti-bot signal we can fix
+            # (real humans go to google.com and type, they don't hit
+            # /search?q=... directly).
+            from . import anti_detect
+            used_typing_flow = False
+            if (
+                anti_detect.is_google_search_url(url)
+                and anti_detect.config.ANTIDETECT_SEARCH_VIA_TYPING
+            ):
+                query = anti_detect.parse_query_from_url(url)
+                if query:
+                    print(
+                        f"[anti_detect] Using search-via-typing for: {query!r}",
+                        file=sys.stderr, flush=True,
+                    )
+                    typed_ok = await anti_detect.search_via_typing(page, query)
+                    used_typing_flow = typed_ok
+                    if not typed_ok:
+                        # Fall back to direct goto
+                        print(
+                            "[anti_detect] Typing flow failed, "
+                            "falling back to direct goto",
+                            file=sys.stderr, flush=True,
+                        )
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                else:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            else:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
             await dismiss_consent(page)
+
             # Dwell on the page before checking for blocks / scraping
             # results. Without this, the page is "scraped" 50ms after it
             # loads, which is a strong bot signal (real users take
             # 1-3 seconds to orient themselves on a new page).
-            await human_sim.human_read(page)
+            if used_typing_flow:
+                # Already did a short read inside the typing flow
+                await human_sim.human_read(page, duration_sec=random.uniform(0.5, 1.5))
+            else:
+                await human_sim.human_read(page)
+
+            # Reading mouse track — hover over result titles like a
+            # real user browsing search results.
+            if used_typing_flow:
+                try:
+                    await anti_detect.reading_mouse_track(page)
+                except Exception as e:
+                    print(
+                        f"[anti_detect] reading_mouse_track failed: {e}",
+                        file=sys.stderr, flush=True,
+                    )
+
             await simulate_human_behavior(page)
             await take_debug_screenshot(page, f"{screenshot_label}_01_first")
 
             blocked, reason = await _is_any_block(page)
+
+            # ── Tab focus simulation (occasional) ──
+            # Real users switch tabs and come back. Bots never do.
+            # This is a small but consistent signal of "real user".
+            if not blocked:
+                try:
+                    await anti_detect.simulate_tab_focus(page)
+                except Exception:
+                    pass
 
             # ── CAPTCHA solve attempt ──
             if blocked:
@@ -290,12 +359,34 @@ async def browse_google(
                     )
                     await dismiss_consent(page)
                     await human_sim.human_idle(page, duration_sec=random.uniform(0.4, 1.2))
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+                    # On retry, also try typing if applicable
+                    if (
+                        anti_detect.is_google_search_url(url)
+                        and anti_detect.config.ANTIDETECT_SEARCH_VIA_TYPING
+                    ):
+                        retry_query = anti_detect.parse_query_from_url(url)
+                        if retry_query:
+                            await anti_detect.search_via_typing(page, retry_query)
+                        else:
+                            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    else:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
                     await dismiss_consent(page)
                     # Wait + simulate human interaction before checking
                     # whether the block persists. This gives the page time
                     # to load results and lets us look like a real user.
                     await human_sim.human_read(page, duration_sec=random.uniform(0.8, 2.0))
+                    # Reading mouse track on retry too
+                    if (
+                        anti_detect.is_google_search_url(url)
+                        and anti_detect.config.ANTIDETECT_SEARCH_VIA_TYPING
+                    ):
+                        try:
+                            await anti_detect.reading_mouse_track(page)
+                        except Exception:
+                            pass
                     await simulate_human_behavior(page)
                 except Exception:
                     pass

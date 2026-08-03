@@ -282,6 +282,8 @@ def _get_platform_info() -> dict[str, Any]:
             "DISPLAY", "WAYLAND_DISPLAY",
             "PYTHONUNBUFFERED", "SKIP_COOKIE_VALIDATION",
             "ENABLE_MANUAL_INTERVENTION", "MANUAL_INTERVENTION_TIMEOUT_SEC",
+            "ANTIDETECT_LEVEL", "ANTIDETECT_SEARCH_VIA_TYPING",
+            "ANTIDETECT_WARMUP_ON_FIRST_REQUEST",
         )
     }
     return info
@@ -492,7 +494,23 @@ def _check_config() -> dict[str, Any]:
         "HEALTH_AUTH_TOKEN_set": bool(config.HEALTH_AUTH_TOKEN),
         "GOOGLE_REQUEST_MIN_GAP": config.GOOGLE_REQUEST_MIN_GAP,
         "MAX_GOOGLE_RETRIES": config.MAX_GOOGLE_RETRIES,
+        # Anti-detect (v0.3.4+)
+        "ANTIDETECT_LEVEL": config.ANTIDETECT_LEVEL,
+        "ANTIDETECT_SEARCH_VIA_TYPING": config.ANTIDETECT_SEARCH_VIA_TYPING,
+        "ANTIDETECT_WARMUP_ON_FIRST_REQUEST": config.ANTIDETECT_WARMUP_ON_FIRST_REQUEST,
+        "ANTIDETECT_TAB_FOCUS_EVENTS": config.ANTIDETECT_TAB_FOCUS_EVENTS,
+        "ANTIDETECT_CLIENT_HINTS": config.ANTIDETECT_CLIENT_HINTS,
+        "ANTIDETECT_RANDOMIZE_FINGERPRINT": config.ANTIDETECT_RANDOMIZE_FINGERPRINT,
     }
+
+
+def _check_anti_detect() -> dict[str, Any]:
+    """Return the current anti-detect status (per-session fingerprint etc.)."""
+    try:
+        from . import anti_detect
+        return anti_detect.get_antidetect_status()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _check_mcp() -> dict[str, Any]:
@@ -645,6 +663,7 @@ def _build_health_payload() -> dict[str, Any]:
         "process": _check_process(),
         "mcp": _check_mcp(),
         "config": _check_config(),
+        "anti_detect": _check_anti_detect(),
         "dependencies": _check_dependencies(),
         "files": _check_files(),
         "disk": _check_disk(),

@@ -242,6 +242,78 @@ HUMAN_BEHAVIOR_DISABLE_JITTER: bool = os.environ.get(
 ).strip().lower() in ("1", "true", "yes", "on")
 
 # ---------------------------------------------------------------------------
+# Advanced anti-detect — fingerprint randomization + search flow + warmup
+# ---------------------------------------------------------------------------
+# These options go BEYOND "human-like behavior" and address the deeper
+# signals that modern Google reCAPTCHA and "unusual traffic" filters
+# look at: TLS / canvas / WebGL / AudioContext fingerprints, the search
+# flow itself (humans go to google.com and TYPE — they don't hit
+# /search?q=... directly), and the trust history of the profile.
+#
+# Disabling any of these makes the server look more bot-like. The defaults
+# are tuned for the lowest CAPTCHA rate we can get without slowing the
+# server down too much.
+
+# Master switch: off|low|medium|high. Scales how aggressive the patches
+# and flows are. "high" adds more wait time but looks more human.
+ANTIDETECT_LEVEL: str = os.environ.get("ANTIDETECT_LEVEL", "medium").strip().lower()
+if ANTIDETECT_LEVEL not in ("off", "low", "medium", "high"):
+    ANTIDETECT_LEVEL = "medium"
+
+# Whether to navigate to google.com and TYPE the query in the search box
+# instead of going directly to /search?q=... . This is the single most
+# impactful change — humans never hit /search directly.
+ANTIDETECT_SEARCH_VIA_TYPING: bool = os.environ.get(
+    "ANTIDETECT_SEARCH_VIA_TYPING", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Whether to do a one-time "warmup" on a fresh session: a benign search
+# (e.g. "weather today"), click on a result briefly, then return. This
+# builds up cookie diversity and trust tokens so the first REAL search
+# on a fresh session doesn't look suspicious.
+ANTIDETECT_WARMUP_ON_FIRST_REQUEST: bool = os.environ.get(
+    "ANTIDETECT_WARMUP_ON_FIRST_REQUEST", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Whether to fire occasional blur/focus events on the page (simulating
+# the user switching tabs). This is a small but consistent signal of
+# "real user is interacting with the browser".
+ANTIDETECT_TAB_FOCUS_EVENTS: bool = os.environ.get(
+    "ANTIDETECT_TAB_FOCUS_EVENTS", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Whether to add Sec-CH-UA / Sec-Fetch-* / Accept-Language client-hint
+# headers. Modern Chrome sends these automatically; without them, Google
+# sees a request that looks like an old browser.
+ANTIDETECT_CLIENT_HINTS: bool = os.environ.get(
+    "ANTIDETECT_CLIENT_HINTS", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Whether to randomize the canvas / WebGL / AudioContext fingerprint
+# per-session (vs. using a fixed fingerprint that could be correlated
+# across requests). This is the second most impactful change after
+# search-via-typing.
+ANTIDETECT_RANDOMIZE_FINGERPRINT: bool = os.environ.get(
+    "ANTIDETECT_RANDOMIZE_FINGERPRINT", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Comma-separated list of benign queries to use during session warmup.
+# Pick one at random per session. Make them look like a real person's
+# casual browsing.
+ANTIDETECT_WARMUP_QUERIES: tuple[str, ...] = tuple(
+    q.strip() for q in os.environ.get(
+        "ANTIDETECT_WARMUP_QUERIES",
+        "weather today,news today,time now,calculator,translate hello",
+    ).split(",") if q.strip()
+)
+
+# Whether to also run a "trust building" workflow: visit the Google
+# homepage, scroll a bit, then go to the search. Done once per session.
+ANTIDETECT_VISIT_HOMEPAGE_FIRST: bool = os.environ.get(
+    "ANTIDETECT_VISIT_HOMEPAGE_FIRST", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# ---------------------------------------------------------------------------
 # Health server — separate HTTP endpoint for /health, /version, etc.
 # ---------------------------------------------------------------------------
 # Runs in the same Python process as the MCP server, on its own port

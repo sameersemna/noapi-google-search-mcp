@@ -81,9 +81,10 @@ _STEALTH_ARGS: list[str] = [
 ]
 
 # ── Extra HTTP headers to set on every page ──
-
+# This is the *baseline* set; the per-session Client Hints and
+# Accept-Language are added on top by setup_page_stealth() (via
+# anti_detect.fingerprint_to_headers()).
 _EXTRA_HEADERS: dict[str, str] = {
-    "Accept-Language": "en-US,en;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
     "Upgrade-Insecure-Requests": "1",
@@ -97,19 +98,64 @@ _EXTRA_HEADERS: dict[str, str] = {
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def _per_session_user_agent() -> str:
+    """Return the session-stable User-Agent string.
+
+    Lazily generates a session fingerprint on first call. Reusing the
+    fingerprint's UA across the whole session is important — a single
+    request that uses a different UA than the rest of the session
+    looks like a fingerprint mismatch.
+    """
+    from . import anti_detect
+    return anti_detect.get_session_fingerprint()["user_agent"]
+
+
+def _per_session_viewport() -> dict:
+    """Return the session-stable viewport."""
+    from . import anti_detect
+    return anti_detect.get_session_fingerprint()["viewport"]
+
+
+def _per_session_locale() -> str:
+    """Return the session-stable locale."""
+    from . import anti_detect
+    return anti_detect.get_session_fingerprint()["locale"]
+
+
+def _per_session_timezone() -> str:
+    """Return the session-stable timezone."""
+    from . import anti_detect
+    return anti_detect.get_session_fingerprint()["timezone"]
+
+
 async def launch_browser(pw, viewport: dict | None = None, headless: bool = True) -> BrowserContext:
     """Launch a Chromium browser with comprehensive stealth settings.
 
     Uses a persistent user data directory so browser fingerprint, localStorage,
     and session data remain consistent across restarts.
 
+    In headless mode, applies:
+      * Per-session fingerprint (UA, viewport, locale, timezone)
+      * Per-session WebGL / canvas / audio randomization
+      * Sec-CH-UA / Sec-Fetch-* Client Hints
+      * 25+ other stealth patches (see ``stealth_js.STEALTH_JS``)
+
     Args:
         pw: Playwright instance.
-        viewport: Optional viewport dict. Randomized if None.
+        viewport: Optional viewport dict. If not given, uses the
+                  session-stable per-session viewport.
         headless: If True (default), runs headless with stealth patches.
                   If False, runs headful (visible window) without stealth.
     """
+    from . import anti_detect
     os.makedirs(BROWSER_DATA_DIR, exist_ok=True)
+
+    # Per-session fingerprint values (stable for the session lifetime)
+    fp = anti_detect.get_session_fingerprint()
+    fp_viewport = viewport or fp["viewport"]
+    fp_ua = fp["user_agent"]
+    fp_locale = fp["locale"]
+    fp_tz = fp["timezone"]
 
     if headless:
         context = await pw.chromium.launch_persistent_context(
@@ -118,15 +164,19 @@ async def launch_browser(pw, viewport: dict | None = None, headless: bool = True
                 "--headless=new",
             ],
             ignore_default_args=["--enable-automation"],
-            user_agent=USER_AGENT,
-            viewport=viewport or _randomized_viewport(),
-            locale="en-US",
-            timezone_id="America/New_York",
+            user_agent=fp_ua,
+            viewport=fp_viewport,
+            locale=fp_locale,
+            timezone_id=fp_tz,
             bypass_csp=True,
         )
-        await context.add_init_script(STEALTH_JS)
+        # Inject the combined init script: stealth_js + per-session
+        # fingerprint patches (canvas, audio, WebGL, screen, etc.)
+        await context.add_init_script(anti_detect.get_init_script())
     else:
         # Headful mode — visible browser for manual login, no stealth
+        # (the user is interacting with it directly, so we don't need
+        # to hide anything).
         context = await pw.chromium.launch_persistent_context(
             BROWSER_DATA_DIR,
             headless=False,
@@ -135,18 +185,29 @@ async def launch_browser(pw, viewport: dict | None = None, headless: bool = True
                 "--disable-blink-features=AutomationControlled",
                 "--window-size=1280,800",
             ],
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="America/New_York",
+            user_agent=fp_ua,
+            viewport=fp_viewport,
+            locale=fp_locale,
+            timezone_id=fp_tz,
             bypass_csp=True,
         )
     return context
 
 
 async def setup_page_stealth(page: Page) -> None:
-    """Apply per-page stealth: extra HTTP headers and behavioral setup."""
-    await page.set_extra_http_headers(_EXTRA_HEADERS)
+    """Apply per-page stealth: extra HTTP headers and behavioral setup.
+
+    Combines the baseline headers with the per-session Client Hints
+    (Sec-CH-UA, Sec-Fetch-*) and Accept-Language derived from the
+    session fingerprint. The result is a consistent set of headers
+    that match the per-session User-Agent and viewport.
+    """
+    from . import anti_detect
+    headers = dict(_EXTRA_HEADERS)
+    headers.update(anti_detect.fingerprint_to_headers(
+        anti_detect.get_session_fingerprint()
+    ))
+    await page.set_extra_http_headers(headers)
 
 
 async def human_delay(page, min_ms: int = 500, max_ms: int = 1500) -> None:

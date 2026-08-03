@@ -8,7 +8,7 @@ Includes a /health HTTP endpoint on a separate port (default 11499) for
 monitoring and orchestration (k8s probes, Prometheus, etc.).
 """
 
-__version__ = "0.3.2"
+__version__ = "0.3.4"
 
 from .server import mcp
 

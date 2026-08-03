@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "noapi-google-search-mcp"
-version = "0.3.2"
+version = "0.3.4"
 description = "41 tools for Local LLMs — Google Search, live feeds, email, documents, QR codes, Wikipedia, S3 upload, vision, OCR, video transcription. No API key required."
 readme = "README.md"
 license = "MIT"

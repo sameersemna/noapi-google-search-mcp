@@ -36,7 +36,6 @@ from google_search_mcp import (  # noqa: E402
     human_sim,
 )
 from google_search_mcp.human_sim import (  # noqa: E402
-    _bezier_point,
     _compute_key_delay_ms,
     _cubic_bezier,
     _ease_in_out,
