@@ -746,24 +746,104 @@ async def warmup_session(
 # /search?q=... is a dead giveaway.
 
 _GOOGLE_SEARCH_INPUT_SELECTORS: list[str] = [
+    # The standard <input> search box — what desktop Google uses
     'input[name="q"]',
+    # Google has been migrating to a <textarea> for the search box
+    # (better for autocomplete content). This is now the default on
+    # most modern Chrome versions.
     'textarea[name="q"]',
+    # ARIA / role-based selectors (resilient to markup changes)
     'input[aria-label="Search"]',
     'input[title="Search"]',
     'input[role="combobox"]',
+    # Some Google surfaces use a generic text input
+    'input[type="text"][name="q"]',
+    'input[type="search"][name="q"]',
+    # Last resort: any input inside the search form
+    'form[role="search"] input',
+    'form[action*="/search"] input',
 ]
 
 
-async def _find_google_search_input(page: Any) -> Any:
-    """Find the Google search input element."""
+async def _dismiss_google_overlays(page: Any) -> None:
+    """Try to dismiss Google consent / sign-in / location dialogs.
+
+    These dialogs commonly hide the search input on the homepage.
+    Real users dismiss them; bots that don't look suspicious. We try
+    a broad set of selectors covering different languages and
+    button-id patterns.
+    """
+    # Try Escape first — many modal dialogs close on Escape
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(random.randint(150, 400))
+    except Exception:
+        pass
+
+    # Broad set of "Accept all" / "I agree" / "Reject all" buttons
+    dismiss_selectors = [
+        # English
+        'button[aria-label*="Accept"]',
+        'button[aria-label*="Reject"]',
+        'button[aria-label*="Agree"]',
+        'button[aria-label*="consent"]',
+        'button#L2AGLb',                      # Google's "I agree" button ID
+        'button[aria-label="Accept all"]',
+        'button[aria-label="Reject all"]',
+        # Common consent-manager IDs
+        'button[title="Accept"]',
+        'button[title="I agree"]',
+        # European languages
+        'button[aria-label*="Akzeptieren"]',   # German
+        'button[aria-label*="Aceptar"]',       # Spanish
+        'button[aria-label*="Accepter"]',      # French
+        'button[aria-label*="Accetta"]',       # Italian
+        'button[aria-label*="Aceitar"]',       # Portuguese
+        'button[aria-label*="Akkoord"]',       # Dutch
+        'button[aria-label*="Принять"]',     # Russian
+        # Asian languages
+        'button[aria-label*="同意"]',           # Chinese
+        'button[aria-label*="許可"]',           # Japanese
+        # Forms with consent-related actions
+        'form[action*="consent"] button',
+        'form[action*="SetSessionCookie"] button',
+        # Google sign-in popup cross-out
+        'button[aria-label="Close"]',
+    ]
+    for selector in dismiss_selectors:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0 and await loc.is_visible(timeout=500):
+                await loc.click(timeout=1500)
+                log.debug("Dismissed overlay via %s", selector)
+                await page.wait_for_timeout(random.randint(400, 900))
+                break
+        except Exception:
+            continue
+
+
+async def _find_google_search_input(page: Any, *, timeout: int = 10000) -> Any:
+    """Find the Google search input, waiting for it to be visible.
+
+    Tries multiple selectors in order, waiting up to ``timeout`` total
+    milliseconds for one to appear and be visible. Returns a Locator
+    pointing at the first visible one, or None.
+    """
+    per_selector = max(500, int(timeout / max(len(_GOOGLE_SEARCH_INPUT_SELECTORS), 1)))
     for selector in _GOOGLE_SEARCH_INPUT_SELECTORS:
         try:
+            # Wait for the element to appear in the DOM AND be visible
+            await page.wait_for_selector(
+                selector,
+                state="visible",
+                timeout=per_selector,
+            )
             loc = page.locator(selector).first
             count = await loc.count()
             if count > 0:
-                # Check it's visible
                 box = await loc.bounding_box(timeout=1000)
-                if box and box["width"] > 50:
+                # Real Google search input is wide; reject tiny overlays
+                if box and box["width"] > 30:
                     return loc
         except Exception:
             continue
@@ -779,18 +859,16 @@ async def search_via_typing(
 ) -> bool:
     """Type a search query into the Google search box and submit.
 
-    Assumes the page is already at the Google homepage (or any Google
-    page that has a search box). If not, navigates to the homepage
-    first.
-
-    Workflow:
-      1. If not on a Google page with a search box, navigate to one
-      2. Move mouse to search box, click to focus
-      3. Type the query with human-like rhythm
-      4. Pause briefly (so the autocomplete suggestions can appear)
-      5. Press Enter (or click the search button)
-      6. Wait for results to load
-      7. (Optional) human_read
+    Much more robust than the v1 implementation. The flow is:
+      1. Make sure we're on a Google page (navigate to homepage if not)
+      2. Dismiss any consent / sign-in / overlay dialogs
+      3. Find the search input (waiting up to 10s for it to be visible)
+      4. Focus the input (try click, fall back to JS focus)
+      5. Type the query — prefer page.keyboard.type (most reliable);
+         fall back to human_sim.human_type if it works
+      6. Pause briefly (autocomplete suggestions)
+      7. Press Enter (or click a suggestion)
+      8. Wait for navigation to /search?
 
     Returns True if the search was submitted successfully.
     """
@@ -798,71 +876,134 @@ async def search_via_typing(
         return False
 
     log.info("Search via typing: %r", query)
+
     try:
-        # If we don't see a search box, navigate to the homepage
+        # Step 1: Navigate to the homepage if we're not on a Google page
         current_url = page.url
         if "google.com" not in current_url.lower():
-            await page.goto("https://www.google.com/ncr", wait_until="domcontentloaded", timeout=30000)
+            log.debug("Navigating to google.com for search-via-typing")
+            await page.goto(
+                "https://www.google.com/ncr",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
 
-        # Make sure we have a search box visible
-        search_input = await _find_google_search_input(page)
+        # Step 2: Dismiss consent / sign-in overlays
+        await _dismiss_google_overlays(page)
+
+        # Step 3: Find the search input (with timeout, with retries)
+        search_input = None
+        for attempt in range(2):
+            search_input = await _find_google_search_input(page, timeout=8000)
+            if search_input is not None:
+                break
+            # Try dismiss again — maybe a second dialog appeared
+            await _dismiss_google_overlays(page)
+            await page.wait_for_timeout(random.randint(400, 900))
+
         if search_input is None:
-            # Try the consent page — Google sometimes shows a consent
-            # dialog that hides the search box. Try dismissing.
-            try:
-                await page.evaluate(
-                    "() => { const btn = document.querySelector('button[aria-label*=\"Accept\" i], button[aria-label*=\"Reject\" i], button#L2AGLb'); if (btn) btn.click(); }"
-                )
-                await page.wait_for_timeout(random.randint(800, 1500))
-            except Exception:
-                pass
-            search_input = await _find_google_search_input(page)
-            if search_input is None:
-                log.warning("No search input found on Google homepage")
-                return False
-
-        # Click the search input to focus it (real users do this)
-        await human_sim.human_click(page, _GOOGLE_SEARCH_INPUT_SELECTORS[0])
-        # Small wait after focusing
-        await page.wait_for_timeout(random.randint(300, 600))
-
-        # Type the query with human-like rhythm
-        ok = await human_sim.human_type(
-            page,
-            _GOOGLE_SEARCH_INPUT_SELECTORS[0],
-            query,
-            clear_first=True,
-        )
-        if not ok:
-            log.warning("Failed to type into search box")
+            log.warning("No search input found on Google homepage after retries")
             return False
 
-        # Let the autocomplete suggestions appear briefly
+        # Step 4: Focus the input
+        try:
+            await search_input.click(timeout=3000)
+        except Exception:
+            # Fall back to JS focus
+            try:
+                await search_input.evaluate("el => el.focus()")
+            except Exception:
+                pass
+
+        # Small wait after focusing
+        await page.wait_for_timeout(random.randint(200, 500))
+
+        # Step 5: Type the query. Try multiple strategies in order
+        # of preference — from most human-like to most reliable.
+        typed_ok = False
+
+        # Strategy 1: page.keyboard.type (most reliable, no element lookup)
+        try:
+            await page.keyboard.type(
+                query,
+                delay=random.randint(20, 60),
+            )
+            typed_ok = True
+            log.debug("Typed via page.keyboard.type")
+        except Exception as e:
+            log.debug("page.keyboard.type failed: %s", e)
+
+        # Strategy 2: press_sequentially on the locator
+        if not typed_ok:
+            try:
+                await search_input.press_sequentially(
+                    query,
+                    delay=random.randint(20, 60),
+                )
+                typed_ok = True
+                log.debug("Typed via press_sequentially")
+            except Exception as e:
+                log.debug("press_sequentially failed: %s", e)
+
+        # Strategy 3: human_sim.human_type (most human-like, least reliable)
+        if not typed_ok:
+            try:
+                typed_ok = await human_sim.human_type(
+                    page,
+                    _GOOGLE_SEARCH_INPUT_SELECTORS[0],
+                    query,
+                    clear_first=True,
+                )
+                if typed_ok:
+                    log.debug("Typed via human_sim.human_type")
+            except Exception:
+                pass
+
+        # Strategy 4: page.fill as last resort (not human-like but works)
+        if not typed_ok:
+            try:
+                await search_input.fill(query)
+                typed_ok = True
+                log.warning("Used page.fill as fallback (not human-like)")
+            except Exception:
+                pass
+
+        if not typed_ok:
+            log.warning("Failed to type into search box (all strategies failed)")
+            return False
+
+        # Step 6: Let the autocomplete suggestions appear
         # (a real user pauses here to look at suggestions)
-        await page.wait_for_timeout(random.randint(400, 1200))
+        await page.wait_for_timeout(random.randint(300, 900))
 
         # Optional: simulate clicking a suggestion ~30% of the time
+        suggestion_clicked = False
         if random.random() < 0.3:
             try:
-                # Look for autocomplete suggestions
                 suggestion = page.locator('li[role="presentation"]').first
                 if await suggestion.count() > 0 and await suggestion.is_visible():
                     await human_sim.human_click(page, 'li[role="presentation"]')
-                    # If we clicked a suggestion, we don't need to press Enter
-                    submit = False
+                    suggestion_clicked = True
             except Exception:
                 pass
 
-        if submit:
-            # Press Enter to submit
-            await page.keyboard.press("Enter")
+        # Step 7: Submit
+        if submit and not suggestion_clicked:
+            try:
+                # Try pressing Enter on the locator first (more reliable)
+                await search_input.press("Enter")
+            except Exception:
+                # Fallback to keyboard.press
+                try:
+                    await page.keyboard.press("Enter")
+                except Exception:
+                    pass
 
-        # Wait for the page to navigate and results to appear
+        # Step 8: Wait for navigation to /search
         try:
             await page.wait_for_url(re.compile(r"/search\?"), timeout=15000)
         except Exception:
-            # Maybe it didn't navigate; try a direct goto as fallback
-            log.debug("Search did not navigate via /search, trying direct")
+            log.debug("Search did not navigate via /search URL")
 
         # Wait for results to render
         try:
@@ -872,7 +1013,7 @@ async def search_via_typing(
 
         # Short read dwell
         if read_after:
-            await human_sim.human_read(page, duration_sec=random.uniform(0.8, 2.0))
+            await human_sim.human_read(page, duration_sec=random.uniform(0.5, 1.5))
 
         return True
     except Exception as e:
