@@ -23,7 +23,10 @@ from datetime import datetime, timezone
 from email import policy as email_policy
 from email.parser import BytesParser as EmailParser
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import quote_plus, unquote, urlparse, parse_qs
+
+from pydantic import AliasChoices, Field
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from playwright.async_api import async_playwright
@@ -6343,7 +6346,22 @@ async def _check_source_twitter(handle: str) -> list[dict]:
 @mcp.tool()
 async def subscribe(
     source_type: str,
-    identifier: str,
+    identifier: Annotated[
+        str,
+        # Accept either `identifier` (legacy LM Studio / Claude Desktop
+        # clients) or `channel` (newer MCP clients that rename the
+        # identifier field to `channel` in their tool-call schema).
+        Field(
+            validation_alias=AliasChoices("identifier", "channel"),
+            description=(
+                "Source identifier. Depends on source_type: news preset "
+                "(bbc, cnn, ...), subreddit name, owner/repo, arXiv "
+                "category, @handle / URL / channel ID, or RSS URL. "
+                "Some clients send this as `channel` instead of "
+                "`identifier`; both are accepted.",
+            ),
+        ),
+    ],
     name: str = "",
 ) -> str:
     """Subscribe to a content source for automatic monitoring and search.
@@ -6484,7 +6502,22 @@ async def subscribe(
 
 
 @mcp.tool()
-async def unsubscribe(source_type: str, identifier: str) -> str:
+async def unsubscribe(
+    source_type: str,
+    identifier: Annotated[
+        str,
+        # Same client-compat: some MCP clients send this as `channel`
+        # instead of `identifier`. Accept both names.
+        Field(
+            validation_alias=AliasChoices("identifier", "channel"),
+            description=(
+                "The same identifier used when subscribing. "
+                "Some clients send this as `channel` instead of "
+                "`identifier`; both are accepted."
+            ),
+        ),
+    ],
+) -> str:
     """Remove a subscription and all its stored content.
 
     Sample prompts that trigger this tool:
