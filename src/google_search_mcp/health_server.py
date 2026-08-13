@@ -792,12 +792,22 @@ class HealthServer:
 
     Usage in `app_lifespan`:
 
-        health = HealthServer.start_in_background()
+        health = HealthServer()
+        await health.start()
         try:
             yield {}
         finally:
-            health.stop()
+            await health.stop()
+
+    If the health server cannot bind (e.g. port already in use from a
+    previous process still in TIME_WAIT), it logs a warning and
+    continues — the MCP tools remain fully functional without the
+    health HTTP endpoint.
     """
+
+    # Number of bind attempts with SO_REUSEADDR before giving up.
+    _BIND_RETRIES: int = 3
+    _BIND_RETRY_DELAY: float = 1.0
 
     def __init__(self, config_obj: Any | None = None) -> None:
         from . import config
@@ -809,10 +819,16 @@ class HealthServer:
         self._port: int = self.config.HEALTH_PORT
         self._actual_port: int | None = None  # set after start (if port=0)
         self._error: BaseException | None = None
+        self._sock: socket.socket | None = None  # pre-bound socket with SO_REUSEADDR
 
     @property
     def enabled(self) -> bool:
         return bool(self.config.ENABLE_HEALTH_SERVER)
+
+    @property
+    def is_running(self) -> bool:
+        """True if the health server successfully started and is accepting connections."""
+        return self._server is not None and self._task is not None and not self._task.done()
 
     @property
     def url(self) -> str:
@@ -820,8 +836,41 @@ class HealthServer:
         host = "127.0.0.1" if self._host in ("0.0.0.0", "::") else self._host
         return f"http://{host}:{port}"
 
+    def _create_bound_socket(self) -> socket.socket | None:
+        """Create and bind a TCP socket with SO_REUSEADDR set.
+
+        Returns the bound socket, or None if binding failed.
+        """
+        try:
+            family = socket.AF_INET6 if self._host == "::" else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # On Linux, also try SO_REUSEPORT for kernel-level load balancing
+            # across processes (available since Linux 3.9).
+            if hasattr(socket, "SO_REUSEPORT"):
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except OSError:
+                    pass  # not all kernels support it
+            sock.bind((self._host, self._port))
+            sock.listen(128)
+            sock.setblocking(False)
+            return sock
+        except OSError as e:
+            print(
+                f"[health_server] WARNING: cannot bind to "
+                f"{self._host}:{self._port} — {e}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+
     async def start(self) -> None:
-        """Start the health server in the current event loop."""
+        """Start the health server in the current event loop.
+
+        Tries to bind with SO_REUSEADDR up to _BIND_RETRIES times.
+        If all attempts fail, logs a warning and continues without
+        the health endpoint — the MCP tools remain fully functional.
+        """
         if not self.enabled:
             return
         if not _STARLETTE_AVAILABLE or not _UVICORN_AVAILABLE:
@@ -832,9 +881,32 @@ class HealthServer:
                 file=sys.stderr, flush=True,
             )
             return
+
+        # ── Bind with SO_REUSEADDR + retry ──
+        for attempt in range(1, self._BIND_RETRIES + 1):
+            self._sock = self._create_bound_socket()
+            if self._sock is not None:
+                break
+            if attempt < self._BIND_RETRIES:
+                print(
+                    f"[health_server] Retrying bind in "
+                    f"{self._BIND_RETRY_DELAY}s (attempt {attempt}/{self._BIND_RETRIES})...",
+                    file=sys.stderr, flush=True,
+                )
+                await asyncio.sleep(self._BIND_RETRY_DELAY)
+
+        if self._sock is None:
+            print(
+                "[health_server] WARNING: Health endpoint could not bind — "
+                "continuing without health HTTP server. "
+                "MCP tools remain fully functional. "
+                "To free the port, run: fuser -k 11499/tcp",
+                file=sys.stderr, flush=True,
+            )
+            self._server = None
+            return
+
         app = build_app()
-        # uvicorn.Server runs the asyncio loop internally; we run it
-        # in a separate task so we can yield back to the main loop.
         config_uv = uvicorn.Config(
             app,
             host=self._host,
@@ -844,7 +916,6 @@ class HealthServer:
             lifespan="off",
         )
         self._server = uvicorn.Server(config_uv)
-        # Detect the actual bound port (in case user passed 0)
         self._task = asyncio.create_task(self._serve(), name="health-server")
         # Wait until the server is actually accepting connections
         try:
@@ -859,17 +930,15 @@ class HealthServer:
                 f"[health_server] ERROR: {self._error}",
                 file=sys.stderr, flush=True,
             )
+            self._server = None
             return
-        # Try to discover the actual port (useful if user passed 0).
-        # Give uvicorn a moment to bind.
-        actual = None
-        for _ in range(30):
-            actual = self._discover_actual_port()
-            if actual is not None:
-                break
-            await asyncio.sleep(0.1)
-        if actual is not None:
-            self._actual_port = actual
+        # Discover the actual bound port from our pre-created socket.
+        try:
+            addr = self._sock.getsockname()
+            if addr and len(addr) >= 2:
+                self._actual_port = int(addr[1])
+        except Exception:
+            pass
         if not self._actual_port:
             self._actual_port = self._port
         print(
@@ -878,26 +947,12 @@ class HealthServer:
             file=sys.stderr, flush=True,
         )
 
-    def _discover_actual_port(self) -> int | None:
-        """Return the OS-assigned port if the server is bound, else None."""
-        if self._server is None:
-            return None
-        try:
-            for srv in getattr(self._server, "servers", []) or []:
-                for s in getattr(srv, "sockets", []) or []:
-                    addr = s.getsockname()
-                    if addr and len(addr) >= 2:
-                        return int(addr[1])
-        except Exception:
-            pass
-        return None
-
     async def _serve(self) -> None:
-        """Run uvicorn in the background and signal when ready."""
+        """Run uvicorn in the background, using our pre-bound SO_REUSEADDR socket."""
         try:
-            # uvicorn.Server.serve() runs until shutdown() is called
+            # Pass our pre-bound socket so uvicorn doesn't try to bind again.
             self._ready.set()
-            await self._server.serve()
+            await self._server.serve(sockets=[self._sock])
         except BaseException as e:
             self._error = e
             self._ready.set()
@@ -922,6 +977,13 @@ class HealthServer:
                 pass
         self._task = None
         self._server = None
+        # Close our pre-bound socket.
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

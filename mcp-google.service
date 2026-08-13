@@ -17,10 +17,23 @@ Environment=HEALTH_PORT=11499
 # Environment=HEALTH_AUTH_TOKEN=
 Environment=PATH=/home/sameer/.n/n/versions/node/26.3.0/bin:/home/sameer/anaconda3/envs/mcp-google/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Pre-start cleanup: kill any lingering process on the health port (11499)
+# and the MCP proxy port (11403) to prevent "address already in use" errors.
+ExecStartPre=-/bin/bash -c 'fuser -k 11499/tcp 2>/dev/null || true'
+ExecStartPre=-/bin/bash -c 'fuser -k 11403/tcp 2>/dev/null || true'
+# Clean up stale PID file from previous runs.
+ExecStartPre=-/bin/bash -c 'rm -f /home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/service.pid'
+
 StandardOutput=append:/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/service.log
 StandardError=inherit
 
 ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -i -m google_search_mcp
+
+# Ensure the old process is fully terminated before restart.
+# KillMode=mixed: SIGTERM to main process, SIGKILL to children.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
 
 Restart=on-failure
 RestartSec=10
