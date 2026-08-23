@@ -27,7 +27,9 @@ ExecStartPre=-/bin/bash -c 'rm -f /home/sameer/Shared/Sync/Private/Apps/services
 StandardOutput=append:/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/service.log
 StandardError=inherit
 
-ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -i -m google_search_mcp
+# ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -i -m google_search_mcp
+# Remove the -i flag from the systemd unit so the process exits on crash (allowing systemd to restart it)
+ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -m google_search_mcp
 
 # Ensure the old process is fully terminated before restart.
 # KillMode=mixed: SIGTERM to main process, SIGKILL to children.
