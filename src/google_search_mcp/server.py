@@ -6358,7 +6358,7 @@ async def subscribe(
                 "(bbc, cnn, ...), subreddit name, owner/repo, arXiv "
                 "category, @handle / URL / channel ID, or RSS URL. "
                 "Some clients send this as `channel` instead of "
-                "`identifier`; both are accepted.",
+                "`identifier`; both are accepted."
             ),
         ),
     ],
