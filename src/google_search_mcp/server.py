@@ -95,6 +95,7 @@ from .utils.network import (
     fallback_duckduckgo_news,
     fallback_duckduckgo_images,
     format_fallback_results,
+    resolve_urls,
 )
 
 # Internal alias for legacy function references within this module
@@ -664,6 +665,12 @@ async def do_google_search(
                 return format_fallback_results(query, provider, fallback)
             return f"No results found for: {query}"
 
+        # Resolve Google redirect URLs (e.g. /url?q=..., /goto?url=...) to their
+        # final destinations so citations point at the real source, not Google.
+        resolved_urls = await resolve_urls([r.get("url", "") for r in results])
+        for r, final_url in zip(results, resolved_urls):
+            r["url"] = final_url
+
         header = f"Google Search Results for: {query}"
         if time_range:
             header += f" (filtered: {time_range.replace('_', ' ')})"
@@ -864,6 +871,11 @@ async def do_google_news(query: str, num_results: int = 5) -> list:
             except Exception:
                 continue
 
+        # Resolve Google redirect URLs to their final destinations.
+        resolved_urls = await resolve_urls([r.get("url", "") for r in results])
+        for r, final_url in zip(results, resolved_urls):
+            r["url"] = final_url
+
         # Build mixed content: text + inline images
         content: list = [f"Google News Results for: {query}\n"]
         for i, r in enumerate(results[:num_results], 1):
@@ -973,6 +985,11 @@ async def do_google_scholar(query: str, num_results: int = 5) -> str:
 
             if not results:
                 return f"No scholar results found for: {query}"
+
+            # Resolve Google redirect URLs to their final destinations.
+            resolved_urls = await resolve_urls([r.get("url", "") for r in results])
+            for r, final_url in zip(results, resolved_urls):
+                r["url"] = final_url
 
             lines = [f"Google Scholar Results for: {query}\n"]
             for i, r in enumerate(results[:num_results], 1):

@@ -1,12 +1,126 @@
 """Network utilities — URL fetching, fallback search providers."""
 
+import asyncio
 import json
+import logging
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, unquote, urlparse, parse_qs
 
 from ..config import USER_AGENT
+
+logger = logging.getLogger(__name__)
+
+# Google search-result redirect wrappers. Every organic SERP result's <a href>
+# is one of these, NOT the final destination URL.
+_GOOGLE_URL_REDIRECT_RE = re.compile(
+    r"^https?://(?:www\.)?google\.[^/]+/url\?", re.IGNORECASE
+)
+_GOOGLE_GOTO_REDIRECT_RE = re.compile(
+    r"^https?://(?:www\.)?google\.[^/]+/goto\?", re.IGNORECASE
+)
+
+
+def _is_google_redirect(url: str) -> bool:
+    """Return True if the URL is a Google search-result redirect wrapper."""
+    return bool(
+        _GOOGLE_URL_REDIRECT_RE.match(url) or _GOOGLE_GOTO_REDIRECT_RE.match(url)
+    )
+
+
+def _decode_legacy_redirect(url: str) -> str:
+    """Decode the legacy ``/url?q=...`` redirect format.
+
+    The real destination is the ``q`` query parameter (URL-encoded). Returns
+    the decoded destination, or ``""`` if it cannot be extracted.
+    """
+    try:
+        params = parse_qs(urlparse(url).query)
+        for key in ("q", "url", "u", "uddg"):
+            val = params.get(key, [""])[0]
+            if val:
+                return unquote(val)
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_goto_redirect(url: str, timeout: int = 8) -> str:
+    """Follow a modern ``/goto?url=...`` redirect via HTTP.
+
+    The ``url`` param is a base64url-encoded protobuf token that cannot be
+    decoded to a readable URL — it must be resolved by following the redirect.
+    Uses HEAD first (lighter), falling back to GET for servers that reject HEAD.
+    Returns the final ``response.url``, or ``""`` on failure.
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        # HEAD first — lighter, and urllib follows redirects for HEAD too.
+        # But some endpoints (Google's /goto) return 200 on HEAD without
+        # redirecting, so only trust HEAD if it actually moved somewhere.
+        try:
+            req.method = "HEAD"
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                head_url = resp.geturl()
+                if head_url and head_url != url:
+                    return head_url
+        except Exception:
+            pass
+        # Fall back to GET (some servers 405/403 on HEAD, or HEAD doesn't
+        # redirect). GET reliably follows Google's /goto redirect.
+        req.method = "GET"
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.geturl()
+    except Exception:
+        return ""
+
+
+def resolve_url(url: str, timeout: int = 8) -> str:
+    """Resolve a Google search-result redirect URL to its final destination.
+
+    - Legacy ``/url?q=...``  -> URL-decode the ``q`` param.
+    - Modern ``/goto?url=...`` -> follow the HTTP redirect.
+    - Non-Google URLs pass through unchanged.
+    - On failure, returns the original URL (never drops the result), logging a
+      warning so the caller can still surface the result.
+    """
+    if not url or not _is_google_redirect(url):
+        return url
+
+    if _GOOGLE_URL_REDIRECT_RE.match(url):
+        decoded = _decode_legacy_redirect(url)
+        if decoded:
+            return decoded
+
+    # Modern goto format (or legacy decode failed) -> follow the redirect.
+    resolved = _resolve_goto_redirect(url, timeout=timeout)
+    if resolved:
+        return resolved
+
+    logger.warning("Failed to resolve Google redirect URL: %s", url)
+    return url
+
+
+async def resolve_urls(
+    urls: list[str], timeout: int = 8, max_concurrency: int = 8
+) -> list[str]:
+    """Resolve a list of URLs to their final destinations, concurrently.
+
+    Runs the blocking ``resolve_url`` in a thread pool so the async event loop
+    is never blocked, and bounds concurrency so a slow redirect can't stall the
+    whole search. Returns a list aligned with the input.
+    """
+    if not urls:
+        return []
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def _resolve_one(url: str) -> str:
+        async with semaphore:
+            return await asyncio.to_thread(resolve_url, url, timeout)
+
+    return await asyncio.gather(*(_resolve_one(u) for u in urls))
 
 
 def fetch_url_bytes(url: str, timeout: int = 15) -> bytes:
