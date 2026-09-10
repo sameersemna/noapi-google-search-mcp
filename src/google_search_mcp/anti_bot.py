@@ -194,6 +194,7 @@ async def browse_google(
     retries: int = MAX_GOOGLE_RETRIES,
     fallback_fn: Callable[[], str | list | None] | None = None,
     screenshot_label: str = "page",
+    vertical: str | None = None,
 ) -> AsyncIterator:
     """Async context manager for browsing Google with full anti-bot protection.
 
@@ -219,6 +220,10 @@ async def browse_google(
                      when all retries are exhausted. If None, a standard block
                      message is returned.
         screenshot_label: Label prefix for debug screenshots.
+        vertical: Optional Google search vertical (e.g. ``isch`` for images,
+                  ``nws`` for news). When set, the search-via-typing flow
+                  navigates to this vertical after typing (emulating a user
+                  clicking the Images/News tab).
 
     Yields:
         The Playwright Page object if successful, or None if blocked and
@@ -270,7 +275,9 @@ async def browse_google(
                         f"[anti_detect] Using search-via-typing for: {query!r}",
                         file=sys.stderr, flush=True,
                     )
-                    typed_ok = await anti_detect.search_via_typing(page, query)
+                    typed_ok = await anti_detect.search_via_typing(
+                        page, query, vertical=vertical
+                    )
                     used_typing_flow = typed_ok
                     if not typed_ok:
                         # Fall back to direct goto
@@ -367,7 +374,9 @@ async def browse_google(
                     ):
                         retry_query = anti_detect.parse_query_from_url(url)
                         if retry_query:
-                            await anti_detect.search_via_typing(page, retry_query)
+                            await anti_detect.search_via_typing(
+                                page, retry_query, vertical=vertical
+                            )
                         else:
                             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     else:

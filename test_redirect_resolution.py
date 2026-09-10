@@ -19,6 +19,7 @@ import urllib.parse
 
 sys.path.insert(0, "src")
 
+from google_search_mcp.utils import network as network_mod
 from google_search_mcp.utils.network import (
     resolve_url,
     resolve_urls,
@@ -166,6 +167,70 @@ def test_resolve_urls_empty():
     assert asyncio.run(resolve_urls([])) == []
 
 
+# ---------------------------------------------------------------------------
+# Cache tests
+# ---------------------------------------------------------------------------
+
+
+def _clear_cache():
+    network_mod._resolve_cache.clear()
+
+
+def test_cache_memoizes_legacy_decode():
+    """A legacy redirect should be cached so repeat calls don't re-decode."""
+    _clear_cache()
+    dest = "https://example.com/cached"
+    redirect = "https://www.google.com/url?q=" + urllib.parse.quote(dest, safe="")
+    assert resolve_url(redirect) == dest
+    assert network_mod._cache_get(redirect) == dest
+
+
+def test_cache_evicts_oldest_when_full():
+    """The LRU cache should evict the oldest entry when it exceeds its size."""
+    _clear_cache()
+    old_size = network_mod.REDIRECT_RESOLVE_CACHE_SIZE
+    network_mod.REDIRECT_RESOLVE_CACHE_SIZE = 2
+    try:
+        r1 = "https://www.google.com/url?q=" + urllib.parse.quote("https://a.example/1", safe="")
+        r2 = "https://www.google.com/url?q=" + urllib.parse.quote("https://a.example/2", safe="")
+        r3 = "https://www.google.com/url?q=" + urllib.parse.quote("https://a.example/3", safe="")
+        resolve_url(r1)
+        resolve_url(r2)
+        resolve_url(r3)
+        # r1 was evicted (oldest), r2 and r3 remain.
+        assert network_mod._cache_get(r1) is None
+        assert network_mod._cache_get(r2) is not None
+        assert network_mod._cache_get(r3) is not None
+    finally:
+        network_mod.REDIRECT_RESOLVE_CACHE_SIZE = old_size
+        _clear_cache()
+
+
+def test_cache_disabled_when_size_zero():
+    """Setting cache size to 0 disables caching entirely."""
+    _clear_cache()
+    old_size = network_mod.REDIRECT_RESOLVE_CACHE_SIZE
+    network_mod.REDIRECT_RESOLVE_CACHE_SIZE = 0
+    try:
+        dest = "https://example.com/nocache"
+        redirect = "https://www.google.com/url?q=" + urllib.parse.quote(dest, safe="")
+        resolve_url(redirect)
+        assert network_mod._cache_get(redirect) is None
+    finally:
+        network_mod.REDIRECT_RESOLVE_CACHE_SIZE = old_size
+        _clear_cache()
+
+
+def test_config_defaults_present():
+    """The config module should expose the new redirect settings."""
+    from google_search_mcp.config import (
+        REDIRECT_RESOLVE_TIMEOUT,
+        REDIRECT_RESOLVE_CACHE_SIZE,
+    )
+    assert isinstance(REDIRECT_RESOLVE_TIMEOUT, int) and REDIRECT_RESOLVE_TIMEOUT > 0
+    assert isinstance(REDIRECT_RESOLVE_CACHE_SIZE, int) and REDIRECT_RESOLVE_CACHE_SIZE >= 0
+
+
 if __name__ == "__main__":
     import traceback
 
@@ -182,6 +247,10 @@ if __name__ == "__main__":
         test_decode_legacy_redirect_helper,
         test_resolve_urls_async,
         test_resolve_urls_empty,
+        test_cache_memoizes_legacy_decode,
+        test_cache_evicts_oldest_when_full,
+        test_cache_disabled_when_size_zero,
+        test_config_defaults_present,
     ]
     passed = 0
     for t in tests:

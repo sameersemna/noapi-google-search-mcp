@@ -314,6 +314,24 @@ ANTIDETECT_VISIT_HOMEPAGE_FIRST: bool = os.environ.get(
 ).strip().lower() in ("1", "true", "yes", "on")
 
 # ---------------------------------------------------------------------------
+# Search-result redirect resolution
+# ---------------------------------------------------------------------------
+# Google wraps every organic SERP result in a redirect URL (/url?q=... or
+# /goto?url=...). We resolve these to the final destination before returning
+# results. These settings tune that resolution.
+#
+# REDIRECT_RESOLVE_TIMEOUT: per-URL timeout (seconds) for following a /goto
+#   redirect. A slow redirect shouldn't stall the whole search.
+# REDIRECT_RESOLVE_CACHE_SIZE: max number of resolved redirects to memoize
+#   in-process. Google reuses the same /goto token across searches, so caching
+#   avoids re-following the same redirect (faster + fewer requests to Google).
+#   Set to 0 to disable caching.
+REDIRECT_RESOLVE_TIMEOUT: int = int(os.environ.get("REDIRECT_RESOLVE_TIMEOUT", "8"))
+REDIRECT_RESOLVE_CACHE_SIZE: int = int(
+    os.environ.get("REDIRECT_RESOLVE_CACHE_SIZE", "512")
+)
+
+# ---------------------------------------------------------------------------
 # Health server — separate HTTP endpoint for /health, /version, etc.
 # ---------------------------------------------------------------------------
 # Runs in the same Python process as the MCP server, on its own port

@@ -6,9 +6,14 @@ import logging
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from urllib.parse import quote_plus, unquote, urlparse, parse_qs
 
-from ..config import USER_AGENT
+from ..config import (
+    REDIRECT_RESOLVE_CACHE_SIZE,
+    REDIRECT_RESOLVE_TIMEOUT,
+    USER_AGENT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +81,34 @@ def _resolve_goto_redirect(url: str, timeout: int = 8) -> str:
         return ""
 
 
-def resolve_url(url: str, timeout: int = 8) -> str:
+# In-process LRU cache of resolved redirects. Google reuses the same /goto
+# token across searches, so memoizing avoids re-following the same redirect
+# (faster, and fewer requests to Google). Thread-safe enough for our use: the
+# GIL protects the dict operations, and a worst-case duplicate resolution is
+# harmless. Size is configurable via REDIRECT_RESOLVE_CACHE_SIZE (0 = off).
+_resolve_cache: "OrderedDict[str, str]" = OrderedDict()
+
+
+def _cache_get(url: str) -> str | None:
+    if REDIRECT_RESOLVE_CACHE_SIZE <= 0:
+        return None
+    val = _resolve_cache.get(url)
+    if val is not None:
+        # Refresh LRU ordering.
+        _resolve_cache.move_to_end(url)
+    return val
+
+
+def _cache_put(url: str, resolved: str) -> None:
+    if REDIRECT_RESOLVE_CACHE_SIZE <= 0:
+        return
+    _resolve_cache[url] = resolved
+    _resolve_cache.move_to_end(url)
+    while len(_resolve_cache) > REDIRECT_RESOLVE_CACHE_SIZE:
+        _resolve_cache.popitem(last=False)
+
+
+def resolve_url(url: str, timeout: int | None = None) -> str:
     """Resolve a Google search-result redirect URL to its final destination.
 
     - Legacy ``/url?q=...``  -> URL-decode the ``q`` param.
@@ -84,18 +116,30 @@ def resolve_url(url: str, timeout: int = 8) -> str:
     - Non-Google URLs pass through unchanged.
     - On failure, returns the original URL (never drops the result), logging a
       warning so the caller can still surface the result.
+
+    ``timeout`` defaults to ``REDIRECT_RESOLVE_TIMEOUT``. Results are memoized
+    in an in-process LRU cache (see ``REDIRECT_RESOLVE_CACHE_SIZE``).
     """
+    if timeout is None:
+        timeout = REDIRECT_RESOLVE_TIMEOUT
+
     if not url or not _is_google_redirect(url):
         return url
+
+    cached = _cache_get(url)
+    if cached is not None:
+        return cached
 
     if _GOOGLE_URL_REDIRECT_RE.match(url):
         decoded = _decode_legacy_redirect(url)
         if decoded:
+            _cache_put(url, decoded)
             return decoded
 
     # Modern goto format (or legacy decode failed) -> follow the redirect.
     resolved = _resolve_goto_redirect(url, timeout=timeout)
     if resolved:
+        _cache_put(url, resolved)
         return resolved
 
     logger.warning("Failed to resolve Google redirect URL: %s", url)
@@ -103,7 +147,7 @@ def resolve_url(url: str, timeout: int = 8) -> str:
 
 
 async def resolve_urls(
-    urls: list[str], timeout: int = 8, max_concurrency: int = 8
+    urls: list[str], timeout: int | None = None, max_concurrency: int = 8
 ) -> list[str]:
     """Resolve a list of URLs to their final destinations, concurrently.
 

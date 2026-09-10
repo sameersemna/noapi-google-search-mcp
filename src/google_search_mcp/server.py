@@ -935,82 +935,73 @@ async def do_google_scholar(query: str, num_results: int = 5) -> str:
     encoded_query = quote_plus(query)
     url = f"https://scholar.google.com/scholar?q={encoded_query}&hl=en&num={num_results + 5}"
 
-    async with async_playwright() as pw:
-        context = await launch_browser(pw)
-        page = await context.new_page()
+    async with browse_google(url, screenshot_label="scholar") as page:
+        if page is None:
+            return f"Google Scholar blocked by bot detection for: {query}\nTry again later."
 
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await dismiss_consent(page)
-            await page.wait_for_selector("#gs_res_ccl", timeout=15000)
+        await page.wait_for_selector("#gs_res_ccl", timeout=15000)
 
-            results = await page.evaluate(
-                """
-                (numResults) => {
-                    const results = [];
-                    const entries = document.querySelectorAll('.gs_r.gs_or.gs_scl, .gs_ri');
-                    for (const el of entries) {
-                        if (results.length >= numResults) break;
+        results = await page.evaluate(
+            """
+            (numResults) => {
+                const results = [];
+                const entries = document.querySelectorAll('.gs_r.gs_or.gs_scl, .gs_ri');
+                for (const el of entries) {
+                    if (results.length >= numResults) break;
 
-                        const titleEl = el.querySelector('.gs_rt a, .gs_rt');
-                        const linkEl = el.querySelector('.gs_rt a');
-                        const authorsEl = el.querySelector('.gs_a');
-                        const snippetEl = el.querySelector('.gs_rs');
-                        const citedEl = el.querySelector('.gs_fl a');
+                    const titleEl = el.querySelector('.gs_rt a, .gs_rt');
+                    const linkEl = el.querySelector('.gs_rt a');
+                    const authorsEl = el.querySelector('.gs_a');
+                    const snippetEl = el.querySelector('.gs_rs');
+                    const citedEl = el.querySelector('.gs_fl a');
 
-                        let citedBy = '';
-                        const flLinks = el.querySelectorAll('.gs_fl a');
-                        for (const fl of flLinks) {
-                            if (fl.textContent.includes('Cited by')) {
-                                citedBy = fl.textContent.trim();
-                                break;
-                            }
-                        }
-
-                        if (titleEl) {
-                            results.push({
-                                title: titleEl.innerText.trim(),
-                                url: linkEl ? linkEl.href : '',
-                                authors: authorsEl ? authorsEl.innerText.trim() : '',
-                                snippet: snippetEl ? snippetEl.innerText.trim() : '',
-                                cited_by: citedBy
-                            });
+                    let citedBy = '';
+                    const flLinks = el.querySelectorAll('.gs_fl a');
+                    for (const fl of flLinks) {
+                        if (fl.textContent.includes('Cited by')) {
+                            citedBy = fl.textContent.trim();
+                            break;
                         }
                     }
-                    return results;
+
+                    if (titleEl) {
+                        results.push({
+                            title: titleEl.innerText.trim(),
+                            url: linkEl ? linkEl.href : '',
+                            authors: authorsEl ? authorsEl.innerText.trim() : '',
+                            snippet: snippetEl ? snippetEl.innerText.trim() : '',
+                            cited_by: citedBy
+                        });
+                    }
                 }
-                """,
-                num_results,
-            )
+                return results;
+            }
+            """,
+            num_results,
+        )
 
-            if not results:
-                return f"No scholar results found for: {query}"
+        if not results:
+            return f"No scholar results found for: {query}"
 
-            # Resolve Google redirect URLs to their final destinations.
-            resolved_urls = await resolve_urls([r.get("url", "") for r in results])
-            for r, final_url in zip(results, resolved_urls):
-                r["url"] = final_url
+        # Resolve Google redirect URLs to their final destinations.
+        resolved_urls = await resolve_urls([r.get("url", "") for r in results])
+        for r, final_url in zip(results, resolved_urls):
+            r["url"] = final_url
 
-            lines = [f"Google Scholar Results for: {query}\n"]
-            for i, r in enumerate(results[:num_results], 1):
-                lines.append(f"{i}. {r['title']}")
-                if r.get("url"):
-                    lines.append(f"   URL: {r['url']}")
-                if r.get("authors"):
-                    lines.append(f"   Authors: {r['authors']}")
-                if r.get("cited_by"):
-                    lines.append(f"   {r['cited_by']}")
-                if r.get("snippet"):
-                    lines.append(f"   {r['snippet']}")
-                lines.append("")
+        lines = [f"Google Scholar Results for: {query}\n"]
+        for i, r in enumerate(results[:num_results], 1):
+            lines.append(f"{i}. {r['title']}")
+            if r.get("url"):
+                lines.append(f"   URL: {r['url']}")
+            if r.get("authors"):
+                lines.append(f"   Authors: {r['authors']}")
+            if r.get("cited_by"):
+                lines.append(f"   {r['cited_by']}")
+            if r.get("snippet"):
+                lines.append(f"   {r['snippet']}")
+            lines.append("")
 
-            return "\n".join(lines)
-
-        except Exception as e:
-            return f"Scholar search failed: {e}"
-
-        finally:
-            await context.close()
+        return "\n".join(lines)
 
 
 @mcp.tool()
@@ -1059,52 +1050,31 @@ async def google_images(query: str, num_results: int = 5) -> list:
     encoded_query = quote_plus(query)
     url = f"https://www.google.com/search?q={encoded_query}&hl=en&tbm=isch"
 
-    async with async_playwright() as pw:
-        context = await launch_browser(pw)
-        await load_cookies(context)
-        page = await context.new_page()
+    def _fallback() -> list:
+        ddg_imgs = fallback_duckduckgo_images(query, num_results)
+        if ddg_imgs:
+            content = [f"Google Images blocked by bot detection. Showing fallback results (DuckDuckGo Images):\n"]
+            content.append(f"Image Results for: {query}\n")
+            for i, r in enumerate(ddg_imgs[:num_results], 1):
+                desc = f"{i}. {r.get('title', 'Image')}"
+                if r.get("url"):
+                    desc += f"\n   URL: {r['url']}"
+                content.append(desc)
+            return content
+        return [f"Google Images blocked by bot detection for: {query}\nTry again later or use a different query."]
 
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await dismiss_consent(page)
+    async with browse_google(
+        url, fallback_fn=_fallback, screenshot_label="images", vertical="isch"
+    ) as page:
+        if page is None:
+            return _fallback()
 
-            # Detect and handle CAPTCHA/rate-limit blocks
-            if await is_blocked(page):
-                solved = await try_solve_captcha(page)
-                if not solved:
-                    try:
-                        await page.goto(
-                            "https://www.google.com/ncr",
-                            wait_until="domcontentloaded",
-                            timeout=30000,
-                        )
-                        await dismiss_consent(page)
-                        await human_delay(page)
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        await dismiss_consent(page)
-                    except Exception:
-                        pass
+        context = page.context
+        await page.wait_for_timeout(2000)
 
-                    if await is_blocked(page):
-                        await save_cookies(context)
-                        # Try DuckDuckGo fallback for images
-                        ddg_imgs = fallback_duckduckgo_images(query, num_results)
-                        if ddg_imgs:
-                            content = [f"Google Images blocked by bot detection. Showing fallback results (DuckDuckGo Images):\n"]
-                            content.append(f"Image Results for: {query}\n")
-                            for i, r in enumerate(ddg_imgs[:num_results], 1):
-                                desc = f"{i}. {r.get('title', 'Image')}"
-                                if r.get("url"):
-                                    desc += f"\n   URL: {r['url']}"
-                                content.append(desc)
-                            return content
-                        return [f"Google Images blocked by bot detection for: {query}\nTry again later or use a different query."]
-
-            await page.wait_for_timeout(2000)
-
-            results = await page.evaluate(
-                """
-                (numResults) => {
+        results = await page.evaluate(
+            """
+            (numResults) => {
                     const results = [];
 
                     // Primary: modern Google Images result links
@@ -1168,63 +1138,56 @@ async def google_images(query: str, num_results: int = 5) -> list:
                 num_results,
             )
 
-            if not results:
-                return [f"No image results found for: {query}"]
+        if not results:
+            return [f"No image results found for: {query}"]
 
-            # Check if we got raw text fallback
-            if results[0].get("raw_text"):
-                return [f"Google Image Results for: {query}\n\n(Could not extract structured results. Raw page content:)\n{results[0]['snippet']}"]
+        # Check if we got raw text fallback
+        if results[0].get("raw_text"):
+            return [f"Google Image Results for: {query}\n\n(Could not extract structured results. Raw page content:)\n{results[0]['snippet']}"]
 
-            # Download full-size images for inline display (fall back to thumbnail)
-            for r in results[:num_results]:
-                full_url = r.get("url", "")
-                thumb_url = r.get("thumbnail", "")
-                for img_url in [full_url, thumb_url]:
-                    if not img_url or not img_url.startswith("http"):
-                        continue
-                    try:
-                        resp = await context.request.get(img_url, timeout=8000)
-                        if resp.ok:
-                            body = await resp.body()
-                            # Skip if too small (likely broken) or too large (>5MB)
-                            if len(body) < 1000 or len(body) > 5_000_000:
-                                continue
-                            r["image_bytes"] = body
-                            ct = resp.headers.get("content-type", "image/jpeg")
-                            r["content_type"] = ct.split(";")[0].strip()
-                            break
-                    except Exception:
-                        continue
+        # Download full-size images for inline display (fall back to thumbnail)
+        for r in results[:num_results]:
+            full_url = r.get("url", "")
+            thumb_url = r.get("thumbnail", "")
+            for img_url in [full_url, thumb_url]:
+                if not img_url or not img_url.startswith("http"):
+                    continue
+                try:
+                    resp = await context.request.get(img_url, timeout=8000)
+                    if resp.ok:
+                        body = await resp.body()
+                        # Skip if too small (likely broken) or too large (>5MB)
+                        if len(body) < 1000 or len(body) > 5_000_000:
+                            continue
+                        r["image_bytes"] = body
+                        ct = resp.headers.get("content-type", "image/jpeg")
+                        r["content_type"] = ct.split(";")[0].strip()
+                        break
+                except Exception:
+                    continue
 
-            # Build mixed content: text descriptions + inline images
-            content = [f"Google Image Results for: {query}\n"]
+        # Build mixed content: text descriptions + inline images
+        content = [f"Google Image Results for: {query}\n"]
 
-            for i, r in enumerate(results[:num_results], 1):
-                desc = f"{i}. {r.get('title', 'Untitled')}"
-                if r.get("url"):
-                    desc += f"\n   Source: {r['url']}"
-                content.append(desc)
+        for i, r in enumerate(results[:num_results], 1):
+            desc = f"{i}. {r.get('title', 'Untitled')}"
+            if r.get("url"):
+                desc += f"\n   Source: {r['url']}"
+            content.append(desc)
 
-                if r.get("image_bytes"):
-                    try:
-                        ct = r.get("content_type", "image/jpeg")
-                        fmt_map = {
-                            "image/jpeg": "jpeg", "image/png": "png",
-                            "image/gif": "gif", "image/webp": "webp",
-                        }
-                        fmt = fmt_map.get(ct, "jpeg")
-                        content.append(Image(data=r["image_bytes"], format=fmt))
-                    except Exception:
-                        pass
+            if r.get("image_bytes"):
+                try:
+                    ct = r.get("content_type", "image/jpeg")
+                    fmt_map = {
+                        "image/jpeg": "jpeg", "image/png": "png",
+                        "image/gif": "gif", "image/webp": "webp",
+                    }
+                    fmt = fmt_map.get(ct, "jpeg")
+                    content.append(Image(data=r["image_bytes"], format=fmt))
+                except Exception:
+                    pass
 
-            return content
-
-        except Exception as e:
-            return [f"Image search failed: {e}"]
-
-        finally:
-            await save_cookies(context)
-            await context.close()
+        return content
 
 
 # ---------------------------------------------------------------------------

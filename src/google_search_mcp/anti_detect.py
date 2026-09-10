@@ -856,6 +856,7 @@ async def search_via_typing(
     *,
     submit: bool = True,
     read_after: bool = True,
+    vertical: str | None = None,
 ) -> bool:
     """Type a search query into the Google search box and submit.
 
@@ -870,7 +871,12 @@ async def search_via_typing(
       7. Press Enter (or click a suggestion)
       8. Wait for navigation to /search?
 
-    Returns True if the search was submitted successfully.
+    ``vertical`` (optional) is a Google search vertical such as ``isch``
+    (images) or ``nws`` (news). Typing + Enter lands on the plain web
+    results page, so when a vertical is requested we navigate to the
+    vertical URL afterwards (equivalent to a user clicking the
+    "Images"/"News" tab). Returns True if the search was submitted
+    successfully.
     """
     if not config.ANTIDETECT_SEARCH_VIA_TYPING:
         return False
@@ -1010,6 +1016,25 @@ async def search_via_typing(
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
         except Exception:
             pass
+
+        # Step 9: If a vertical (e.g. images/news) was requested, navigate to
+        # it. Typing + Enter lands on the plain web results page; a real user
+        # would click the "Images"/"News" tab. We emulate that by going to the
+        # vertical URL directly (the query is already in the URL).
+        if vertical:
+            try:
+                current = page.url
+                if "tbm=" not in current:
+                    sep = "&" if "?" in current else "?"
+                    await page.goto(
+                        f"{current}{sep}tbm={vertical}",
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                    await _dismiss_google_overlays(page)
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception as e:
+                log.debug("Vertical navigation failed: %s", e)
 
         # Short read dwell
         if read_after:
