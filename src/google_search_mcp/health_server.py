@@ -546,6 +546,15 @@ def _check_mcp() -> dict[str, Any]:
     return info
 
 
+def _check_metrics() -> dict[str, Any]:
+    """Return per-tool call metrics (counts, errors, latency)."""
+    try:
+        from . import metrics
+        return metrics.snapshot()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def _check_manual_intervention() -> dict[str, Any]:
     """Return manual intervention state."""
     from . import browser, config
@@ -664,6 +673,7 @@ def _build_health_payload() -> dict[str, Any]:
         "mcp": _check_mcp(),
         "config": _check_config(),
         "anti_detect": _check_anti_detect(),
+        "metrics": _check_metrics(),
         "dependencies": _check_dependencies(),
         "files": _check_files(),
         "disk": _check_disk(),

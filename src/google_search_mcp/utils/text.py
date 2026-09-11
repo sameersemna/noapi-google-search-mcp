@@ -1,6 +1,31 @@
 """Text processing utilities — HTML stripping, timestamp formatting, chunk splitting."""
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
+
+
+def format_error(operation: str, exc: BaseException | None = None) -> str:
+    """Return a clean, user-facing error message and log the real exception.
+
+    Tools should return this instead of leaking raw exception strings (e.g.
+    ``f"Search failed: {e}"``) into the LLM context. The full exception is
+    logged server-side for debugging; the returned string is a concise,
+    actionable message with no internal traceback noise.
+
+    Args:
+        operation: A short human-readable label for what failed, e.g.
+                   ``"Google Maps search"``.
+        exc: The caught exception (optional). If provided, its type and
+             message are logged at ERROR level.
+
+    Returns:
+        A clean message like ``"Google Maps search failed. Please try again."``
+    """
+    if exc is not None:
+        logger.error("%s failed: %s: %s", operation, type(exc).__name__, exc)
+    return f"{operation} failed. Please try again."
 
 
 def strip_html(text: str) -> str:

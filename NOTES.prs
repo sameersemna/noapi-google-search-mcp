@@ -70,3 +70,6 @@ sudo systemctl status mcp-duckduckgo.service
 
 
 for pid in $(sudo lsof -i tcp:11400-11420 -s tcp:LISTEN -t 2>/dev/null | sort -u); do port=$(sudo lsof -i tcp:11400-11420 -s tcp:LISTEN -a -p $pid -F n 2>/dev/null | grep -o ':[0-9]*$' | tr -d ':' | head -n1); service=$(systemctl status $pid 2>/dev/null | grep -Po '(?<=● )\S+' || echo "None (Manual Process)"); echo "PID: $pid | Port: $port | Service: $service"; done
+
+
+The two larger refactors I deliberately skipped (splitting the monolithic server.py and migrating tests to pytest) remain as future work — they're high-risk and better done deliberately rather than autonomously.

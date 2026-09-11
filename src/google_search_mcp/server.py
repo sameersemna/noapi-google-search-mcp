@@ -88,6 +88,7 @@ from .utils.text import (
     format_timestamp,
     split_translation_chunks,
     collapse_newlines,
+    format_error,
 )
 from .utils.network import (
     fetch_url_bytes,
@@ -1317,7 +1318,7 @@ async def do_google_trends(query: str) -> str:
             return "\n".join(lines)
 
         except Exception as e:
-            return f"Trends lookup failed: {e}"
+            return format_error("Google Trends lookup", e)
 
         finally:
             await save_cookies(context)
@@ -1556,7 +1557,7 @@ async def do_google_maps(query: str, num_results: int = 5) -> list:
             return content
 
         except Exception as e:
-            return [f"Maps search failed: {e}"]
+            return [format_error("Google Maps search", e)]
 
         finally:
             await context.close()
@@ -1728,7 +1729,7 @@ async def do_google_maps_directions(
             return content
 
         except Exception as e:
-            return [f"Directions lookup failed: {e}"]
+            return [format_error("Google Maps directions lookup", e)]
 
         finally:
             await context.close()
@@ -2655,7 +2656,7 @@ async def do_google_translate(text: str, to_language: str, from_language: str = 
             return "\n".join(lines)
 
         except Exception as e:
-            return f"Translation failed: {e}"
+            return format_error("Google Translate", e)
 
         finally:
             await context.close()
@@ -2834,7 +2835,7 @@ async def do_google_flights(
             return "\n".join(lines)
 
         except Exception as e:
-            return f"Flight search failed: {e}"
+            return format_error("Google Flights search", e)
 
         finally:
             await save_cookies(context)
@@ -3124,7 +3125,7 @@ async def do_google_hotels(query: str, num_results: int = 5) -> list:
             return content
 
         except Exception as e:
-            return f"Hotel search failed: {e}"
+            return format_error("Google Hotels search", e)
 
         finally:
             await save_cookies(context)
@@ -3493,7 +3494,7 @@ async def do_google_lens(image_source: str) -> str:
             return "\n".join(lines)
 
         except Exception as e:
-            return f"Google Lens search failed: {e}"
+            return format_error("Google Lens search", e)
 
         finally:
             await save_cookies(context)
@@ -3998,7 +3999,7 @@ async def ocr_image(image_source: str) -> str:
         return "\n".join(lines)
 
     except Exception as e:
-        return f"OCR failed: {e}"
+        return format_error("OCR", e)
     finally:
         if tmp_base64_path and os.path.exists(tmp_base64_path):
             os.unlink(tmp_base64_path)
@@ -4256,7 +4257,7 @@ async def transcribe_video(
         return full_transcript
 
     except Exception as e:
-        return f"Transcription failed: {e}"
+        return format_error("Video transcription", e)
 
     finally:
         try:
@@ -4713,7 +4714,7 @@ async def transcribe_local(
             _transcribe_audio, file_path, model_size, language,
         )
     except Exception as e:
-        return f"Transcription failed: {e}"
+        return format_error("Local transcription", e)
 
     segments = whisper_result["segments"]
     if not segments:
@@ -5170,7 +5171,7 @@ async def fetch_emails(
             )
         return f"IMAP error: {e}"
     except Exception as e:
-        return f"Connection failed: {e}"
+        return format_error("Email connection", e)
 
     if not emails:
         return f"No emails found matching '{search}' in {folder}."
@@ -5390,7 +5391,7 @@ async def generate_qr(
     try:
         path = await asyncio.to_thread(_generate)
     except Exception as e:
-        return f"QR generation failed: {e}"
+        return format_error("QR code generation", e)
 
     return f"QR code saved to: {path}\nData: {data[:100]}{'...' if len(data) > 100 else ''}"
 
@@ -5470,7 +5471,7 @@ async def archive_webpage(
     try:
         archive_url = await asyncio.to_thread(_archive)
     except Exception as e:
-        return f"Archive failed: {e}"
+        return format_error("Webpage archiving", e)
 
     return (
         f"Archived: {archive_url}\n"
@@ -5553,7 +5554,7 @@ async def wikipedia(
     try:
         data = await asyncio.to_thread(_fetch)
     except Exception as e:
-        return f"Wikipedia lookup failed: {e}"
+        return format_error("Wikipedia lookup", e)
 
     if not data or data.get("type") == "not_found":
         return f"No Wikipedia article found for: {query}"
@@ -5701,7 +5702,7 @@ async def upload_to_s3(
     try:
         result = await asyncio.to_thread(_upload)
     except Exception as e:
-        return f"Upload failed: {e}"
+        return format_error("S3 upload", e)
 
     if not result:
         return (
@@ -6832,3 +6833,59 @@ async def get_feed_items(
         return "\n".join(lines)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Metrics wiring — wrap every registered tool so /health can report usage
+# ---------------------------------------------------------------------------
+
+def _install_metrics_wrappers() -> None:
+    """Wrap each registered MCP tool's ``run`` to record call metrics.
+
+    This is called once after all tools are defined. It monkey-patches the
+    ``run`` method of every tool in the FastMCP tool manager so that each
+    invocation records call count, success/failure, and latency into the
+    global metrics registry (exposed via ``/health`` -> ``metrics``).
+    """
+    import time as _time
+
+    from . import metrics as _metrics
+
+    tm = getattr(mcp, "_tool_manager", None)
+    if tm is None:
+        return
+    tools = getattr(tm, "_tools", {}) or {}
+    for name, tool in tools.items():
+        original_run = getattr(tool, "run", None)
+        if original_run is None:
+            continue
+
+        async def _wrapped_run(
+            arguments,
+            context=None,
+            convert_result=False,
+            _orig=original_run,
+            _name=name,
+        ):
+            start = _time.monotonic()
+            ok = True
+            try:
+                return await _orig(arguments, context, convert_result)
+            except Exception:
+                ok = False
+                raise
+            finally:
+                latency_ms = (_time.monotonic() - start) * 1000.0
+                _metrics.record_tool_call(_name, ok=ok, latency_ms=latency_ms)
+
+        # Preserve the original signature metadata where possible.
+        try:
+            _wrapped_run.__name__ = getattr(original_run, "__name__", name)
+            _wrapped_run.__doc__ = getattr(original_run, "__doc__", None)
+        except Exception:
+            pass
+        # Tool is a Pydantic model — bypass its __setattr__ validation.
+        object.__setattr__(tool, "run", _wrapped_run)
+
+
+_install_metrics_wrappers()
