@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
@@ -118,7 +119,39 @@ def _cache_put(url: str, resolved: str) -> None:
         _resolve_cache.popitem(last=False)
 
 
-def resolve_url(url: str, timeout: int | None = None) -> str:
+def _resolve_youtube_by_title(title: str, timeout: int = 10) -> str:
+    """Resolve a YouTube video URL by searching for its title via yt-dlp.
+
+    Google's ``/goto`` token for YouTube is session/time-bound — a fresh HTTP
+    request without the original search cookies returns HTTP 400, so the
+    generic redirect-follow can't resolve it. The token is also opaque (no
+    recoverable video ID). So we search YouTube for the result's *title* and
+    return the first matching video's canonical URL.
+
+    Returns ``https://www.youtube.com/watch?v=<id>``, or ``""`` on failure.
+    """
+    if not title or not title.strip():
+        return ""
+    try:
+        # ytsearch1:<title> returns the single best match. --flat-playlist
+        # avoids downloading metadata, just the ID.
+        r = subprocess.run(
+            [
+                "yt-dlp", "--get-id", "--flat-playlist",
+                f"ytsearch1:{title.strip()}",
+            ],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode == 0:
+            vid = r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""
+            if vid and re.match(r"^[\w-]{11}$", vid):
+                return f"https://www.youtube.com/watch?v={vid}"
+    except Exception:
+        pass
+    return ""
+
+
+def resolve_url(url: str, timeout: int | None = None, title: str | None = None) -> str:
     """Resolve a Google search-result redirect URL to its final destination.
 
     - Legacy ``/url?q=...``  -> URL-decode the ``q`` param.
@@ -129,6 +162,11 @@ def resolve_url(url: str, timeout: int | None = None) -> str:
 
     ``timeout`` defaults to ``REDIRECT_RESOLVE_TIMEOUT``. Results are memoized
     in an in-process LRU cache (see ``REDIRECT_RESOLVE_CACHE_SIZE``).
+
+    ``title`` (optional) is the result's title. When the generic HTTP follow
+    fails (e.g. YouTube's session-bound ``/goto`` token returns HTTP 400), we
+    fall back to searching YouTube for the title via yt-dlp to recover a clean
+    ``https://www.youtube.com/watch?v=<id>`` URL.
     """
     if timeout is None:
         timeout = REDIRECT_RESOLVE_TIMEOUT
@@ -152,29 +190,44 @@ def resolve_url(url: str, timeout: int | None = None) -> str:
         _cache_put(url, resolved)
         return resolved
 
+    # Generic follow failed. If we have a title, try the YouTube-specific path
+    # (handles session-bound /goto tokens that return HTTP 400 for YouTube).
+    if title:
+        yt = _resolve_youtube_by_title(title, timeout=timeout)
+        if yt:
+            _cache_put(url, yt)
+            return yt
+
     logger.warning("Failed to resolve Google redirect URL: %s", url)
     return url
 
 
 async def resolve_urls(
-    urls: list[str], timeout: int | None = None, max_concurrency: int = 8
+    urls: list[str],
+    timeout: int | None = None,
+    max_concurrency: int = 8,
+    titles: list[str] | None = None,
 ) -> list[str]:
     """Resolve a list of URLs to their final destinations, concurrently.
 
     Runs the blocking ``resolve_url`` in a thread pool so the async event loop
     is never blocked, and bounds concurrency so a slow redirect can't stall the
     whole search. Returns a list aligned with the input.
+
+    ``titles`` (optional) is a list aligned with ``urls``; each title is passed
+    to ``resolve_url`` so the YouTube-specific fallback can search by title.
     """
     if not urls:
         return []
 
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _resolve_one(url: str) -> str:
+    async def _resolve_one(i: int, url: str) -> str:
         async with semaphore:
-            return await asyncio.to_thread(resolve_url, url, timeout)
+            t = titles[i] if titles and i < len(titles) else None
+            return await asyncio.to_thread(resolve_url, url, timeout, t)
 
-    return await asyncio.gather(*(_resolve_one(u) for u in urls))
+    return await asyncio.gather(*(_resolve_one(i, u) for i, u in enumerate(urls)))
 
 
 def fetch_url_bytes(url: str, timeout: int = 15) -> bytes:

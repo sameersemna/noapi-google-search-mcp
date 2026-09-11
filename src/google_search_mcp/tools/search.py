@@ -191,7 +191,12 @@ async def do_google_search(
 
         # Resolve Google redirect URLs (e.g. /url?q=..., /goto?url=...) to their
         # final destinations so citations point at the real source, not Google.
-        resolved_urls = await resolve_urls([r.get("url", "") for r in results])
+        # Pass titles so the YouTube-specific fallback can search by title when
+        # the generic HTTP follow fails (YouTube's /goto token is session-bound).
+        resolved_urls = await resolve_urls(
+            [r.get("url", "") for r in results],
+            titles=[r.get("title", "") for r in results],
+        )
         for r, final_url in zip(results, resolved_urls):
             r["url"] = final_url
 
@@ -396,7 +401,11 @@ async def do_google_news(query: str, num_results: int = 5) -> list:
                 continue
 
         # Resolve Google redirect URLs to their final destinations.
-        resolved_urls = await resolve_urls([r.get("url", "") for r in results])
+        # Pass titles so the YouTube-specific fallback can search by title.
+        resolved_urls = await resolve_urls(
+            [r.get("url", "") for r in results],
+            titles=[r.get("title", "") for r in results],
+        )
         for r, final_url in zip(results, resolved_urls):
             r["url"] = final_url
 
@@ -508,7 +517,11 @@ async def do_google_scholar(query: str, num_results: int = 5) -> str:
             return f"No scholar results found for: {query}"
 
         # Resolve Google redirect URLs to their final destinations.
-        resolved_urls = await resolve_urls([r.get("url", "") for r in results])
+        # Pass titles so the YouTube-specific fallback can search by title.
+        resolved_urls = await resolve_urls(
+            [r.get("url", "") for r in results],
+            titles=[r.get("title", "") for r in results],
+        )
         for r, final_url in zip(results, resolved_urls):
             r["url"] = final_url
 

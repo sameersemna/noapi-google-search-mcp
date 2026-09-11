@@ -246,3 +246,78 @@ def test_config_defaults_present():
     )
     assert isinstance(REDIRECT_RESOLVE_TIMEOUT, int) and REDIRECT_RESOLVE_TIMEOUT > 0
     assert isinstance(REDIRECT_RESOLVE_CACHE_SIZE, int) and REDIRECT_RESOLVE_CACHE_SIZE >= 0
+
+
+# ---------------------------------------------------------------------------
+# YouTube-specific resolution
+# ---------------------------------------------------------------------------
+
+
+def test_youtube_goto_resolved_via_title_search(monkeypatch):
+    """A YouTube goto URL that fails HTTP follow should resolve via title search."""
+    # A goto URL that will fail the generic HTTP follow (non-routable host).
+    goto = "http://www.google.com/goto?url=some-opaque-token"
+    # Monkeypatch the yt-dlp subprocess to return a known video ID.
+    import subprocess
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "o8NPllzkFhE\n"
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _FakeResult(), raising=False
+    )
+    resolved = resolve_url(goto, timeout=1, title="Linus Torvalds on Linux")
+    assert resolved == "https://www.youtube.com/watch?v=o8NPllzkFhE"
+
+
+def test_youtube_search_failure_falls_back_to_original(monkeypatch):
+    """If the YouTube title search fails, return the original goto URL."""
+    goto = "http://www.google.com/goto?url=some-opaque-token"
+    import subprocess
+
+    class _FakeResult:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _FakeResult(), raising=False
+    )
+    resolved = resolve_url(goto, timeout=1, title="Some video title")
+    assert resolved == goto
+
+
+def test_youtube_resolution_skipped_without_title():
+    """Without a title, the YouTube fallback is not attempted."""
+    goto = "http://www.google.com/goto?url=some-opaque-token"
+    # No title -> generic follow fails -> returns original, no yt-dlp call.
+    resolved = resolve_url(goto, timeout=1)
+    assert resolved == goto
+
+
+def test_non_youtube_goto_still_resolved_via_http(redirect_server):
+    """A non-YouTube goto URL should still resolve via the HTTP follow."""
+    token = "some-base64url-protobuf-token"
+    goto = f"http://127.0.0.1:{redirect_server}/goto?url={token}"
+    # The HTTP follow (Location header) succeeds first, so no yt-dlp needed.
+    resolved = _resolve_goto_redirect(goto, timeout=5)
+    assert resolved == f"http://127.0.0.1:{redirect_server}/final"
+
+
+def test_resolve_urls_passes_titles(monkeypatch):
+    """resolve_urls should pass aligned titles to resolve_url."""
+    import subprocess
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "abcDEFghijk\n"
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _FakeResult(), raising=False
+    )
+    goto = "http://www.google.com/goto?url=opaque"
+    urls = [goto, "https://plain.example.org/x"]
+    titles = ["A YouTube video title", ""]
+    resolved = asyncio.run(resolve_urls(urls, timeout=1, titles=titles))
+    assert resolved[0] == "https://www.youtube.com/watch?v=abcDEFghijk"
+    assert resolved[1] == "https://plain.example.org/x"
