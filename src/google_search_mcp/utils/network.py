@@ -52,33 +52,43 @@ def _decode_legacy_redirect(url: str) -> str:
 
 
 def _resolve_goto_redirect(url: str, timeout: int = 8) -> str:
-    """Follow a modern ``/goto?url=...`` redirect via HTTP.
+    """Resolve a modern ``/goto?url=...`` redirect to its final destination.
 
     The ``url`` param is a base64url-encoded protobuf token that cannot be
     decoded to a readable URL — it must be resolved by following the redirect.
-    Uses HEAD first (lighter), falling back to GET for servers that reject HEAD.
-    Returns the final ``response.url``, or ``""`` on failure.
+
+    IMPORTANT: we do NOT auto-follow the redirect. Google's ``/goto`` returns
+    a 302 with a ``Location`` header pointing at the real destination. Reading
+    that header directly is both faster (no second request) and far more
+    robust: if the destination refuses connections (e.g. Facebook blocks this
+    server's IP), ``urllib``'s auto-follow would raise ``Connection refused``
+    and we'd lose the URL entirely. By reading ``Location`` we get the final
+    URL regardless of whether the destination is reachable.
+
+    Returns the final destination URL, or ``""`` on failure.
     """
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        # HEAD first — lighter, and urllib follows redirects for HEAD too.
-        # But some endpoints (Google's /goto) return 200 on HEAD without
-        # redirecting, so only trust HEAD if it actually moved somewhere.
-        try:
-            req.method = "HEAD"
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                head_url = resp.geturl()
-                if head_url and head_url != url:
-                    return head_url
-        except Exception:
-            pass
-        # Fall back to GET (some servers 405/403 on HEAD, or HEAD doesn't
-        # redirect). GET reliably follows Google's /goto redirect.
         req.method = "GET"
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.geturl()
+        # Disable auto-redirect so we can read the Location header directly.
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                loc = resp.headers.get("Location")
+                if loc:
+                    return loc
+        except urllib.error.HTTPError as e:
+            # A 3xx with a Location header is exactly what we want.
+            loc = e.headers.get("Location")
+            if loc:
+                return loc
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 # In-process LRU cache of resolved redirects. Google reuses the same /goto
