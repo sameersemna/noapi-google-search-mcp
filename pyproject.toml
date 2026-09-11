@@ -44,3 +44,16 @@ packages = ["src/google_search_mcp"]
 Homepage = "https://github.com/VincentKaufmann/noapi-google-search-mcp"
 Repository = "https://github.com/VincentKaufmann/noapi-google-search-mcp"
 Issues = "https://github.com/VincentKaufmann/noapi-google-search-mcp/issues"
+
+# ── pytest configuration ──
+[tool.pytest.ini_options]
+# The package lives under src/ (src-layout). Add it to sys.path so tests can
+# `import google_search_mcp` without a manual sys.path.insert.
+pythonpath = ["src"]
+# Only collect pytest-style tests (test_*.py / *_test.py). The legacy
+# standalone scripts (test_all.py, test_health.py, etc.) are NOT pytest
+# suites — they run via `python test_x.py`. Keep them out of pytest's
+# collection to avoid import-time side effects (they launch browsers, etc.).
+testpaths = ["tests"]
+# Show a bit more detail on failures.
+addopts = "-ra"

@@ -8,6 +8,14 @@ User=sameer
 WorkingDirectory=/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp
 Environment=PYTHONUNBUFFERED=1
 Environment=SKIP_COOKIE_VALIDATION=1
+# ── Graphical display for manual-intervention (headful) browser ──
+# The machine runs an X session on :10.0 owned by sameer (xrdp). A systemd
+# service does NOT inherit DISPLAY/XAUTHORITY, so without these the headful
+# "solve the CAPTCHA in a visible window" fallback can't open and silently
+# falls back to DuckDuckGo. Point the service at the existing display so
+# manual intervention works. (Verify with: DISPLAY=:10.0 xdpyinfo)
+Environment=DISPLAY=:10.0
+Environment=XAUTHORITY=/home/sameer/.Xauthority
 # Health server: separate HTTP endpoint for monitoring/k8s probes.
 # Listens on 0.0.0.0:11499. Disable with ENABLE_HEALTH_SERVER=0.
 Environment=ENABLE_HEALTH_SERVER=1

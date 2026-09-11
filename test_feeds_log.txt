@@ -2,7 +2,7 @@
 ======================================================================
   Feed Subscription System — Detailed Test Log
 ======================================================================
-Date: 2026-07-10 15:03:45
+Date: 2026-09-11 10:40:10
 Python: 3.11.15
 Platform: linux
 
@@ -64,7 +64,7 @@ Platform: linux
 --- SQLite + FTS5 database operations ---
     Database created: /tmp/test_feeds_unit.db
     Tables found: ['subscriptions', 'sqlite_sequence', 'feed_items', 'feed_items_fts', 'feed_items_fts_data', 'feed_items_fts_idx', 'feed_items_fts_docsize', 'feed_items_fts_config']
-    Subscription inserted: id=1, name=Unit Test Feed
+    Subscription inserted: id=28, name=Unit Test Feed
     Input items: 3 items (1 without URL, should be skipped)
     New items stored: 2
     Duplicate insert count: 0 (expected 0)
@@ -72,7 +72,7 @@ Platform: linux
     FTS5 search for 'Python': 1 results
     FTS5 search for 'nonexistent': 0 results (expected 0)
     Items after subscription delete (cascade): 0 (expected 0)
-  -> PASS  (0.08s)
+  -> PASS  (0.02s)
 
 ======================================================================
   LIVE SOURCE TESTS (network)
@@ -82,72 +82,72 @@ Platform: linux
     Feature: Fetch and parse live RSS feed from a major news outlet
     Source: BBC News (http://feeds.bbci.co.uk/news/rss.xml)
     Method: _check_source_rss() -> _fetch_url_bytes() -> _parse_rss_atom()
-    Items fetched: 39
-    Sample item title: Bayeux Tapestry arrives in UK for first time in 900 years under police guard
-    Sample item URL: https://www.bbc.co.uk/news/articles/cly9r54e5r4o?at_medium=RSS&at_campaign=rss
-    Sample item published: Fri, 10 Jul 2026 05:00:04 GMT
-    Sample content preview: The famous artefact depicting events leading up to the Norman Conquest of England will go on display in September.
+    Items fetched: 34
+    Sample item title: Spies, strategies and missed opportunities: How the lessons of 9/11 are still being learnt
+    Sample item URL: https://www.bbc.co.uk/news/articles/c1l68gmqq24o?at_medium=RSS&at_campaign=rss
+    Sample item published: Fri, 11 Sep 2026 05:53:06 GMT
+    Sample content preview: Twenty-five years on, the attacks have come to define a generation of foreign, security and intelligence policy, the BBC's security correspondent writ
     At least 5 items: PASS
     All items have titles: PASS
     All items have URLs: PASS
     URLs are HTTP(S): PASS
-  -> PASS  (0.31s)
+  -> PASS  (0.21s)
 
 --- Reddit — r/technology via RSS ---
     Feature: Fetch subreddit posts via Reddit's native RSS endpoint
     Source: r/technology (https://www.reddit.com/r/technology/.rss)
     Method: _check_source_reddit('technology') -> Atom feed parsing
     Items fetched: 25
-    Sample post title: 'PS5 Has Put a Dampener on Gaming': 45% of Playstation Enthusiasts 'Seriously Considering' Leaving Sony for PC
-    Sample post URL: https://www.reddit.com/r/technology/comments/1usjbex/ps5_has_put_a_dampener_on_gaming_45_of/
-    Sample post author: /u/JeremyJJ77
+    Sample post title: Hi Reddit, I'm Katie Paul, a Reuters journalist who unveiled Mark Zuckerberg's plan to replace Meta staff with AI — and how it imploded. AMA.
+    Sample post URL: https://www.reddit.com/r/technology/comments/1w5k5h4/hi_reddit_im_katie_paul_a_reuters_journalist_who/
+    Sample post author: /u/reuters
     At least 5 items: PASS
     All items have titles: PASS
     All items have URLs: PASS
-  -> PASS  (0.81s)
+  -> PASS  (0.73s)
 
 --- Hacker News — Top Stories via Firebase API ---
     Feature: Fetch top stories from HN public API with metadata
     Source: https://hacker-news.firebaseio.com/v0/topstories.json
     Method: _check_source_hackernews('top', limit=5) -> parallel story fetches
     Items fetched: 5
-    Sample title: Good Tools Are Invisible
-    Sample URL: https://www.gingerbill.org/article/2026/07/10/good-tools-are-invisible/
-    Sample author: theanonymousone
-    Sample score: 39
-    Sample comments: 11
-    Sample published: 2026-07-10T10:32:41+00:00
+    Sample title: Shopify is moving from React Native back to Swift and Kotlin
+    Sample URL: https://shopify.engineering/back-to-native
+    Sample author: fnthawar2
+    Sample score: 1027
+    Sample comments: 707
+    Sample published: 2026-09-10T14:09:31+00:00
     Got 5 stories: PASS
     All have titles: PASS
     All have URLs: PASS
     All have authors: PASS
     Metadata has score: PASS
     Metadata has comments: PASS
-  -> PASS  (0.80s)
+  -> PASS  (0.74s)
 
 --- GitHub — Releases via Atom Feed ---
     Feature: Fetch release notes from a public GitHub repository
     Source: anthropics/anthropic-sdk-python (releases.atom)
     Method: _check_source_github('anthropics/anthropic-sdk-python')
     Items fetched: 10
-    Latest release: v0.116.0
-    Release URL: https://github.com/anthropics/anthropic-sdk-python/releases/tag/v0.116.0
-    Content preview: 0.116.0 (2026-07-02) Full Changelog: v0.115.1...v0.116.0 Features api: add agent-memory-2026-07-22 beta header ( e181d5c )
+    Latest release: v1.5.0
+    Release URL: https://github.com/anthropics/anthropic-sdk-python/releases/tag/v1.5.0
+    Content preview: 1.5.0 (2026-09-10) Full Changelog: v1.4.0...v1.5.0 Features api: add auto mode tool permissions for Managed Agents ( 62aa21b ) api: add content_too_la
     At least 1 release: PASS
     All have titles: PASS
     All have URLs: PASS
     URLs point to GitHub: PASS
-  -> PASS  (0.61s)
+  -> PASS  (0.63s)
 
 --- arXiv — cs.AI Papers via API ---
     Feature: Fetch recent papers from arXiv by category
     Source: http://export.arxiv.org/api/query?search_query=cat:cs.AI
     Method: _check_source_arxiv('cs.AI', max_results=5)
     Items fetched: 5
-    Sample paper title: OpenCoF: Learning to Reason Through Video Generation
-    Sample paper URL: https://arxiv.org/abs/2607.08763v1
-    Sample author: Xinyan Chen
-    Abstract preview: Reasoning has become a core capability for large models, especially when reliable decisions require understanding logical consequences. Recent video generation models offer a reasoning path distinct f
+    Sample paper title: GPU-CFR: 80x Faster Counterfactual Regret Minimization by Compiling the Game to Static Dataflow and CUDA Graph Replay
+    Sample paper URL: https://arxiv.org/abs/2609.11923v1
+    Sample author: Boning Li
+    Abstract preview: Counterfactual regret minimization (CFR) is one of the few large numerical workloads that still runs faster on CPUs than on GPUs. Each iteration sweeps a game tree with up to billions of states in mil
     Got papers: PASS
     All have titles: PASS
     All have URLs: PASS
@@ -161,32 +161,32 @@ Platform: linux
     Feed URL: https://www.youtube.com/feeds/videos.xml?channel_id=UCYO_jab_esuFRV4b17AJtAw
     Method: _check_source_youtube(feed_url)
     Items fetched: 15
-    Latest video title: 100 random chords, how many intersections?
-    Video URL: https://www.youtube.com/shorts/wGffBCfrAsE
+    Latest video title: The jumping pegs puzzle
+    Video URL: https://www.youtube.com/shorts/rYyJm1tD3d0
     Channel/author: 3Blue1Brown
-    Published: 2026-06-16T18:04:05+00:00
+    Published: 2026-08-18T14:54:17+00:00
     Got videos: PASS
     All have titles: PASS
     All have URLs: PASS
     URLs are YouTube: PASS
     Metadata has video_url: PASS
-  -> PASS  (0.14s)
+  -> PASS  (0.11s)
 
 --- Podcast — Lex Fridman RSS Feed ---
     Feature: Fetch podcast episodes with audio URLs and metadata
     Source: Lex Fridman Podcast (https://lexfridman.com/feed/podcast/)
     Method: _check_source_podcast(feed_url)
-    Items fetched: 499
-    Latest episode: #498 – Anthony Kaldellis: Roman Empire, Byzantine Empire, Rise & Fall of Empires
-    Episode URL: https://lexfridman.com/anthony-kaldellis/?utm_source=rss&utm_medium=rss&utm_campaign=anthony-kaldellis
+    Items fetched: 502
+    Latest episode: #501 – DHH: Future of Programming, AI, Agentic Engineering, Vibe Coding & Linux
+    Episode URL: https://lexfridman.com/dhh-2/?utm_source=rss&utm_medium=rss&utm_campaign=dhh-2
     Author: 
-    Published: Tue, 30 Jun 2026 21:33:40 +0000
-    Audio URL: https://media.blubrry.com/takeituneasy/ins.blubrry.com/takeituneasy/lex_ai_anthony_kaldellis.mp3
-    Duration: N/A
+    Published: Wed, 26 Aug 2026 21:47:04 +0000
+    Audio URL: https://media.blubrry.com/takeituneasy/ins.blubrry.com/takeituneasy/lex_ai_dhh_2.mp3
+    Duration: 5:21:57
     Got episodes: PASS
     All have titles: PASS
     Have audio URLs in metadata: PASS
-  -> PASS  (1.34s)
+  -> PASS  (1.42s)
 
 ======================================================================
   END-TO-END MCP TOOL TEST
@@ -202,8 +202,7 @@ Platform: linux
             Run check_feeds to fetch content.
     CHECK: PASS — subscription created
     Input: subscribe("hackernews", "top")
-    Output: Subscribed to Hacker News (top) (hackernews).
-            Run check_feeds to fetch content.
+    Output: Already subscribed to Hacker News (top) (hackernews).
     Input: subscribe("news", "bbc") — duplicate
     Output: Already subscribed to BBC News (news).
     CHECK: PASS — duplicate detected
@@ -216,7 +215,7 @@ Platform: linux
             
             
               HACKERNEWS
-                Hacker News (top) — 0 items, last checked: never
+                Hacker News (top) — 33 items, last checked: 2026-09-11T08:29
             
               NEWS
                 BBC News — 0 items, last checked: never
@@ -225,10 +224,10 @@ Platform: linux
     Step 3: check_feeds()
     Output: Feed Check Complete
             
-              BBC News: 38 new items
-              Hacker News (top): 29 new items
+              Hacker News (top): 2 new items
+              BBC News: 33 new items
             
-            Total: 67 new items across 2 sources
+            Total: 35 new items across 2 sources
     CHECK: PASS — feeds checked successfully
     CHECK: PASS — new items found and stored
 
@@ -241,26 +240,26 @@ Platform: linux
                        URL: https://www.bbc.co.uk/news/10628994?at_medium=RSS&at_campaign=rss
                        Top stories, breaking news, live reporting, and follow news topics that match your interests
                     
-                    2. [news/BBC News] Why 
+                    2. [news/BBC News] 'Lik
     CHECK: PASS — news items returned
     Input: get_feed_items(source_type="hackernews", limit=3)
     Output preview: Recent Feed Items (3 items)
                     
-                    1. [hackernews/Hacker News (top)] Late Bronze Age Collapse
-                       Published: 2026-07-10T11:59:55+00:00
-                       URL: https://acoup.blog/2026/01/30/collections-the-late-bronze-age-collapse-a-very-brief-introduction/
+                    1. [hackernews/Hacker News (top)] DeepSeek v4.1 Flash Uncensored
+                       Published: 2026-09-11T06:46:19+00:00
+                       URL: https://huggingface.co/dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8
                     
-                    2. [hackernews/Hacker News (top)] EU Commission: addictive design
+                    2. [hackernews/Hacker News (top)] Astra for Coding: Why Are We Doing This Again?
+                       Publi
 
     Step 5: search_feeds()
     Input: search_feeds("the") — common word, should match
     Output preview: Feed Search: "the" (20 results)
                     
-                    1. [hackernews/Hacker News (top)] The glass backbone: Why the Army's logistics will break in the next war
-                       Published: 2026-07-09T13:24:43+00:00
-                       URL: https://mwi.westpoint.edu/the-glass-backbone-why-the-armys-logistics-will-break-in-the-next-war/
-                    
-                    2. [news/BBC Ne
+                    1. [news/BBC News] Rayner defends pause to local council overhaul
+                       Published: Fri, 11 Sep 2026 04:51:05 GMT
+                       URL: https://www.bbc.co.uk/news/articles/cwyz9jlqrj4o?at_medium=RSS&at_campaign=rss
+                       The cabinet minister tells the BBC she wanted to ensure the plans c
     CHECK: PASS — search returned results
     Input: search_feeds("xyznonexistent12345") — should find nothing
     Output: No results found for: "xyznonexistent12345"
@@ -274,12 +273,12 @@ Platform: linux
                                      
                                      
                                        HACKERNEWS
-                                         Hacker News (top) — 29 items, last checked: 2026-07-10T13:03
+                                         Hacker News (top) — 35 items, last checked: 2026-09-11T08:40
     CHECK: PASS — BBC removed from subscriptions
     Input: unsubscribe("news", "nonexistent_feed")
     Output: No subscription found for 'nonexistent_feed'.
     CHECK: PASS — non-existent handled correctly
-  -> PASS  (2.37s)
+  -> PASS  (2.59s)
 
 ======================================================================
   SUMMARY
