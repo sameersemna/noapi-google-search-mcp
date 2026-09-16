@@ -110,6 +110,7 @@ from .utils.language import (
     detect_source_language,
     resolve_language_code,
 )
+from .logging_setup import configure_logging, install_tool_call_logging
 from . import health_server
 
 
@@ -304,6 +305,12 @@ async def app_lifespan(server: FastMCP):
 
 
 mcp = FastMCP("google-search", lifespan=app_lifespan)
+
+# Log which tool each CallToolRequest actually invokes. The SDK only logs the
+# request *type* ("Processing request of type CallToolRequest"), which makes
+# the service log hard to follow. See logging_setup for details.
+configure_logging()
+install_tool_call_logging(mcp)
 
 
 # ---------------------------------------------------------------------------

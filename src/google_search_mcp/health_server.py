@@ -43,7 +43,9 @@ monitoring agent) can see the full picture of the service in one call:
           "opencv":      {"ok": true, "version": "4.10.0.84"},
           "onnxruntime": {"ok": true, "version": "1.19.2"},
           "faster_whisper": {"ok": true, "version": "1.0.3"},
-          "yt_dlp":      {"ok": true, "version": "2024.05.27"},
+          "yt_dlp":      {"ok": true, "version": "2026.6.9"},
+          "yt_dlp_ejs":  {"ok": true, "version": "0.8.0"},
+          "js_runtime":  {"ok": true, "runtime": "node"},
           "rapidocr":    {"ok": true},
           "lingua":      {"ok": true, "version": "2.0.13"},
           "psutil":      {"ok": true, "version": "5.9.8"},
@@ -447,6 +449,49 @@ def _humanize_bytes(n: int | float) -> str:
     return f"{n:.1f} PB"
 
 
+def _check_ytdlp_ejs() -> dict[str, Any]:
+    """Report whether the yt-dlp EJS challenge-solver scripts are installed.
+
+    yt-dlp needs these to solve YouTube's JavaScript signature challenges.
+    Without them every YouTube media request fails with HTTP 403, so this is
+    worth surfacing in /health rather than discovering it from a failed
+    download.
+    """
+    try:
+        import importlib.metadata as md
+
+        version = md.version("yt-dlp-ejs")
+        return {"ok": True, "version": version, "error": None}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "version": None,
+            "error": f"not installed ({type(exc).__name__})",
+            "hint": 'pip install "yt-dlp[default]"',
+        }
+
+
+def _check_js_runtime() -> dict[str, Any]:
+    """Report which JavaScript runtime yt-dlp will use for YouTube.
+
+    Node must be >= 22 and deno >= 2.3 for yt-dlp's EJS support. An older
+    runtime is reported as unusable rather than silently accepted.
+    """
+    try:
+        from .utils import ytdlp
+
+        runtime = ytdlp.detect_js_runtime()
+        return {
+            "ok": runtime is not None,
+            "runtime": runtime,
+            "error": None
+            if runtime
+            else "no supported runtime found (need node >= 22 or deno >= 2.3)",
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ok": False, "runtime": None, "error": str(exc)}
+
+
 def _check_dependencies() -> dict[str, Any]:
     """Return status of all third-party deps the server relies on."""
     deps: dict[str, Any] = {}
@@ -460,6 +505,8 @@ def _check_dependencies() -> dict[str, Any]:
     deps["faster_whisper"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     ok, ver = _safe_import("yt_dlp")
     deps["yt_dlp"] = {"ok": ok, "version": ver, "error": None if ok else ver}
+    deps["yt_dlp_ejs"] = _check_ytdlp_ejs()
+    deps["js_runtime"] = _check_js_runtime()
     ok, ver = _safe_import("rapidocr")
     deps["rapidocr"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     ok, ver = _safe_import("lingua")

@@ -35,6 +35,12 @@ BROWSER_DATA_DIR: str = os.path.join(CONFIG_DIR, "google-mcp-browser")
 COOKIE_JSON_PATH: str = os.path.join(HOME, ".google_mcp_cookies.json")
 COOKIE_DIR: str = os.path.join(os.path.curdir, "cookies")
 
+# Netscape-format cookie jars handed to yt-dlp. YouTube serves signed media
+# URLs that are only valid for the session that requested them, so without a
+# cookie jar downloads intermittently fail with "HTTP Error 403: Forbidden".
+YOUTUBE_COOKIE_PATH: str = os.path.join(COOKIE_DIR, "youtube_cookies.txt")
+GOOGLE_COOKIE_PATH: str = os.path.join(COOKIE_DIR, "google_cookies.txt")
+
 # CAPTCHA solver model
 CAPTCHA_MODEL_DIR: str = os.path.join(HOME, ".google_mcp_models")
 MOBILENET_ONNX_PATH: str = os.path.join(CAPTCHA_MODEL_DIR, "mobilenetv2-12.onnx")
@@ -45,6 +51,57 @@ TRANSCRIBE_CACHE_DIR: str = os.path.join(CACHE_DIR)
 TRANSCRIPT_CACHE_DIR: str = os.path.join(CACHE_DIR, "transcripts")
 VIDEO_CACHE_DIR: str = os.path.join(CACHE_DIR, "videos")
 CLIPS_DIR: str = os.path.join(HOME, "clips")
+
+# ---------------------------------------------------------------------------
+# yt-dlp behaviour
+# ---------------------------------------------------------------------------
+
+# Network retries per download (yt-dlp retries both the manifest and each
+# media fragment). Higher values help on flaky connections.
+YTDLP_RETRIES: int = int(os.environ.get("YTDLP_RETRIES", "3"))
+
+# Per-socket timeout in seconds.
+YTDLP_SOCKET_TIMEOUT: int = int(os.environ.get("YTDLP_SOCKET_TIMEOUT", "30"))
+
+# Optional proxy for yt-dlp, e.g. "socks5://127.0.0.1:1080".
+YTDLP_PROXY: str = os.environ.get("YTDLP_PROXY", "").strip()
+
+# Download only the requested time range when extracting a clip, instead of
+# fetching the whole video and cutting it locally. Much faster for long
+# videos, but relies on yt-dlp's `download_ranges` support — set to 0 to
+# always download the full video.
+YTDLP_SECTION_DOWNLOAD: bool = os.environ.get(
+    "YTDLP_SECTION_DOWNLOAD", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Prefer platform-provided subtitles/captions over running Whisper. Captions
+# are far cheaper (no audio download, no model inference) and are exact for
+# human-authored tracks. Whisper is still used when no captions exist.
+YTDLP_PREFER_SUBTITLES: bool = os.environ.get(
+    "YTDLP_PREFER_SUBTITLES", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Also accept machine-generated (auto) captions when no human-authored track
+# exists for the requested language.
+YTDLP_ALLOW_AUTO_SUBTITLES: bool = os.environ.get(
+    "YTDLP_ALLOW_AUTO_SUBTITLES", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# YouTube player clients to try, in order. YouTube requires a JavaScript
+# runtime to solve its signature ("nsig") challenges; without one every media
+# request returns HTTP 403. The client also matters:
+#   * the default selection resolves to "android vr", which 403s here
+#   * "mweb" works for video but exposes no audio-only streams, so it cannot
+#     be used for transcription
+#   * "web_embedded" works for video, audio-only, and ranged downloads, so it
+#     is the primary choice; "mweb" is kept as a fallback.
+YTDLP_YOUTUBE_CLIENTS: tuple[str, ...] = tuple(
+    c.strip()
+    for c in os.environ.get(
+        "YTDLP_YOUTUBE_CLIENTS", "web_embedded,mweb"
+    ).split(",")
+    if c.strip()
+)
 
 # Feeds database
 FEEDS_DB_PATH: str = os.path.join(CACHE_DIR, "feeds.db")

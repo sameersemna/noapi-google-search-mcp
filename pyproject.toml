@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "noapi-google-search-mcp"
-version = "0.3.4"
+version = "0.3.5"
 description = "41 tools for Local LLMs — Google Search, live feeds, email, documents, QR codes, Wikipedia, S3 upload, vision, OCR, video transcription. No API key required."
 readme = "README.md"
 license = "MIT"
@@ -30,7 +30,10 @@ dependencies = [
     "lingua-language-detector>=2.0.2",
     "opencv-python-headless>=4.8.0",
     "rapidocr-onnxruntime>=1.4.0",
-    "yt-dlp>=2024.0",
+    # The [default] extra pulls in yt-dlp-ejs, which yt-dlp needs to solve
+    # YouTube's JavaScript signature challenges. Without it every YouTube
+    # download fails with "HTTP Error 403: Forbidden".
+    "yt-dlp[default]>=2024.0",
     "faster-whisper>=1.0.0",
 ]
 

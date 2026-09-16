@@ -15,6 +15,7 @@ from ..config import (
     REDIRECT_RESOLVE_TIMEOUT,
     USER_AGENT,
 )
+from . import ytdlp
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +136,19 @@ def _resolve_youtube_by_title(title: str, timeout: int = 10) -> str:
     try:
         # ytsearch1:<title> returns the single best match. --flat-playlist
         # avoids downloading metadata, just the ID.
+        cmd = [
+            "yt-dlp", "--get-id", "--flat-playlist",
+            f"ytsearch1:{title.strip()}",
+        ]
+        # Pass the YouTube cookie jar when present — YouTube increasingly
+        # requires a session for search, and the jar also avoids the
+        # "confirm you're not a bot" interstitial.
+        cookiefile = ytdlp.resolve_cookiefile("https://www.youtube.com")
+        if cookiefile:
+            cmd[1:1] = ["--cookies", cookiefile]
+
         r = subprocess.run(
-            [
-                "yt-dlp", "--get-id", "--flat-playlist",
-                f"ytsearch1:{title.strip()}",
-            ],
+            cmd,
             capture_output=True, text=True, timeout=timeout,
         )
         if r.returncode == 0:

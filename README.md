@@ -7,11 +7,106 @@ If you want to support noapi-google-mcp or gpt-oss-20B/120B-Vision and other ope
 > <img src="images/btc-donate-qr.jpeg" alt="BTC" width="80" align="left" style="margin-right:12px"> If you find this useful, consider supporting continued development and new features.<br>**BTC:** `16DT4AHemLyn7C6P116YepjY518gu9wUUH`<br clear="all">
 > <img src="images/eth-donate-qr.png" alt="ETH" width="80" align="left" style="margin-right:12px"> **ETH:** `0x7287D1F9c77832cFF246937af0443622bFdACD04`<br clear="all">
 
-**41 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
+**42 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
 
 An MCP server that turns your local LLM into a fully connected assistant. Real Google results, live news and social feeds, reverse image search, offline OCR, YouTube transcription and clip extraction — all running locally through headless Chromium and open-source ML models. No API keys, no usage limits, no cloud dependency.
 
 Works with **LM Studio**, **Claude Desktop**, **OpenClaw**, **Ollama**, and any MCP-compatible client.
+
+---
+
+## What's New in v0.3.5 — Captions Instead of Whisper, and Readable Logs
+
+Two quality-of-life changes that make the server faster and easier to operate.
+
+### 1. Platform captions are used before Whisper
+
+`transcribe_video` now checks whether the platform publishes captions and
+uses those when available. YouTube publishes human-authored captions for
+most videos, and fetching them is dramatically cheaper than downloading
+audio and running Whisper:
+
+| | Captions | Whisper (tiny) |
+|---|---|---|
+| 18-minute video | **~8 s** | minutes |
+| Download size | ~200 KB | ~18 MB audio |
+| Accuracy | exact (human-authored) | approximate |
+| Languages | all published tracks | one per run |
+
+Whisper is still used automatically when a video has no captions, and
+`prefer_subtitles=False` forces the Whisper path.
+
+**New tool — `list_subtitles`:** see which caption languages a video has
+before transcribing, so you can pick a specific track.
+
+```
+"What subtitle languages does this video have?"
+"Does this video have Arabic captions?"
+"Transcribe this video in German: https://youtube.com/watch?v=..."
+```
+
+### 2. Tool calls are named in the log
+
+The MCP SDK logs only the request *type*, which made the service log hard
+to follow:
+
+```
+INFO  Processing request of type  server.py:727
+      CallToolRequest
+```
+
+Every tool call now logs the tool name and a redacted argument summary:
+
+```
+INFO  CallToolRequest: google_search(query='python', num_results=5)
+INFO  CallToolRequest: transcribe_video(url='https://youtube.com/...')
+```
+
+Credential-bearing arguments (`password`, `api_key`, `token`, …) are
+redacted, and long values (base64 images) are truncated so the log stays
+readable. Set `LOG_LEVEL=DEBUG` to also log per-call latency.
+
+### 3. YouTube downloads actually work now
+
+YouTube requires a JavaScript runtime to solve its signature challenges.
+Without one, yt-dlp logs `nsig extraction failed` and **every** download
+fails with `HTTP Error 403: Forbidden` — which is exactly what the service
+log was showing. Fixed by:
+
+- passing the YouTube cookie jar to yt-dlp (it was never being used)
+- enabling a JavaScript runtime (`node` ≥ 22 or `deno` ≥ 2.3)
+- pinning a working player client (`web_embedded`; the default resolves to
+  `android vr`, which 403s)
+- installing `yt-dlp-ejs`, the challenge-solver scripts
+
+`/health` now reports `dependencies.yt_dlp_ejs` and
+`dependencies.js_runtime` so a broken setup is visible before a download
+fails.
+
+### 4. Clip extraction downloads only the clip
+
+`extract_video_clip` now fetches just the requested time range instead of
+the whole video. For a 2-hour video that turns a multi-hundred-MB download
+into a few MB:
+
+| | Before | After |
+|---|---|---|
+| 15-second clip from an 18-min video | 35 MB | **357 KB** |
+
+Set `YTDLP_SECTION_DOWNLOAD=0` to always download the full video.
+
+**New config (env vars):**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `LOG_LEVEL` | `INFO` | `DEBUG` also logs per-call latency |
+| `YTDLP_PREFER_SUBTITLES` | `1` | Use platform captions before Whisper |
+| `YTDLP_ALLOW_AUTO_SUBTITLES` | `1` | Accept machine-generated captions |
+| `YTDLP_SECTION_DOWNLOAD` | `1` | Download only the clip's time range |
+| `YTDLP_YOUTUBE_CLIENTS` | `web_embedded,mweb` | Player clients to try, in order |
+| `YTDLP_RETRIES` | `3` | Network retries per download |
+| `YTDLP_SOCKET_TIMEOUT` | `30` | Per-socket timeout (seconds) |
+| `YTDLP_PROXY` | _(empty)_ | Optional proxy, e.g. `socks5://127.0.0.1:1080` |
 
 ---
 
@@ -169,7 +264,7 @@ streamable HTTP, or stdio).
 - **Process metrics** (PID, PPID, RSS memory, VMS, CPU%, thread count, nice)
 - **MCP introspection** (tool count, prompt count, resource count, **full list of tool names**)
 - **Config snapshot** (env-driven settings: `ENABLE_MANUAL_INTERVENTION`, `SKIP_COOKIE_VALIDATION`, etc.)
-- **Dependency status** for every Python package: `playwright` (with chromium install path!), `opencv`, `onnxruntime`, `faster_whisper`, `yt_dlp`, `rapidocr`, `lingua`, `psutil`, `starlette`, `uvicorn`
+- **Dependency status** for every Python package: `playwright` (with chromium install path!), `opencv`, `onnxruntime`, `faster_whisper`, `yt_dlp`, `yt_dlp_ejs`, `js_runtime`, `rapidocr`, `lingua`, `psutil`, `starlette`, `uvicorn`
 - **File presence & sizes** for `google_cookies.txt`, `youtube_cookies.txt`, auto-saved cookies, MobileNetV2 model, feeds DB, browser data dir
 - **Disk usage** for the cache directory (free / total / used %)
 - **Manual intervention state** (enabled, display available, currently active, last result)
@@ -206,7 +301,7 @@ $ curl http://localhost:11499/health
   "python": { ... },
   "platform": { ... },
   "process": { "pid": 4126492, "memory_rss_mb": 153.4, "threads": 7, ... },
-  "mcp": { "name": "google-search", "tools": 41, "tool_names": [...] },
+  "mcp": { "name": "google-search", "tools": 42, "tool_names": [...] },
   "config": { "ENABLE_MANUAL_INTERVENTION": true, ... },
   "dependencies": { "playwright": { "ok": true, "chromium_installed": true, ... }, ... },
   "files": { "google_cookies": { "exists": true, "size_bytes": 4096 }, ... },
@@ -389,7 +484,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 
 ---
 
-## All 41 Tools by Category
+## All 42 Tools by Category
 
 ### Bot-Detection & Diagnostics
 | Tool | Description |
@@ -446,7 +541,8 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 ### Video & Audio Intelligence — AI-Powered Video Editing
 | Tool | Description |
 |------|-------------|
-| `transcribe_video` | Download and transcribe any video with timestamps (faster-whisper) |
+| `transcribe_video` | Transcribe any video with timestamps — uses platform captions when available, Whisper otherwise |
+| `list_subtitles` | List the caption languages available for a video |
 | `transcribe_local` | Transcribe local audio/video files (mp3, wav, m4a, mp4, mkv, etc.) |
 | `search_transcript` | Search a transcribed video for topics by keyword |
 | `extract_video_clip` | AI-powered clip extraction — tell the LLM what you want and it cuts the video using transcript context |
@@ -517,7 +613,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Setup time | **`pip install` + go** | Create Cloud project, enable API, configure | Multiple API keys |
 | Results quality | **Real Google results** | Custom Search Engine | Brave index |
 | JavaScript pages | **Renders them (Chromium)** | Cannot render JS | Cannot render JS |
-| Tools count | **41** | 1-3 | 2 (web_search, web_fetch) |
+| Tools count | **42** | 1-3 | 2 (web_search, web_fetch) |
 | Google Search | Built-in (with filters) | Basic only | Not available |
 | Google Shopping | Built-in | Not available | Not available |
 | Google Flights | Built-in | Not available | Not available |
@@ -535,7 +631,10 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Object detection | Built-in (OpenCV + Lens) | Not available | Not available |
 | Local OCR | Built-in (offline) | Not available | Not available |
 | Video transcription | Built-in (local Whisper) | Not available | Not available |
+| Platform captions (no Whisper needed) | **Built-in (fast, exact)** | Not available | Not available |
+| Caption language discovery | **Built-in (`list_subtitles`)** | Not available | Not available |
 | Video clip extraction | **Built-in (AI/LLM-powered)** | Not available | Not available |
+| Range-only clip download | **Built-in (357 KB vs 35 MB)** | Not available | Not available |
 | YouTube RAG pipeline | **Built-in (subscribe → transcribe → search)** | Not available | Not available |
 | Google Trends | Built-in | Separate API needed | Not available |
 | Feed subscriptions | **Built-in (8 source types)** | Not available | Not available |
@@ -943,13 +1042,24 @@ Extract text from images using RapidOCR. No internet needed.
 
 #### `transcribe_video` — Video Transcription
 
-Download and transcribe any YouTube video (or video URL) with timestamps using faster-whisper.
+Transcribe any video with timestamps. Uses platform captions when available
+(much faster and exact for human-authored tracks), falling back to
+faster-whisper when a video has no captions.
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
 | `url` | YouTube or video URL (required) | `"https://youtube.com/watch?v=..."` |
 | `model_size` | Whisper model size (default: tiny) | `"tiny"`, `"base"`, `"small"`, `"medium"`, `"large"` |
-| `language` | Language code (optional, auto-detected) | `"en"` |
+| `language` | Language code (optional, auto-detected) | `"en"`, `"ar"`, `"de"` |
+| `prefer_subtitles` | Use platform captions when available (default: true) | `false` to force Whisper |
+
+#### `list_subtitles` — Available Caption Languages
+
+Check which caption languages a video publishes before transcribing.
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `url` | YouTube or video URL (required) | `"https://youtube.com/watch?v=..."` |
 
 #### `search_transcript` — Transcript Search
 
@@ -1088,6 +1198,9 @@ Ask "extract the part about X" and the LLM finds timestamps from the transcript 
 |--------------|-------------|
 | *"Transcribe this video: https://youtube.com/watch?v=..."* | `transcribe_video` |
 | *"What do they discuss in this video?"* | `transcribe_video` |
+| *"What subtitle languages does this video have?"* | `list_subtitles` |
+| *"Does this video have Arabic captions?"* | `list_subtitles` |
+| *"Transcribe this video in German"* | `transcribe_video` (with `language="de"`) |
 | *"Find where they talk about memory bandwidth"* | `search_transcript` |
 | *"Extract the part where they discuss pricing"* | `extract_video_clip` |
 | *"Cut a clip of the hardware comparison section"* | `extract_video_clip` |
@@ -1183,7 +1296,7 @@ mcp_servers:
       PYTHONUNBUFFERED: "1"
 ```
 
-This gives your OpenClaw agent access to all 41 tools — real Google search, live feeds, vision, OCR, video intelligence, the headful bot-detection fallback, and the built-in health endpoint — with zero API keys.
+This gives your OpenClaw agent access to all 42 tools — real Google search, live feeds, vision, OCR, video intelligence, the headful bot-detection fallback, and the built-in health endpoint — with zero API keys.
 
 ### As a CLI
 

@@ -7,6 +7,7 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -20,6 +21,8 @@ from ..config import (
     TRANSCRIBE_CACHE_DIR,
     TRANSCRIPT_CACHE_DIR,
     VIDEO_CACHE_DIR,
+    YTDLP_ALLOW_AUTO_SUBTITLES,
+    YTDLP_PREFER_SUBTITLES,
 )
 from ..server import (
     mcp,
@@ -33,7 +36,10 @@ from ..server import (
     save_cookies,
     try_solve_captcha,
 )
+from ..utils import ytdlp
 from ..utils.text import format_timestamp
+
+log = logging.getLogger("google_search_mcp.video")
 
 
 # transcribe_video (YouTube/video transcription with timestamps)
@@ -47,48 +53,116 @@ def _transcript_cache_path(url: str, model_size: str) -> str:
 
 
 def _download_audio(url: str, cache_dir: str) -> dict:
-    """Download audio from URL (runs in thread). Returns info dict."""
-    import yt_dlp
+    """Download audio from URL (runs in thread). Returns info dict.
 
-    audio_path = os.path.join(cache_dir, "audio_temp")
-    # Clean up leftover files
-    for f in os.listdir(cache_dir):
-        if f.startswith("audio_temp"):
-            try:
-                os.remove(os.path.join(cache_dir, f))
-            except OSError:
-                pass
+    Delegates to :mod:`google_search_mcp.utils.ytdlp` so cookies, retries and
+    timeouts are configured consistently across the project.
+    """
+    return ytdlp.download_audio(url, cache_dir)
 
-    ydl_opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio",
-        "outtmpl": audio_path + ".%(ext)s",
-        "quiet": True,
-        "no_warnings": True,
-    }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+def _format_and_cache_transcript(
+    *,
+    url: str,
+    cache_path: str,
+    title: str,
+    uploader: str,
+    duration: float,
+    language: str,
+    language_note: str,
+    segments: list[dict],
+) -> str:
+    """Format a transcript, cache it to disk, and return the LLM-facing text.
 
-    title = info.get("title", "Unknown")
-    duration = info.get("duration", 0)
-    uploader = info.get("uploader", "Unknown")
-    ext = info.get("ext", "m4a")
-    actual_path = audio_path + "." + ext
+    Shared by the caption path and the Whisper path so both produce an
+    identical transcript shape — ``search_transcript`` reads the cached
+    ``segments`` regardless of which source produced them.
 
-    if not os.path.isfile(actual_path):
-        for f in os.listdir(cache_dir):
-            if f.startswith("audio_temp"):
-                actual_path = os.path.join(cache_dir, f)
-                break
-        else:
-            raise FileNotFoundError("Failed to download audio.")
+    Long videos (>10 min, >50 segments) return a condensed preview instead of
+    the full text to avoid flooding the model's context; the complete
+    transcript is always written to the cache.
 
-    return {
-        "title": title,
-        "duration": duration,
-        "uploader": uploader,
-        "audio_path": actual_path,
-    }
+    Args:
+        url: Source video URL (stored in the cache for reference).
+        cache_path: Where to write the JSON cache entry.
+        title: Video title.
+        uploader: Channel/uploader name.
+        duration: Duration in seconds.
+        language: Detected or requested language code.
+        language_note: Extra detail appended to the language line, e.g.
+            ``"confidence: 98%"`` or ``"manual captions"``.
+        segments: ``[{start, end, text}, ...]``.
+
+    Returns:
+        The formatted transcript (full or condensed).
+    """
+    header = [
+        "Video Transcript",
+        f"Title: {title}",
+        f"Channel: {uploader}",
+        f"Duration: {format_timestamp(duration)}",
+        f"Language: {language} ({language_note})",
+        f"URL: {url}",
+        "",
+    ]
+
+    full_lines = header + ["--- Transcript ---"]
+    for seg in segments:
+        start = format_timestamp(seg["start"])
+        end = format_timestamp(seg["end"])
+        full_lines.append(f"[{start} - {end}] {seg['text']}")
+    full_lines.append("")
+    full_lines.append("--- End of Transcript ---")
+    full_lines.append(f"Total segments: {len(segments)}")
+    full_transcript = "\n".join(full_lines)
+
+    # Cache to disk (formatted text + raw segments for search_transcript).
+    try:
+        with open(cache_path, "w") as f:
+            json.dump(
+                {
+                    "url": url,
+                    "title": title,
+                    "transcript": full_transcript,
+                    "segments": segments,
+                },
+                f,
+            )
+    except Exception:
+        pass
+
+    if duration > 600 and len(segments) > 50:
+        preview_count = 15
+        preview_lines = [
+            f"Video Transcript (condensed - {len(segments)} segments total)",
+        ] + header[1:] + [
+            f"--- First {preview_count} segments ---",
+        ]
+        for seg in segments[:preview_count]:
+            preview_lines.append(
+                f"[{format_timestamp(seg['start'])} - "
+                f"{format_timestamp(seg['end'])}] {seg['text']}"
+            )
+        preview_lines.append("")
+        preview_lines.append(
+            f"... ({len(segments) - preview_count * 2} more segments) ..."
+        )
+        preview_lines.append("")
+        preview_lines.append(f"--- Last {preview_count} segments ---")
+        for seg in segments[-preview_count:]:
+            preview_lines.append(
+                f"[{format_timestamp(seg['start'])} - "
+                f"{format_timestamp(seg['end'])}] {seg['text']}"
+            )
+        preview_lines.append("")
+        preview_lines.append(
+            "IMPORTANT: This is a long video. To find specific topics, "
+            "call search_transcript with url and a keyword query. "
+            "To extract a clip, call extract_video_clip with the timestamps."
+        )
+        return "\n".join(preview_lines)
+
+    return full_transcript
 
 
 def _transcribe_audio(audio_path: str, model_size: str, language: str) -> dict:
@@ -123,6 +197,7 @@ async def transcribe_video(
     url: str,
     model_size: str = "tiny",
     language: str = "",
+    prefer_subtitles: bool = True,
     ctx: Context = None,
 ) -> str:
     """Download and transcribe a YouTube video (or any video URL) with timestamps.
@@ -130,6 +205,11 @@ async def transcribe_video(
     Downloads the audio, transcribes it locally using Whisper, and returns a
     full timestamped transcript. The LLM can then answer questions about the
     video content and point to specific timestamps.
+
+    When the platform publishes captions (YouTube does for most videos), those
+    are used instead of running Whisper — they are exact for human-authored
+    tracks and take seconds instead of minutes. Whisper is used automatically
+    when no captions exist. Set ``prefer_subtitles=False`` to force Whisper.
 
     Results are cached to disk so repeat requests for the same video are instant.
 
@@ -152,6 +232,7 @@ async def transcribe_video(
         url: YouTube URL or any video URL supported by yt-dlp.
         model_size: Whisper model size (tiny/base/small/medium/large). Default: tiny.
         language: Language code (e.g. "en", "de", "fr"). Auto-detected if empty.
+        prefer_subtitles: Use platform captions when available (default: True).
     """
     # Validate model size
     valid_sizes = ("tiny", "base", "small", "medium", "large")
@@ -168,10 +249,47 @@ async def transcribe_video(
         except Exception:
             pass
 
-    try:
-        import yt_dlp  # noqa: F401
-    except ImportError:
+    if not ytdlp.is_available():
         return "yt-dlp is required. Install with: pip install yt-dlp"
+
+    # ── Fast path: platform-provided captions ──────────────────────────
+    # Captions avoid downloading audio and running Whisper entirely. This is
+    # the single biggest speed-up for the common case (YouTube videos with
+    # captions), and human-authored tracks are more accurate than Whisper.
+    if prefer_subtitles and YTDLP_PREFER_SUBTITLES:
+        if ctx:
+            await ctx.report_progress(
+                progress=10, total=100, message="Checking for captions..."
+            )
+        try:
+            subs = await asyncio.to_thread(
+                ytdlp.download_subtitles,
+                url,
+                [language] if language else None,
+                include_automatic=YTDLP_ALLOW_AUTO_SUBTITLES,
+            )
+        except Exception as e:
+            log.debug("Subtitle fetch failed for %s: %s", url, e)
+            subs = {"tracks": {}}
+
+        tracks = subs.get("tracks") or {}
+        if tracks:
+            lang, track = next(iter(tracks.items()))
+            segments = track["segments"]
+            if ctx:
+                await ctx.report_progress(
+                    progress=100, total=100, message="Done (from captions)!"
+                )
+            return _format_and_cache_transcript(
+                url=url,
+                cache_path=cache_path,
+                title=subs.get("title", "Unknown"),
+                uploader=subs.get("uploader", "Unknown"),
+                duration=subs.get("duration", 0),
+                language=lang,
+                language_note=f"{track['source']} captions",
+                segments=segments,
+            )
 
     try:
         from faster_whisper import WhisperModel  # noqa: F401
@@ -213,78 +331,18 @@ async def transcribe_video(
         if ctx:
             await ctx.report_progress(progress=100, total=100, message="Done!")
 
-        # Format full transcript (always stored in cache)
-        full_lines = [
-            f"Video Transcript",
-            f"Title: {title}",
-            f"Channel: {uploader}",
-            f"Duration: {format_timestamp(duration)}",
-            f"Language: {whisper_result['language']} (confidence: {whisper_result['language_probability']:.0%})",
-            f"URL: {url}",
-            f"",
-            f"--- Transcript ---",
-        ]
-
-        for seg in segments:
-            start = format_timestamp(seg["start"])
-            end = format_timestamp(seg["end"])
-            full_lines.append(f"[{start} - {end}] {seg['text']}")
-
-        full_lines.append("")
-        full_lines.append("--- End of Transcript ---")
-        full_lines.append(f"Total segments: {len(segments)}")
-
-        full_transcript = "\n".join(full_lines)
-
-        # Cache to disk (save both formatted text and raw segments for search)
-        try:
-            with open(cache_path, "w") as f:
-                json.dump({
-                    "url": url,
-                    "title": title,
-                    "transcript": full_transcript,
-                    "segments": segments,
-                }, f)
-        except Exception:
-            pass
-
-        # For long videos (>10 min), return condensed version to avoid
-        # overwhelming the model. Full transcript is always in the cache.
-        if duration > 600 and len(segments) > 50:
-            preview_count = 15
-            preview_lines = [
-                f"Video Transcript (condensed - {len(segments)} segments total)",
-                f"Title: {title}",
-                f"Channel: {uploader}",
-                f"Duration: {format_timestamp(duration)}",
-                f"Language: {whisper_result['language']} (confidence: {whisper_result['language_probability']:.0%})",
-                f"URL: {url}",
-                f"",
-                f"--- First {preview_count} segments ---",
-            ]
-            for seg in segments[:preview_count]:
-                preview_lines.append(
-                    f"[{format_timestamp(seg['start'])} - "
-                    f"{format_timestamp(seg['end'])}] {seg['text']}"
-                )
-            preview_lines.append(f"")
-            preview_lines.append(f"... ({len(segments) - preview_count * 2} more segments) ...")
-            preview_lines.append(f"")
-            preview_lines.append(f"--- Last {preview_count} segments ---")
-            for seg in segments[-preview_count:]:
-                preview_lines.append(
-                    f"[{format_timestamp(seg['start'])} - "
-                    f"{format_timestamp(seg['end'])}] {seg['text']}"
-                )
-            preview_lines.append("")
-            preview_lines.append(
-                "IMPORTANT: This is a long video. To find specific topics, "
-                "call search_transcript with url and a keyword query. "
-                "To extract a clip, call extract_video_clip with the timestamps."
-            )
-            return "\n".join(preview_lines)
-
-        return full_transcript
+        return _format_and_cache_transcript(
+            url=url,
+            cache_path=cache_path,
+            title=title,
+            uploader=uploader,
+            duration=duration,
+            language=whisper_result["language"],
+            language_note=(
+                f"confidence: {whisper_result['language_probability']:.0%}"
+            ),
+            segments=segments,
+        )
 
     except Exception as e:
         return format_error("Video transcription", e)
@@ -403,44 +461,110 @@ async def search_transcript(
 
 
 # ---------------------------------------------------------------------------
+# list_subtitles (discover available caption languages for a video)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def list_subtitles(url: str) -> str:
+    """List the subtitle/caption languages available for a video.
+
+    Use this before transcribe_video when you need a specific language, or to
+    check whether captions exist at all. Captions are much faster than Whisper
+    transcription and are exact for human-authored tracks.
+
+    Sample prompts that trigger this tool:
+        - "What subtitle languages does this video have?"
+        - "Does this video have Arabic captions?"
+        - "List the captions available for https://youtube.com/watch?v=..."
+
+    Args:
+        url: YouTube URL or any video URL supported by yt-dlp.
+    """
+    if not ytdlp.is_available():
+        return "yt-dlp is required. Install with: pip install yt-dlp"
+
+    try:
+        info = await asyncio.to_thread(ytdlp.list_subtitles, url)
+    except Exception as e:
+        return format_error("Subtitle lookup", e)
+
+    manual = info.get("manual") or {}
+    automatic = info.get("automatic") or {}
+
+    if not manual and not automatic:
+        return (
+            f"No subtitles available for: {info.get('title', url)}\n"
+            f"Use transcribe_video to transcribe the audio with Whisper instead."
+        )
+
+    lines = [
+        f"Subtitles for: {info.get('title', 'Unknown')}",
+        f"Duration: {format_timestamp(info.get('duration', 0))}",
+        "",
+    ]
+
+    if manual:
+        lines.append(f"Human-authored captions ({len(manual)}):")
+        for lang, fmt in sorted(manual.items()):
+            lines.append(f"  {lang}  ({fmt})")
+        lines.append("")
+
+    if automatic:
+        lines.append(f"Auto-generated captions ({len(automatic)}):")
+        for lang, fmt in sorted(automatic.items()):
+            lines.append(f"  {lang}  ({fmt})")
+        lines.append("")
+
+    lines.append(
+        "Call transcribe_video with language=\"<code>\" to use a specific "
+        "track, or omit it to use the video's original language."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # extract_video_clip (cut a segment from a video by topic)
 # ---------------------------------------------------------------------------
 
 
-def _video_cache_path(url: str) -> str:
-    """Get cached video path for a URL."""
-    key = hashlib.md5(url.encode()).hexdigest()
+def _video_cache_path(
+    url: str, section: tuple[float, float] | None = None
+) -> str:
+    """Get cached video path for a URL (and optional time section).
+
+    The section is part of the cache key: a file downloaded for one range
+    contains only that range and its timeline starts at 0, so reusing it for
+    a different range would cut the wrong footage.
+    """
+    key_material = url if not section else f"{url}|{section[0]:.1f}-{section[1]:.1f}"
+    key = hashlib.md5(key_material.encode()).hexdigest()
     return os.path.join(VIDEO_CACHE_DIR, f"{key}.mp4")
 
 
-def _download_video(url: str) -> dict:
-    """Download video from URL (runs in thread). Returns info dict. Caches to disk."""
-    import yt_dlp
+def _download_video(
+    url: str,
+    section: tuple[float, float] | None = None,
+) -> dict:
+    """Download video from URL (runs in thread). Returns info dict. Caches to disk.
 
-    os.makedirs(VIDEO_CACHE_DIR, exist_ok=True)
-    cached = _video_cache_path(url)
+    When *section* is given, only that time range is downloaded (yt-dlp
+    ``download_ranges``) instead of the whole video — a large speed-up for
+    long videos. Falls back to a full download if the range download fails.
 
-    # Check if already cached
-    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
-        # Get title from yt-dlp without downloading
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-        return {"title": info.get("title", "clip"), "video_path": cached}
+    Args:
+        url: Video URL.
+        section: Optional ``(start_seconds, end_seconds)`` to fetch.
 
-    ydl_opts = {
-        "format": "best[ext=mp4][height<=480]/best[ext=mp4]/best",
-        "outtmpl": cached,
-        "quiet": True,
-        "no_warnings": True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-    if not os.path.isfile(cached):
-        raise FileNotFoundError("Failed to download video.")
-
-    return {"title": info.get("title", "clip"), "video_path": cached}
+    Returns:
+        ``{"title", "video_path", "partial"}``.
+    """
+    return ytdlp.download_video(
+        url,
+        VIDEO_CACHE_DIR,
+        cache_path=_video_cache_path(url, section),
+        section=section,
+    )
 
 
 def _extract_clip_pyav(
@@ -557,23 +681,31 @@ async def extract_video_clip(
 
     video_path = None
     title = "clip"
+    # When only a section was downloaded, the file's timeline starts at 0
+    # rather than at the original video's timestamp. Track the offset so the
+    # clip is cut at the right place inside the partial file.
+    timeline_offset = 0.0
 
     if os.path.isfile(url):
         video_path = url
         title = Path(url).stem
     else:
-        try:
-            import yt_dlp  # noqa: F401
-        except ImportError:
+        if not ytdlp.is_available():
             return "yt-dlp is required. Install with: pip install yt-dlp"
 
         if ctx:
             await ctx.report_progress(progress=0, total=100, message="Downloading video...")
 
         try:
-            dl_info = await asyncio.to_thread(_download_video, url)
+            # Only fetch the requested range when possible — for a 2-hour
+            # video this turns a multi-hundred-MB download into a few MB.
+            dl_info = await asyncio.to_thread(
+                _download_video, url, (clip_start, clip_end)
+            )
             title = dl_info["title"]
             video_path = dl_info["video_path"]
+            if dl_info.get("partial"):
+                timeline_offset = clip_start
         except Exception as e:
             return f"Failed to download video: {e}"
 
@@ -590,11 +722,18 @@ async def extract_video_clip(
         await ctx.report_progress(progress=40, total=100, message="Extracting clip...")
 
     try:
+        # Cut relative to the file's own timeline. For a full download the
+        # offset is 0; for a section download the file starts at clip_start,
+        # so the clip is cut from 0 to (clip_end - clip_start).
         clip_info = await asyncio.to_thread(
-            _extract_clip_pyav, video_path, out_path, clip_start, clip_end
+            _extract_clip_pyav,
+            video_path,
+            out_path,
+            clip_start - timeline_offset,
+            clip_end - timeline_offset,
         )
 
-        clip_end = clip_info["clip_end"]
+        clip_end = clip_info["clip_end"] + timeline_offset
         clip_size = clip_info["size"]
         clip_dur = clip_end - clip_start
 

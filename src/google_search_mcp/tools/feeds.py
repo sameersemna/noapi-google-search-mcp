@@ -35,6 +35,7 @@ from ..server import (
     launch_browser,
     strip_html,
 )
+from ..utils import ytdlp
 
 
 # Database
@@ -386,9 +387,7 @@ async def _auto_transcribe_youtube(
     or an empty string if nothing happened.
     """
     # ── dependency check — soft fail, never crash ──────────────────────
-    try:
-        import yt_dlp  # noqa: F401
-    except ImportError:
+    if not ytdlp.is_available():
         return " (auto-transcription skipped: install yt-dlp)"
     try:
         from faster_whisper import WhisperModel  # noqa: F401
