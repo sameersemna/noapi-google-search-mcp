@@ -6,6 +6,23 @@ After=network.target
 Type=simple
 User=sameer
 WorkingDirectory=/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp
+
+# ── Environment ────────────────────────────────────────────────────────
+# Most env vars live in /etc/noapi-google-search-mcp.env (mode 0600). That
+# keeps secrets (WHISPER_REMOTE_API_KEY, etc.) out of the unit file and out
+# of `systemctl show mcp-google.service` output. See .env.example in the
+# project root for the full schema.
+#
+# If the file is missing, the unit still starts — systemd silently ignores
+# an unreadable EnvironmentFile. To bootstrap one:
+#
+#   sudo cp .env.example /etc/noapi-google-search-mcp.env
+#   sudo chown root:root /etc/noapi-google-search-mcp.env
+#   sudo chmod 0600 /etc/noapi-google-search-mcp.env
+#   sudoedit /etc/noapi-google-search-mcp.env
+EnvironmentFile=-/etc/noapi-google-search-mcp.env
+
+# Hard-coded baseline (also overridden by EnvironmentFile if present).
 Environment=PYTHONUNBUFFERED=1
 Environment=SKIP_COOKIE_VALIDATION=1
 # ── Graphical display for manual-intervention (headful) browser ──

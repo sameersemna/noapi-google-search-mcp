@@ -206,6 +206,26 @@ async def app_lifespan(server: FastMCP):
     # Mark start time so uptime_sec is accurate
     health_server.set_loaded_at()
 
+    # ── Remote-Whisper startup probe (best-effort, non-blocking) ───────
+    # If WHISPER_REMOTE_ENABLED=1, kick a single short HTTP GET against
+    # /v1/models so /health is informative on the first request. Runs
+    # in a thread because the probe is synchronous urllib.
+    try:
+        from .utils import whisper_remote
+
+        if whisper_remote.is_configured():
+            import functools
+            import threading
+
+            threading.Thread(
+                target=functools.partial(whisper_remote.startup_probe),
+                name="whisper-remote-startup-probe",
+                daemon=True,
+            ).start()
+    except Exception as exc:  # pragma: no cover - defensive
+        # Never let probe wiring break startup.
+        print(f"[startup] whisper_remote probe wiring failed: {exc}", file=sys.stderr)
+
     if SKIP_COOKIE_VALIDATION:
         print("SKIP_COOKIE_VALIDATION is set — skipping cookie validation.", file=sys.stderr)
         health_server.set_startup_result(

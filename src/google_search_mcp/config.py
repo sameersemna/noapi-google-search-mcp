@@ -408,6 +408,100 @@ HEALTH_PORT: int = int(os.environ.get("HEALTH_PORT", "11499"))
 HEALTH_AUTH_TOKEN: str = os.environ.get("HEALTH_AUTH_TOKEN", "").strip()
 
 # ---------------------------------------------------------------------------
+# Remote Whisper server — delegate heavy transcription to a GPU host
+# ---------------------------------------------------------------------------
+# When enabled, audio files larger than ``WHISPER_REMOTE_MIN_FILE_BYTES``
+# are sent to a remote Whisper server (e.g. running on a Dell Pro Max
+# GB10) instead of being transcribed locally on CPU. The local
+# ``faster-whisper`` model is used as a fallback whenever the remote
+# server is unreachable, returns an error, or the file is too small to
+# justify the network round-trip.
+#
+# The remote server must speak one of two supported API styles:
+#
+#   "openai"      — OpenAI-compatible ``POST /v1/audio/transcriptions``
+#                   (e.g. ``speaches``, formerly ``fedirz/faster-whisper-server``,
+#                   ``octopus2023/insanely-fast-whisper-server``, OpenAI's own API).
+#                   The remote gets a ``model=<WHISPER_REMOTE_MODEL>`` field.
+#
+#   "whispercpp"  — whisper.cpp server's ``POST /inference`` endpoint
+#                   (https://github.com/ggml-org/whisper.cpp, run via the
+#                   ``server`` example on a GPU host). No model is sent — the
+#                   server has the model loaded internally via ``/load``.
+#                   Response includes ``detected_language`` and
+#                   ``language_probabilities`` keyed by ISO codes.
+#
+# Disabling the master switch returns to the original behaviour — all
+# transcription runs locally via faster-whisper.
+WHISPER_REMOTE_ENABLED: bool = os.environ.get(
+    "WHISPER_REMOTE_ENABLED", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Base URL of the remote server (no trailing slash). Example:
+#   http://promaxgb10-6116.lan:8768
+WHISPER_REMOTE_URL: str = os.environ.get("WHISPER_REMOTE_URL", "").strip().rstrip("/")
+
+# Optional bearer token. Empty = no auth header sent.
+WHISPER_REMOTE_API_KEY: str = os.environ.get("WHISPER_REMOTE_API_KEY", "").strip()
+
+# Model name to request from the remote server. Local invocations are
+# always ``tiny`` by default — the whole point of the remote is to be
+# able to run something heavier (``large-v3``, ``distil-large-v3``, …).
+#
+# Ignored when WHISPER_REMOTE_API_STYLE="whispercpp" — whisper.cpp's
+# server has the model loaded internally via /load and does not accept
+# a model name per request.
+WHISPER_REMOTE_MODEL: str = os.environ.get(
+    "WHISPER_REMOTE_MODEL", "large-v3"
+).strip()
+
+# Wire protocol: "openai" (default) or "whispercpp". See the comment above
+# WHISPER_REMOTE_ENABLED for the differences. This single flag switches
+# the endpoint URL, the multipart fields, the health-probe URL, and the
+# response-normalisation strategy.
+WHISPER_REMOTE_API_STYLE: str = os.environ.get(
+    "WHISPER_REMOTE_API_STYLE", "openai"
+).strip().lower()
+if WHISPER_REMOTE_API_STYLE not in ("openai", "whispercpp"):
+    WHISPER_REMOTE_API_STYLE = "openai"
+
+# Per-request timeout in seconds. Transcription of long audio on a cold
+# model can take a minute; 5 minutes is a safe default.
+WHISPER_REMOTE_TIMEOUT_SEC: float = float(
+    os.environ.get("WHISPER_REMOTE_TIMEOUT_SEC", "300")
+)
+
+# Health-probe timeout (separate, much shorter). Used by ``/health``
+# and by the in-process probe that decides whether to attempt the
+# remote at all.
+WHISPER_REMOTE_HEALTH_TIMEOUT_SEC: float = float(
+    os.environ.get("WHISPER_REMOTE_HEALTH_TIMEOUT_SEC", "5")
+)
+
+# Minimum audio file size (in bytes) before the remote path is
+# considered. Smaller files are transcribed locally — the round-trip
+# latency outweighs the CPU time. A 30 s mp3 at 128 kbps is ~480 KB,
+# so 1 MB is a comfortable threshold that keeps sub-minute clips
+# local.
+WHISPER_REMOTE_MIN_FILE_BYTES: int = int(
+    os.environ.get("WHISPER_REMOTE_MIN_FILE_BYTES", str(1024 * 1024))
+)
+
+# When the remote is detected as down, mark it unhealthy for this
+# many seconds before re-probing. Avoids hammering a server that just
+# crashed or is on the wrong VLAN.
+WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC: float = float(
+    os.environ.get("WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC", "60")
+)
+
+# Whether to run a background probe of the remote URL at startup.
+# Cheap (one short HTTP GET) and makes ``/health`` immediately
+# informative on first request.
+WHISPER_REMOTE_PROBE_ON_STARTUP: bool = os.environ.get(
+    "WHISPER_REMOTE_PROBE_ON_STARTUP", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# ---------------------------------------------------------------------------
 # Rate limiting — minimum gap (seconds) between requests to Google
 # ---------------------------------------------------------------------------
 

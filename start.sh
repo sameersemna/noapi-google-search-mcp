@@ -14,7 +14,21 @@ cd "$dirWork" || exit 1
 pythonCmd="$pathPython -i -m google_search_mcp"
 echo "Running command: $pythonCmd"
 
-# 3. Export global env flags cleanly
+# 3. Source /etc/noapi-google-search-mcp.env if present — same env file
+#    systemd reads. Keeps dev/prod parity. Missing file is OK (dev mode).
+ENV_FILE='/etc/noapi-google-search-mcp.env'
+if [ -r "$ENV_FILE" ]; then
+    # `set -a` auto-exports every variable assigned in this block.
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+    echo "Loaded env from $ENV_FILE"
+else
+    echo "No $ENV_FILE — using inline defaults only"
+fi
+
+# 4. Export global env flags cleanly
 export PYTHONUNBUFFERED=1
 export SKIP_COOKIE_VALIDATION=1
 

@@ -9,6 +9,103 @@ If you want to support noapi-google-mcp or gpt-oss-20B/120B-Vision and other ope
 
 **42 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
 
+## What's New in v0.3.6 — Remote Whisper Delegation (Delegate Heavy Transcription to a GPU Host)
+
+The local `faster-whisper` path runs on CPU + int8 and is fast enough for
+short clips, but crawls on hour-long audio. v0.3.6 adds a **remote-Whisper
+delegation layer** that offloads heavy transcription to a GPU host on the
+LAN (e.g. a Dell Pro Max GB10 running `whisper.cpp` or `speaches`) and
+falls back transparently to the local path if the remote is down.
+
+### How it works
+
+When `WHISPER_REMOTE_ENABLED=1` and `WHISPER_REMOTE_URL` points at a
+GPU server, every call to `_transcribe_audio` (used by
+`transcribe_video`, `transcribe_local`, and `_auto_transcribe_youtube`)
+follows this flow:
+
+```
+1. Is the remote enabled and configured?           no  → local
+2. Is the file > WHISPER_REMOTE_MIN_FILE_BYTES?    no  → local
+3. Is the cached health probe "healthy"?           no  → local
+4. POST the file to /inference or /v1/audio/...
+5. Parse verbose_json → {segments, language, ...}
+6. On success: return normalised result
+   On failure: log + fall back to local; mark remote unhealthy
+                for WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC seconds
+```
+
+The local path is **always** available as a fallback. The remote is a
+strict performance optimisation, not a dependency.
+
+### Two wire protocols
+
+`WHISPER_REMOTE_API_STYLE` selects between two compatible servers:
+
+| Style | Endpoint | Servers | Notes |
+|---|---|---|---|
+| `openai` (default) | `POST /v1/audio/transcriptions` | [`speaches`](https://github.com/speaches-ai/speaches), OpenAI's API, [`fedirz/faster-whisper-server`](https://github.com/fedirz/faster-whisper-server) | Sends `model`, optional `language`, `response_format=verbose_json`. Bearer auth if `WHISPER_REMOTE_API_KEY` set. |
+| `whispercpp` | `POST /inference` | [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp)'s `whisper-server` example | Sends `temperature=0.0`, `temperature_inc=0.2`, `response_format=verbose_json`. No `model` field (model is loaded server-side via `/load`). Language auto-detected; full name (`"english"`) is normalised to ISO (`"en"`). |
+
+### New `/health` section
+
+```json
+{
+  "dependencies": {
+    "whisper_remote": {
+      "ok": true,
+      "configured": true,
+      "enabled": true,
+      "url": "http://promaxgb10-6116:8768",
+      "api_style": "whispercpp",
+      "model": "large-v3",
+      "min_file_bytes": 1048576,
+      "last_probe_at": 1234567.8,
+      "last_probe_latency_ms": 24.6,
+      "last_probe_error": null,
+      "attempts": 47,
+      "successes": 46,
+      "failures": 1,
+      "last_error": null,
+      "last_success_at": 1234567.0,
+      "last_failure_at": 1234500.0
+    }
+  }
+}
+```
+
+### New config (env vars)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WHISPER_REMOTE_ENABLED` | `0` | Master switch — `0` = local-only (original behaviour) |
+| `WHISPER_REMOTE_API_STYLE` | `openai` | `openai` or `whispercpp` |
+| `WHISPER_REMOTE_URL` | _empty_ | e.g. `http://promaxgb10-6116:8768` |
+| `WHISPER_REMOTE_API_KEY` | _empty_ | Optional bearer token (OpenAI style only) |
+| `WHISPER_REMOTE_MODEL` | `large-v3` | Model to request (ignored by whisper.cpp) |
+| `WHISPER_REMOTE_TIMEOUT_SEC` | `300` | Per-request timeout |
+| `WHISPER_REMOTE_HEALTH_TIMEOUT_SEC` | `5` | Health-probe timeout |
+| `WHISPER_REMOTE_MIN_FILE_BYTES` | `1048576` (1 MB) | Skip remote for files smaller than this |
+| `WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC` | `60` | Skip remote for this long after a network failure |
+| `WHISPER_REMOTE_PROBE_ON_STARTUP` | `1` | Probe at server startup so `/health` is immediately informative |
+
+### Environment file layout (v0.3.6+)
+
+All env vars now read from `/etc/noapi-google-search-mcp.env` (mode 0600)
+via systemd's `EnvironmentFile=`. Secrets stay out of the unit file and
+`systemctl show` output. `start.sh` sources the same file for dev parity.
+See `.env.example` in the repo root for the full schema and bootstrap
+checklist.
+
+### Performance
+
+| Source | 18-min video (10 MB audio) | 1-hour video (35 MB audio) |
+|---|---|---|
+| Local `tiny` CPU int8 | minutes | tens of minutes |
+| Remote `large-v3` on GB10 | **seconds** | under a minute |
+
+
+
 An MCP server that turns your local LLM into a fully connected assistant. Real Google results, live news and social feeds, reverse image search, offline OCR, YouTube transcription and clip extraction — all running locally through headless Chromium and open-source ML models. No API keys, no usage limits, no cloud dependency.
 
 Works with **LM Studio**, **Claude Desktop**, **OpenClaw**, **Ollama**, and any MCP-compatible client.

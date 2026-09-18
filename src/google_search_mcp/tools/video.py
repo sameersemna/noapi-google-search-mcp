@@ -165,8 +165,20 @@ def _format_and_cache_transcript(
     return full_transcript
 
 
-def _transcribe_audio(audio_path: str, model_size: str, language: str) -> dict:
-    """Transcribe audio file (runs in thread). Returns segments + info."""
+def _transcribe_audio_local(audio_path: str, model_size: str, language: str) -> dict:
+    """Transcribe audio file locally with faster-whisper on CPU/int8.
+
+    Always invoked as ``await asyncio.to_thread(...)`` by the calling tool —
+    the function itself is synchronous.
+
+    Returns the canonical segment shape::
+
+        {
+          "segments": [{"start": float, "end": float, "text": str}, ...],
+          "language": str,
+          "language_probability": float,
+        }
+    """
     from faster_whisper import WhisperModel
 
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
@@ -190,6 +202,52 @@ def _transcribe_audio(audio_path: str, model_size: str, language: str) -> dict:
         "language": whisper_info.language,
         "language_probability": whisper_info.language_probability,
     }
+
+
+def _transcribe_audio(audio_path: str, model_size: str, language: str) -> dict:
+    """Transcribe audio file (runs in thread). Returns segments + info.
+
+    Strategy:
+        1. If a remote Whisper server is configured (``WHISPER_REMOTE_ENABLED=1``
+           and ``WHISPER_REMOTE_URL`` set), try it first via
+           ``utils.whisper_remote.transcribe_remote``. This offloads heavy
+           transcription to a GPU host (e.g. a Dell Pro Max GB10 running
+           ``speaches``) and dramatically reduces wall time on long audio.
+        2. On any failure (remote disabled, unreachable, timeout, ineligible
+           file size, malformed response), fall back transparently to the
+           local ``faster-whisper`` CPU path.
+
+    The returned shape is identical regardless of which path produced it, so
+    every downstream consumer (``_format_and_cache_transcript``,
+    ``search_transcript``, ``transcribe_local``, ``_auto_transcribe_youtube``)
+    works unchanged.
+
+    Args:
+        audio_path: Local path to the audio file to transcribe.
+        model_size: Whisper model size (tiny|base|small|medium|large). Used
+            for the LOCAL path; the remote path always uses
+            ``WHISPER_REMOTE_MODEL``.
+        language: ISO 639-1 language code or empty string for auto-detect.
+    """
+    # ── Remote first (best-effort) ─────────────────────────────────────
+    # transcribe_remote never raises; it returns None on any failure so
+    # the caller can fall back. The try/except is purely defensive — if
+    # anything in the import path itself blows up, we still want to
+    # produce a transcript locally rather than fail the whole call.
+    try:
+        from ..utils import whisper_remote
+
+        remote_result = whisper_remote.transcribe_remote(
+            audio_path, model_size, language
+        )
+        if remote_result is not None:
+            return remote_result
+    except Exception as exc:  # pragma: no cover - defensive
+        # Swallow — we are about to try the local path anyway.
+        log.debug("Remote Whisper path raised unexpectedly: %s", exc)
+
+    # ── Local fallback ─────────────────────────────────────────────────
+    return _transcribe_audio_local(audio_path, model_size, language)
 
 
 @mcp.tool()

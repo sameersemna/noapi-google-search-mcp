@@ -492,6 +492,82 @@ def _check_js_runtime() -> dict[str, Any]:
         return {"ok": False, "runtime": None, "error": str(exc)}
 
 
+def _check_whisper_remote() -> dict[str, Any]:
+    """Report the remote-Whisper delegation layer's health.
+
+    When ``WHISPER_REMOTE_ENABLED=1`` and ``WHISPER_REMOTE_URL`` is set,
+    audio larger than ``WHISPER_REMOTE_MIN_FILE_BYTES`` is sent to a
+    GPU-hosted Whisper server using either:
+
+    * the OpenAI ``POST /v1/audio/transcriptions`` endpoint
+      (``WHISPER_REMOTE_API_STYLE=openai`` — e.g. ``speaches``, formerly
+      ``fedirz/faster-whisper-server``)
+    * the whisper.cpp server's ``POST /inference`` endpoint
+      (``WHISPER_REMOTE_API_STYLE=whispercpp`` — ggml-org/whisper.cpp)
+
+    This check reports the cached probe result so ``/health`` is
+    informative without requiring an HTTP request of its own.
+
+    Operators can also trigger a fresh probe by calling
+    :func:`google_search_mcp.utils.whisper_remote.probe`.
+    """
+    try:
+        from . import config as _config
+        from .utils import whisper_remote
+
+        stats = whisper_remote.get_stats()
+        enabled = bool(stats.get("enabled"))
+        url = stats.get("url")
+        configured = bool(enabled and url)
+        last_probe_ok = stats.get("last_probe_ok")
+        api_style = _config.WHISPER_REMOTE_API_STYLE
+
+        if not configured:
+            return {
+                "ok": False,
+                "configured": False,
+                "enabled": enabled,
+                "url": url,
+                "api_style": api_style,
+                "model": stats.get("model"),
+                "min_file_bytes": stats.get("min_file_bytes"),
+                "error": "WHISPER_REMOTE_ENABLED=0 or WHISPER_REMOTE_URL is empty",
+                "attempts": stats.get("attempts", 0),
+                "successes": stats.get("successes", 0),
+                "failures": stats.get("failures", 0),
+                "last_error": stats.get("last_error"),
+            }
+
+        # Configured — interpret the cached probe
+        return {
+            "ok": bool(last_probe_ok) if last_probe_ok is not None else None,
+            "configured": True,
+            "enabled": True,
+            "url": url,
+            "api_style": api_style,
+            "model": stats.get("model"),
+            "min_file_bytes": stats.get("min_file_bytes"),
+            "last_probe_at": stats.get("last_probe_at"),
+            "last_probe_latency_ms": stats.get("last_probe_latency_ms"),
+            "last_probe_error": stats.get("last_probe_error"),
+            "attempts": stats.get("attempts", 0),
+            "successes": stats.get("successes", 0),
+            "failures": stats.get("failures", 0),
+            "last_error": stats.get("last_error"),
+            "last_success_at": stats.get("last_success_at"),
+            "last_failure_at": stats.get("last_failure_at"),
+            "error": None,
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "ok": False,
+            "configured": False,
+            "enabled": None,
+            "url": None,
+            "error": f"health check failed: {type(exc).__name__}: {exc}",
+        }
+
+
 def _check_dependencies() -> dict[str, Any]:
     """Return status of all third-party deps the server relies on."""
     deps: dict[str, Any] = {}
@@ -507,6 +583,7 @@ def _check_dependencies() -> dict[str, Any]:
     deps["yt_dlp"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     deps["yt_dlp_ejs"] = _check_ytdlp_ejs()
     deps["js_runtime"] = _check_js_runtime()
+    deps["whisper_remote"] = _check_whisper_remote()
     ok, ver = _safe_import("rapidocr")
     deps["rapidocr"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     ok, ver = _safe_import("lingua")
@@ -548,6 +625,17 @@ def _check_config() -> dict[str, Any]:
         "ANTIDETECT_TAB_FOCUS_EVENTS": config.ANTIDETECT_TAB_FOCUS_EVENTS,
         "ANTIDETECT_CLIENT_HINTS": config.ANTIDETECT_CLIENT_HINTS,
         "ANTIDETECT_RANDOMIZE_FINGERPRINT": config.ANTIDETECT_RANDOMIZE_FINGERPRINT,
+        # Remote Whisper delegation (v0.3.6+)
+        "WHISPER_REMOTE_ENABLED": config.WHISPER_REMOTE_ENABLED,
+        "WHISPER_REMOTE_API_STYLE": config.WHISPER_REMOTE_API_STYLE,
+        "WHISPER_REMOTE_URL": config.WHISPER_REMOTE_URL or None,
+        "WHISPER_REMOTE_API_KEY_set": bool(config.WHISPER_REMOTE_API_KEY),
+        "WHISPER_REMOTE_MODEL": config.WHISPER_REMOTE_MODEL,
+        "WHISPER_REMOTE_TIMEOUT_SEC": config.WHISPER_REMOTE_TIMEOUT_SEC,
+        "WHISPER_REMOTE_HEALTH_TIMEOUT_SEC": config.WHISPER_REMOTE_HEALTH_TIMEOUT_SEC,
+        "WHISPER_REMOTE_MIN_FILE_BYTES": config.WHISPER_REMOTE_MIN_FILE_BYTES,
+        "WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC": config.WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC,
+        "WHISPER_REMOTE_PROBE_ON_STARTUP": config.WHISPER_REMOTE_PROBE_ON_STARTUP,
     }
 
 
