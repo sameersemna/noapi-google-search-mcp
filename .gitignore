@@ -24,3 +24,8 @@ cookies/
 screenshots/
 *.pid
 *.prs
+
+# ── generated test run artifacts (reports/logs) — not source ──
+*_log.txt
+TEST_REPORT*.md
+test_lmstudio_results*
