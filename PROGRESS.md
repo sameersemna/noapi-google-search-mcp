@@ -4,8 +4,8 @@
 > **RULE: read this file first at the start of every session; update it before every commit.**
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
-## Current phase: 0 — Recon, Baseline & Safety Net
-## Current step: 0.6 — characterization tests (feeds/parsers/URL builders) — next
+## Current phase: 1 — Fix Verified Bugs (B1–B11)
+## Current step: 1.4 — DONE: B1,B2,B3,B6,B8,B10,B11 (7/11). NEXT: migration system + B4/B5/B7, then B9.
 ## Status: in-progress
 ## Last green commit: tip of `hardening/v0.4` (147 pytest green) — baseline was `cc37fd3` (143 green)
 
@@ -34,8 +34,8 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 
 ## Phase checklist (re-scoped)
 
-- [ ] **Phase 0** — Recon, baseline, safety net *(recon ✅, ledger ✅, dev tooling ✅, snapshot tripwire ✅, artifacts untracked ✅; characterization tests ⏳)*
-- [ ] **Phase 1** — Fix verified bugs B1–B10 + B11 (+ migration system for B4/B5/B7)
+- [ ] **Phase 0** — Recon, baseline, safety net *(✅ done: recon, ledger, dev tooling, 42-tool snapshot, artifacts untracked, bug re-verification)*
+- [ ] **Phase 1** — Fix verified bugs B1–B11 *(in progress: 7/11 fixed — B1,B2,B3,B6,B8,B10,B11 ✅; B4,B5,B7,B9 ⏳)*
 - [x] ~~Phase 2 — Modularize~~ → **mostly done already**; remaining: remove/deprecate `server_selenium.py`, tidy `__init__` exports
 - [ ] **Phase 3** — Config/logging/error model *(logging partly exists; needs stderr-only test + error types)*
 - [ ] **Phase 4** — Browser pool & concurrency **⚠️ CONFLICT — see open questions**
@@ -103,18 +103,19 @@ Side-effect legend: **R**=read-only · **LW**=local write/cache · **RW**=remote
 
 ## Bug status (B1–B10) — re-verified against current `0.3.6` code
 
-| ID | Status | Evidence |
+| ID | Status | Evidence / fix |
 |---|---|---|
-| B1 `lstrip("r/")` strips chars | **OPEN** | `tools/feeds.py:695` `identifier.lstrip("r/").strip("/")` (also deprecated `server_selenium.py:6447`) |
-| B2 fixed shared temp `audio_temp` + wipe-all | **OPEN** | `utils/ytdlp.py:629-640` (`os.path.join(cache_dir,"audio_temp")`, `_cleanup_prefix(cache_dir,"audio_temp")`) — concurrency hazard |
-| B3 version mismatch | **~DONE** | both `pyproject.toml` and `__init__.py` = `0.3.6`; still two hardcoded copies (not single-sourced) |
-| B4 mixed date formats in `published_at` | **OPEN** | no ISO normalization found |
-| B5 FTS5 missing UPDATE trigger | **OPEN** | no `PRAGMA user_version`, no migration system |
-| B6 `LIKE` wildcard not escaped | **VERIFY** | read `tools/feeds.py` search/get paths |
-| B7 URL-less items dropped / no `dedupe_key` | **OPEN** | no `dedupe_key` anywhere |
-| B8 `http://export.arxiv.org` | **OPEN** | `tools/feeds.py:314,716` |
-| B9 `google_search` pagination `start` vs `num+5` | **VERIFY** | read `tools/search.py` |
-| B10 fixed `noapi_tmp` mc alias + secret on argv | **OPEN** | `tools/web_utils.py:1104` `alias = "noapi_tmp"` |
+| B1 `lstrip("r/")` strips chars | ✅ **FIXED** `1d8c591`-precursor `8974573` | added `_normalize_subreddit()`; tests in `tests/unit/test_feeds_regressions.py` |
+| B2 shared fixed temp `audio_temp` + wipe-all | ✅ **FIXED** `654432d` | `utils/ytdlp.py` now uses `tempfile.mkdtemp` per call + age-gated `_cleanup_stale_dirs`; tests in `tests/unit/test_ytdlp_regressions.py` |
+| B3 version mismatch | ✅ **FIXED** `24270dc` | `__init__` reads `importlib.metadata.version()` w/ literal fallback; test `tests/unit/test_version.py`. Refreshed stale editable metadata (was 0.3.1) |
+| B4 mixed date formats in `published_at` | **OPEN** | no ISO normalization; needs migration (v2) |
+| B5 FTS5 missing UPDATE trigger | **OPEN** | no `PRAGMA user_version`; needs migration system |
+| B6 `LIKE` wildcard not escaped | ✅ **FIXED** `1d8c591` | `_like_escape()` + `ESCAPE '\\'` at 3 sites; tests `tests/unit/test_feeds_like_escape.py` |
+| B7 URL-less items dropped / no `dedupe_key` | **OPEN** | no `dedupe_key`; needs migration (v2) |
+| B8 `http://export.arxiv.org` | ✅ **FIXED** `8974573` | both sites now `https://`; tests in `test_feeds_regressions.py` |
+| B9 `google_search` pagination stride | **VERIFIED, OPEN** | `tools/search.py`: `start=(page-1)*num_results` while requesting `num=num_results+2`. Correct **iff** `num_results` is constant across pages; changing it skips/duplicates. Fix must be backward-compatible (see next action). |
+| B10 fixed `noapi_tmp` mc alias + secret on argv | ✅ **FIXED** `0a77bcc` | random per-call alias + `MC_HOST_<alias>` env (verified vs minio/docs); tests `tests/unit/test_s3_regressions.py` |
+| B11 `tools/finance.py` missing `import re` | ✅ **FIXED** `35b826d` | added `import re`; test `tests/unit/test_finance_regressions.py` |
 
 Also open (cross-cutting): no `ToolAnnotations` anywhere; `md5` still used (`tools/video.py:51,599`); no cache / rate limiter / circuit breaker / SSRF guard / fsguard.
 
@@ -146,6 +147,9 @@ Owner answers (2026-10-14):
 - ruff: **763** errors (default), **585** errors (project config: line-length 120, E501 ignored, `server_selenium.py` excluded, select E,F,W,I,B,UP,ASYNC,S,SIM) — not yet fixed
 - Installed dev tools into env `mcp-google`: ruff 0.17.0, mypy 2.4.0, pytest-asyncio 1.4.0 (+pytest-timeout, coverage)
 - After Phase 0.4/0.5: **147 passed** (added `tests/unit/test_tool_registry.py` — 4 tests)
+- After Phase 1 (partial): **168 passed**. New test files: `test_tool_registry.py`,
+  `test_feeds_regressions.py`, `test_finance_regressions.py`, `test_ytdlp_regressions.py`,
+  `test_version.py`, `test_feeds_like_escape.py`, `test_s3_regressions.py`.
 - mypy: **128 errors in 14 files** (lenient config; `ignore_missing_imports=true`)
 
 ### New finding (from mypy, add to Phase 1)
@@ -160,9 +164,15 @@ Owner answers (2026-10-14):
 3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
-1. ✅ Phase 0.4 (dev tooling in `pyproject.toml`: ruff/mypy/pytest config + `[dev]` extra).
-2. ✅ Phase 0.5 (`tests/unit/test_tool_registry.py` — snapshot: exactly 42 tool names + param sets).
-3. ✅ Commit `chore(phase0): baseline harness + ledger`.
-4. **Questions asked to the user** (see "Known issues / conflicts" + the session message). Do NOT start Phase 4/5/6/7 until answered.
-5. After answers: **Phase 1** — write a failing regression test per bug, then fix B1/B2/B4/B5/B7/B8/B10 (+ verify B6/B9), introduce `PRAGMA user_version` migration system, commit per bug (`fix(feeds): ... (B1)`).
-6. Then **Phase 3** (config/logging/error model) → **Phase 5** (annotations/cache/idempotency) → others per user guidance on rate-limiting.
+1. **Migration system** (needed for B4/B5/B7): add `PRAGMA user_version`, an ordered list of
+   migration functions run in a transaction; **migration 1 = current schema**, **migration 2 =
+   add `dedupe_key` (UNIQUE(subscription_id, dedupe_key)) + normalize `published_at` to ISO-8601 UTC
+   (keep raw value in `metadata`) + add the FTS `AFTER UPDATE` trigger + `('rebuild')`**. Test: old
+   schema DB → migrate → v2; run twice = idempotent. Keep a fixture SQL dump of the old schema.
+2. **B4**: normalize dates on insert (`email.utils.parsedate_to_datetime`, `datetime.fromisoformat`,
+   epoch for HN). **B7**: content-hash fallback key when `url` is empty. **B5**: UPDATE trigger.
+3. **B9** (needs the backward-compat rule): keep `start=(page-1)*num_results` as the **default**
+   (do NOT change page≥2 behavior), but add an optional fixed page-stride (e.g.
+   `NOAPI_MCP_SEARCH_PAGE_SIZE`, default 0=off) + a URL-builder test. Document in CHANGELOG.
+4. Then Phase 3 (config/logging/error model). **Phase 4/6 are now unblocked** (D2).
+5. Baseline: **168 pytest green**. Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
