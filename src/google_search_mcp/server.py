@@ -724,3 +724,11 @@ def _install_metrics_wrappers() -> None:
 
 
 _install_metrics_wrappers()
+
+
+# ---------------------------------------------------------------------------
+# Tool annotations — advertise read-only / idempotent / destructive / open-world
+# ---------------------------------------------------------------------------
+from .tools import annotations as _annotations  # noqa: E402
+
+_annotations.apply_tool_annotations(mcp)
