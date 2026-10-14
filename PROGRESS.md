@@ -5,7 +5,7 @@
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
 ## Current phase: 0 — Recon, Baseline & Safety Net
-## Current step: 0.5 — dev tooling + 42-tool snapshot test DONE (awaiting user answers)
+## Current step: 0.6 — characterization tests (feeds/parsers/URL builders) — next
 ## Status: in-progress
 ## Last green commit: tip of `hardening/v0.4` (147 pytest green) — baseline was `cc37fd3` (143 green)
 
@@ -34,8 +34,8 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 
 ## Phase checklist (re-scoped)
 
-- [ ] **Phase 0** — Recon, baseline, safety net *(in progress)*
-- [ ] **Phase 1** — Fix verified bugs B1–B10 (+ migration system for B4/B5/B7)
+- [ ] **Phase 0** — Recon, baseline, safety net *(recon ✅, ledger ✅, dev tooling ✅, snapshot tripwire ✅, artifacts untracked ✅; characterization tests ⏳)*
+- [ ] **Phase 1** — Fix verified bugs B1–B10 + B11 (+ migration system for B4/B5/B7)
 - [x] ~~Phase 2 — Modularize~~ → **mostly done already**; remaining: remove/deprecate `server_selenium.py`, tidy `__init__` exports
 - [ ] **Phase 3** — Config/logging/error model *(logging partly exists; needs stderr-only test + error types)*
 - [ ] **Phase 4** — Browser pool & concurrency **⚠️ CONFLICT — see open questions**
@@ -121,7 +121,19 @@ Also open (cross-cutting): no `ToolAnnotations` anywhere; `md5` still used (`too
 ---
 
 ## Decisions (ADRs to create under `docs/adr/`)
-*(none yet — 0001 module layout, 0002 browser pool, 0003 idempotency+caching, 0004 resilience, 0005 feeds)*
+Owner answers (2026-10-14):
+- **D1 — Premise.** Treat current tree (`dev` @ `cc37fd3`, v0.3.6, 42 tools, already modular) as the
+  baseline. Re-scope moot phases (Phase 2 effectively done).
+- **D2 — Resilience (supersedes 2026-09-11 "no rate-limiting").** Implement **all** of: concurrency
+  cap + RPS throttle + circuit breaker (prompt Phases 4 & 6). → ADR 0004.
+- **D3 — Artifacts.** Untrack generated test logs/reports; keep on disk. *Done (`27fd302`).*
+- **D4 — Packaging/fork metadata.** Leave unchanged for now (no optional extras, no URL/maintainer
+  changes, no PyPI rename). Revisit in Phase 10.
+- **D5 — Security defaults.** `ALLOWED_ROOTS` = user home; **private/LAN URLs ALLOWED by default**
+  (LAN-friendly, protects the whisper/GPU + local service setup). Opt-out via env flag.
+
+*(ADR files not yet written — 0001 module layout, 0002 browser pool, 0003 idempotency+caching,
+0004 resilience, 0005 feeds.)*
 
 ## Verified API notes (context7)
 - **pytest-asyncio**: `asyncio_mode = "auto"` under `[tool.pytest.ini_options]` (auto-marks async tests + fixtures). Marker registration via `markers = [...]`.
@@ -141,9 +153,11 @@ Also open (cross-cutting): no `ToolAnnotations` anywhere; `md5` still used (`too
   never imported in that module → `NameError` at runtime on that code path. Fix + regression test.
 
 ## Known issues / conflicts
-1. **⚠️ RATE-LIMITING CONFLICT.** Repo memory records that on 2026-09-11 the user **explicitly did NOT want rate-limiting**, so a concurrency fix was deliberately not applied. The prompt's Phase 4 (concurrency cap) and Phase 6 (rate limiter + circuit breaker) contradict this. **Must confirm with user before implementing.**
-2. `server_selenium.py` is dead code (not imported) but still contains a duplicate `@mcp.tool()` set — candidate for removal (ask user).
-3. Committed artifacts still in tree (`test_all_log.txt`, `TEST_REPORT*.md`, `test_lmstudio_results*`) — removal from tree needs user OK.
+1. ~~RATE-LIMITING CONFLICT~~ **RESOLVED 2026-10-14 (D2):** owner now approves concurrency cap + RPS
+   throttle + circuit breaker. Phases 4 & 6 unblocked. (Supersedes the 2026-09-11 "no rate-limiting" note.)
+2. `server_selenium.py` is dead code (not imported) but still contains a duplicate `@mcp.tool()` set —
+   candidate for removal (needs owner OK; currently ruff-excluded).
+3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
 1. ✅ Phase 0.4 (dev tooling in `pyproject.toml`: ruff/mypy/pytest config + `[dev]` extra).
