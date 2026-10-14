@@ -13,6 +13,7 @@ import subprocess
 import urllib.parse
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
 from email import policy as email_policy
@@ -21,11 +22,14 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, Image
 
-from ..config import IMAP_SERVERS, MAX_PAGE_CHARS
+from ..config import IMAP_SERVERS, MAX_PAGE_CHARS, TRANSCRIPT_CACHE_DIR
+from ..core import idempotency
 from ..core.cache import cached
 from ..server import (
     mcp,
     _fetch_url_bytes,
+    _transcribe_audio,
+    _transcript_cache_path,
     format_error,
     launch_browser,
     strip_html,
@@ -648,12 +652,17 @@ async def paste_text(
     title: str = "",
     syntax: str = "text",
     expiry_days: int = 7,
+    idempotency_key: str = "",
     ctx: Context = None,
 ) -> str:
     """Post text to dpaste.org and return a shareable URL.
 
     Great for sharing code, logs, configs, or any text output.
     No account or API key needed. Pastes expire automatically.
+
+    Idempotent: repeating the same content within 24h returns the original
+    URL instead of creating a duplicate paste (supply idempotency_key to
+    override the derived key).
 
     Sample prompts that trigger this tool:
         - "Paste this code and give me a link"
@@ -666,11 +675,27 @@ async def paste_text(
         title: Optional title for the paste.
         syntax: Syntax highlighting (e.g. "python", "json", "bash"). Default: text.
         expiry_days: Days until the paste expires (1-365). Default: 7.
+        idempotency_key: Optional key to dedupe retries. Default: derived from content.
     """
     if not content.strip():
         return "Nothing to paste — content is empty."
 
     expiry_days = max(1, min(365, expiry_days))
+
+    key = idempotency_key or idempotency.derived_key(
+        "paste_text", content, syntax, str(expiry_days)
+    )
+    cached = await idempotency.lookup(key)
+    if cached is not None:
+        return f"{cached}\n{idempotency.CACHED_NOTE}"
+
+    owns = await idempotency.store.reserve(key, "paste_text")
+    if not owns:
+        # Another identical call is in flight; wait briefly for its result.
+        await asyncio.sleep(0.5)
+        cached = await idempotency.lookup(key)
+        if cached is not None:
+            return f"{cached}\n{idempotency.CACHED_NOTE}"
 
     def _post() -> str:
         import urllib.parse
@@ -729,9 +754,12 @@ async def paste_text(
     try:
         url = await asyncio.to_thread(_post)
     except Exception as e:
+        await idempotency.abandon(key)
         return f"Failed to create paste: {e}"
 
-    return f"Paste created: {url}\nExpires in {expiry_days} days."
+    result = f"Paste created: {url}\nExpires in {expiry_days} days."
+    await idempotency.complete(key, "paste_text", result)
+    return result
 
 
 # ---------------------------------------------------------------------------
