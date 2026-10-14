@@ -4,8 +4,8 @@
 > **RULE: read this file first at the start of every session; update it before every commit.**
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
-## Current phase: 1 — Fix Verified Bugs (B1–B11)
-## Current step: 1.4 — DONE: B1,B2,B3,B6,B8,B10,B11 (7/11). NEXT: migration system + B4/B5/B7, then B9.
+## Current phase: 3 — Core Infrastructure: Config, Logging, Error Model
+## Current step: 3.0 — Phase 1 COMPLETE (all B1–B11 fixed). Starting config/logging/errors.
 ## Status: in-progress
 ## Last green commit: tip of `hardening/v0.4` (147 pytest green) — baseline was `cc37fd3` (143 green)
 
@@ -35,9 +35,9 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 ## Phase checklist (re-scoped)
 
 - [ ] **Phase 0** — Recon, baseline, safety net *(✅ done: recon, ledger, dev tooling, 42-tool snapshot, artifacts untracked, bug re-verification)*
-- [ ] **Phase 1** — Fix verified bugs B1–B11 *(in progress: 7/11 fixed — B1,B2,B3,B6,B8,B10,B11 ✅; B4,B5,B7,B9 ⏳)*
+- [ ] **Phase 1** — Fix verified bugs B1–B11 *(✅ done: all 11 fixed with offline regression tests)*
 - [x] ~~Phase 2 — Modularize~~ → **mostly done already**; remaining: remove/deprecate `server_selenium.py`, tidy `__init__` exports
-- [ ] **Phase 3** — Config/logging/error model *(logging partly exists; needs stderr-only test + error types)*
+- [ ] **Phase 3** — Config/logging/error model *(in progress)*
 - [ ] **Phase 4** — Browser pool & concurrency **⚠️ CONFLICT — see open questions**
 - [ ] **Phase 5** — Idempotency, ToolAnnotations, caching
 - [ ] **Phase 6** — Rate limiting, retries, circuit breaker **⚠️ CONFLICT — see open questions**
@@ -105,17 +105,21 @@ Side-effect legend: **R**=read-only · **LW**=local write/cache · **RW**=remote
 
 | ID | Status | Evidence / fix |
 |---|---|---|
-| B1 `lstrip("r/")` strips chars | ✅ **FIXED** `1d8c591`-precursor `8974573` | added `_normalize_subreddit()`; tests in `tests/unit/test_feeds_regressions.py` |
+| B1 `lstrip("r/")` strips chars | ✅ **FIXED** `8974573` | added `_normalize_subreddit()`; tests in `tests/unit/test_feeds_regressions.py` |
 | B2 shared fixed temp `audio_temp` + wipe-all | ✅ **FIXED** `654432d` | `utils/ytdlp.py` now uses `tempfile.mkdtemp` per call + age-gated `_cleanup_stale_dirs`; tests in `tests/unit/test_ytdlp_regressions.py` |
 | B3 version mismatch | ✅ **FIXED** `24270dc` | `__init__` reads `importlib.metadata.version()` w/ literal fallback; test `tests/unit/test_version.py`. Refreshed stale editable metadata (was 0.3.1) |
-| B4 mixed date formats in `published_at` | **OPEN** | no ISO normalization; needs migration (v2) |
-| B5 FTS5 missing UPDATE trigger | **OPEN** | no `PRAGMA user_version`; needs migration system |
+| B4 mixed date formats in `published_at` | ✅ **FIXED** `703ad3c` | `_normalize_published()` (RFC822/ISO/offset → ISO-8601 UTC) on insert + migration; tests `test_feeds_dedupe_dates.py`, `test_feeds_migrations.py` |
+| B5 FTS5 missing UPDATE trigger | ✅ **FIXED** `703ad3c` | `fts_au` delete-then-insert trigger + `('rebuild')`; tests in `test_feeds_migrations.py` |
 | B6 `LIKE` wildcard not escaped | ✅ **FIXED** `1d8c591` | `_like_escape()` + `ESCAPE '\\'` at 3 sites; tests `tests/unit/test_feeds_like_escape.py` |
-| B7 URL-less items dropped / no `dedupe_key` | **OPEN** | no `dedupe_key`; needs migration (v2) |
+| B7 URL-less items dropped / no `dedupe_key` | ✅ **FIXED** `703ad3c` | `dedupe_key` column + `UNIQUE(subscription_id, dedupe_key)`; content-hash fallback; tests `test_feeds_dedupe_dates.py` |
 | B8 `http://export.arxiv.org` | ✅ **FIXED** `8974573` | both sites now `https://`; tests in `test_feeds_regressions.py` |
-| B9 `google_search` pagination stride | **VERIFIED, OPEN** | `tools/search.py`: `start=(page-1)*num_results` while requesting `num=num_results+2`. Correct **iff** `num_results` is constant across pages; changing it skips/duplicates. Fix must be backward-compatible (see next action). |
+| B9 `google_search` pagination stride | ✅ **FIXED** `cedf20a` | extracted `_build_google_search_url()`; legacy stride kept as default, opt-in `NOAPI_MCP_SEARCH_PAGE_SIZE`; tests `test_search_url_builder.py` |
 | B10 fixed `noapi_tmp` mc alias + secret on argv | ✅ **FIXED** `0a77bcc` | random per-call alias + `MC_HOST_<alias>` env (verified vs minio/docs); tests `tests/unit/test_s3_regressions.py` |
 | B11 `tools/finance.py` missing `import re` | ✅ **FIXED** `35b826d` | added `import re`; test `tests/unit/test_finance_regressions.py` |
+
+**Migration system** (`703ad3c`): `PRAGMA user_version` + `_MIGRATIONS` (v1 base schema at v2 shape,
+v2 in-place upgrade of pre-hardening DBs). Verified non-destructively on a copy of the real DB
+(`~/.cache/noapi-google-search-mcp/feeds.db`, 35 rows preserved, `dedupe_key` backfilled, FTS rebuilt).
 
 Also open (cross-cutting): no `ToolAnnotations` anywhere; `md5` still used (`tools/video.py:51,599`); no cache / rate limiter / circuit breaker / SSRF guard / fsguard.
 
@@ -147,9 +151,10 @@ Owner answers (2026-10-14):
 - ruff: **763** errors (default), **585** errors (project config: line-length 120, E501 ignored, `server_selenium.py` excluded, select E,F,W,I,B,UP,ASYNC,S,SIM) — not yet fixed
 - Installed dev tools into env `mcp-google`: ruff 0.17.0, mypy 2.4.0, pytest-asyncio 1.4.0 (+pytest-timeout, coverage)
 - After Phase 0.4/0.5: **147 passed** (added `tests/unit/test_tool_registry.py` — 4 tests)
-- After Phase 1 (partial): **168 passed**. New test files: `test_tool_registry.py`,
+- After Phase 1: **190 passed**. Test files in `tests/unit/`: `test_tool_registry.py`,
   `test_feeds_regressions.py`, `test_finance_regressions.py`, `test_ytdlp_regressions.py`,
-  `test_version.py`, `test_feeds_like_escape.py`, `test_s3_regressions.py`.
+  `test_version.py`, `test_feeds_like_escape.py`, `test_s3_regressions.py`,
+  `test_feeds_migrations.py`, `test_feeds_dedupe_dates.py`, `test_search_url_builder.py`.
 - mypy: **128 errors in 14 files** (lenient config; `ignore_missing_imports=true`)
 
 ### New finding (from mypy, add to Phase 1)
@@ -164,15 +169,13 @@ Owner answers (2026-10-14):
 3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
-1. **Migration system** (needed for B4/B5/B7): add `PRAGMA user_version`, an ordered list of
-   migration functions run in a transaction; **migration 1 = current schema**, **migration 2 =
-   add `dedupe_key` (UNIQUE(subscription_id, dedupe_key)) + normalize `published_at` to ISO-8601 UTC
-   (keep raw value in `metadata`) + add the FTS `AFTER UPDATE` trigger + `('rebuild')`**. Test: old
-   schema DB → migrate → v2; run twice = idempotent. Keep a fixture SQL dump of the old schema.
-2. **B4**: normalize dates on insert (`email.utils.parsedate_to_datetime`, `datetime.fromisoformat`,
-   epoch for HN). **B7**: content-hash fallback key when `url` is empty. **B5**: UPDATE trigger.
-3. **B9** (needs the backward-compat rule): keep `start=(page-1)*num_results` as the **default**
-   (do NOT change page≥2 behavior), but add an optional fixed page-stride (e.g.
-   `NOAPI_MCP_SEARCH_PAGE_SIZE`, default 0=off) + a URL-builder test. Document in CHANGELOG.
-4. Then Phase 3 (config/logging/error model). **Phase 4/6 are now unblocked** (D2).
-5. Baseline: **168 pytest green**. Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
+1. **Phase 3** (in progress): read `config.py` + `logging_setup.py`; add env-var settings with
+   `NOAPI_MCP_` prefix (keep existing names working); add error types
+   (`UserInputError`, `UpstreamBlockedError`, `UpstreamError`, `DependencyMissingError`) + a
+   wrapper that converts to MCP errors (`isError: true`) while preserving the human-readable text;
+   add a test that greps the package for `print(` to stdout.
+2. **Phase 5** (core ask): `ToolAnnotations` on all 42 tools + snapshot test; read-through TTL cache
+   + singleflight; idempotency store for paste_text/shorten_url/archive_webpage/upload_to_s3.
+3. **Phases 4 & 6** are unblocked (D2) — browser pool + rate limiter/circuit breaker.
+4. **Phase 7** security: `ALLOWED_ROOTS`=home, private/LAN URLs ALLOWED by default (D5).
+5. Baseline: **190 pytest green**. Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
