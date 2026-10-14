@@ -31,6 +31,8 @@ import logging
 import os
 import re
 import shutil
+import tempfile
+import time
 from typing import Any, Callable
 
 from .. import config
@@ -626,18 +628,23 @@ def download_audio(url: str, cache_dir: str) -> dict[str, Any]:
     yt_dlp = _require_ytdlp()
     os.makedirs(cache_dir, exist_ok=True)
 
-    audio_path = os.path.join(cache_dir, "audio_temp")
-    _cleanup_prefix(cache_dir, "audio_temp")
+    # B2: use a UNIQUE per-call working directory. The old code wrote to a
+    # shared fixed name ("audio_temp") and deleted every matching file first,
+    # so two concurrent transcribe_video() calls clobbered/deleted each
+    # other's in-progress download. A unique dir + prefix-isolated lookup
+    # removes the race; stale dirs are pruned opportunistically by age only.
+    _cleanup_stale_dirs(cache_dir, "audio_")
+    work_dir = tempfile.mkdtemp(prefix="audio_", dir=cache_dir)
 
     opts = build_ydl_opts(
         url,
-        outtmpl=f"{audio_path}.%(ext)s",
+        outtmpl=os.path.join(work_dir, "audio.%(ext)s"),
         fmt="bestaudio[ext=m4a]/bestaudio",
     )
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True) or {}
 
-    actual_path = _find_downloaded_file(cache_dir, "audio_temp")
+    actual_path = _find_downloaded_file(work_dir, "audio")
     if not actual_path:
         raise FileNotFoundError("Failed to download audio.")
 
@@ -679,7 +686,12 @@ def download_video(
     yt_dlp = _require_ytdlp()
     os.makedirs(cache_dir, exist_ok=True)
 
-    target = cache_path or os.path.join(cache_dir, "video_temp.mp4")
+    # B2: when no explicit cache_path is given, never fall back to a shared
+    # fixed filename — give each call its own directory so concurrent
+    # downloads cannot clobber one another.
+    target = cache_path or os.path.join(
+        tempfile.mkdtemp(prefix="video_", dir=cache_dir), "video.mp4"
+    )
     want_section = bool(section and config.YTDLP_SECTION_DOWNLOAD)
 
     if os.path.isfile(target) and os.path.getsize(target) > 0:
@@ -767,6 +779,31 @@ def _cleanup_prefix(directory: str, prefix: str) -> None:
                 os.remove(os.path.join(directory, name))
             except OSError:
                 pass
+
+
+def _cleanup_stale_dirs(
+    directory: str, prefix: str, max_age_sec: float = 6 * 3600
+) -> None:
+    """Remove leftover per-call temp *directories* older than *max_age_sec*.
+
+    Used only to bound disk growth. Unlike the old wipe-all ``_cleanup_prefix``
+    it is age-gated, so it can never delete a directory a concurrent download
+    is still using (B2).
+    """
+    try:
+        now = time.time()
+        entries = os.listdir(directory)
+    except OSError:
+        return
+    for name in entries:
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            if os.path.isdir(path) and now - os.path.getmtime(path) > max_age_sec:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def _find_downloaded_file(directory: str, prefix: str) -> str | None:
