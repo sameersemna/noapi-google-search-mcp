@@ -7,7 +7,7 @@
 ## Current phase: 0 — Recon, Baseline & Safety Net
 ## Current step: 0.5 — dev tooling + 42-tool snapshot test DONE (awaiting user answers)
 ## Status: in-progress
-## Last green commit: `9ed3fc6` (147 pytest green; ruff 585; mypy 128)
+## Last green commit: tip of `hardening/v0.4` (147 pytest green) — baseline was `cc37fd3` (143 green)
 
 ---
 
