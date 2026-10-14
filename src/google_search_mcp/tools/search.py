@@ -5,6 +5,7 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 """
 
 import asyncio
+import os
 from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, Image
@@ -36,25 +37,44 @@ from ..utils.network import (
 # google_search
 # ---------------------------------------------------------------------------
 
-async def do_google_search(
+def _search_page_stride(num_results: int) -> int:
+    """Per-page offset stride used to build the ``&start=`` parameter (B9).
+
+    Legacy behaviour (the default) strides by ``num_results``, so ``start``
+    scales with whatever the caller passed. That is consistent across pages
+    *only if* ``num_results`` is unchanged between calls; changing it makes
+    pages skip/overlap results. Setting ``NOAPI_MCP_SEARCH_PAGE_SIZE`` to a
+    positive value uses that fixed stride instead, and the caller slices the
+    results to ``num_results`` locally.
+    """
+    try:
+        fixed = int(os.environ.get("NOAPI_MCP_SEARCH_PAGE_SIZE", "0") or "0")
+    except ValueError:
+        fixed = 0
+    return fixed if fixed > 0 else num_results
+
+
+def _build_google_search_url(
     query: str,
-    num_results: int = 5,
+    num_results: int,
+    *,
     time_range: str | None = None,
     site: str | None = None,
     page: int = 1,
     language: str | None = None,
     region: str | None = None,
-) -> str:
-    """Launch headless Chromium, search Google, and scrape results."""
-    search_query = query
-    if site:
-        search_query = f"site:{site} {search_query}"
+) -> tuple[str, int]:
+    """Build the Google SERP URL for a page (B9).
 
+    Returns ``(url, fetch_limit)`` where ``fetch_limit`` is how many result
+    cards the scraper should collect (the caller slices to ``num_results``).
+    """
+    search_query = f"site:{site} {query}" if site else query
     encoded_query = quote_plus(search_query)
-    start = (page - 1) * num_results
-    url = f"https://www.google.com/search?q={encoded_query}&num={num_results + 2}"
+    stride = _search_page_stride(num_results)
+    start = (page - 1) * stride
+    url = f"https://www.google.com/search?q={encoded_query}&num={stride + 2}"
 
-    # Language and region
     if language:
         url += f"&lr=lang_{language}&hl={language}"
     else:
@@ -66,6 +86,23 @@ async def do_google_search(
         url += f"&start={start}"
     if time_range and time_range in TIME_RANGE_MAP:
         url += f"&tbs={TIME_RANGE_MAP[time_range]}"
+    return url, stride
+
+
+async def do_google_search(
+    query: str,
+    num_results: int = 5,
+    time_range: str | None = None,
+    site: str | None = None,
+    page: int = 1,
+    language: str | None = None,
+    region: str | None = None,
+) -> str:
+    """Launch headless Chromium, search Google, and scrape results."""
+    url, fetch_limit = _build_google_search_url(
+        query, num_results, time_range=time_range, site=site,
+        page=page, language=language, region=region,
+    )
 
     def _fallback() -> str:
         provider, fallback = fallback_web_search(query, num_results)
@@ -180,7 +217,7 @@ async def do_google_search(
                 return results;
             }
             """,
-            num_results,
+            fetch_limit,
         )
 
         if not results:
@@ -213,7 +250,7 @@ async def do_google_search(
             header += f" (page {page})"
 
         lines = [header + "\n"]
-        offset = (page - 1) * num_results
+        offset = (page - 1) * fetch_limit
         for i, r in enumerate(results[:num_results], offset + 1):
             lines.append(f"{i}. {r['title']}")
             lines.append(f"   URL: {r['url']}")
