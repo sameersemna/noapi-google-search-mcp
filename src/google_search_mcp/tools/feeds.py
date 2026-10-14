@@ -110,6 +110,20 @@ def _init_feeds_db(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_subreddit(identifier: str) -> str:
+    """Strip an optional ``r/`` or ``/r/`` prefix (and surrounding slashes).
+
+    NOTE: ``str.lstrip("r/")`` strips the *character set* ``{'r', '/'}``, so it
+    mangles identifiers that merely *start* with those characters — e.g.
+    ``"rust"`` -> ``"ust"`` and ``"r/rprogramming"`` -> ``"programming"``.
+    This performs a real prefix removal instead.
+    """
+    ident = identifier.strip().strip("/")
+    if ident.lower().startswith("r/"):
+        ident = ident[2:]
+    return ident.strip("/")
+
+
 def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
     """Parse RSS 2.0 or Atom feed XML into a flat list of items."""
     root = ET.fromstring(xml_bytes)
@@ -311,7 +325,7 @@ async def _check_source_arxiv(
 ) -> list[dict]:
     """Fetch recent papers from arXiv by category."""
     url = (
-        f"http://export.arxiv.org/api/query?search_query=cat:{category}"
+        f"https://export.arxiv.org/api/query?search_query=cat:{category}"
         f"&start=0&max_results={max_results}"
         f"&sortBy=submittedDate&sortOrder=descending"
     )
@@ -692,7 +706,7 @@ async def subscribe(
             )
 
     elif source_type == "reddit":
-        identifier = identifier.lstrip("r/").strip("/")
+        identifier = _normalize_subreddit(identifier)
         feed_url = f"https://www.reddit.com/r/{identifier}/.rss"
         display_name = display_name or f"r/{identifier}"
 
@@ -713,7 +727,7 @@ async def subscribe(
         cat = ARXIV_CATEGORIES.get(identifier.lower(), identifier)
         identifier = cat
         feed_url = (
-            f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
+            f"https://export.arxiv.org/api/query?search_query=cat:{cat}"
             f"&max_results=20&sortBy=submittedDate&sortOrder=descending"
         )
         display_name = display_name or f"arXiv {cat}"
