@@ -22,6 +22,7 @@ from pathlib import Path
 from mcp.server.fastmcp import Context, Image
 
 from ..config import IMAP_SERVERS, MAX_PAGE_CHARS
+from ..core.cache import cached
 from ..server import (
     mcp,
     _fetch_url_bytes,
@@ -928,29 +929,14 @@ async def archive_webpage(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def wikipedia(
+@cached("wikipedia")
+async def _wikipedia_lookup(
     query: str,
     language: str = "en",
     sentences: int = 0,
-    ctx: Context = None,
+    fresh: bool = False,  # noqa: ARG001 - consumed by the cache decorator
 ) -> str:
-    """Look up a Wikipedia article and return its content.
-
-    Returns the article summary or full text. Supports all Wikipedia languages.
-
-    Sample prompts that trigger this tool:
-        - "Wikipedia: quantum computing"
-        - "Look up Albert Einstein on Wikipedia"
-        - "What does Wikipedia say about the French Revolution?"
-        - "Get the Wikipedia article for Python programming language"
-        - "Wikipedia en español: inteligencia artificial"
-
-    Args:
-        query: The topic to search for.
-        language: Wikipedia language code (e.g. "en", "de", "fr", "es", "ja"). Default: en.
-        sentences: Number of sentences for summary (0 = full article extract). Default: 0.
-    """
+    """Cached implementation of the Wikipedia lookup (see ``wikipedia``)."""
     if not query.strip():
         return "No query provided."
 
@@ -1026,6 +1012,35 @@ async def wikipedia(
         lines.append(f"\nSource: {page_url}")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def wikipedia(
+    query: str,
+    language: str = "en",
+    sentences: int = 0,
+    fresh: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Look up a Wikipedia article and return its content.
+
+    Returns the article summary or full text. Supports all Wikipedia languages.
+    Results are cached for a week; pass fresh=True to bypass the cache.
+
+    Sample prompts that trigger this tool:
+        - "Wikipedia: quantum computing"
+        - "Look up Albert Einstein on Wikipedia"
+        - "What does Wikipedia say about the French Revolution?"
+        - "Get the Wikipedia article for Python programming language"
+        - "Wikipedia en español: inteligencia artificial"
+
+    Args:
+        query: The topic to search for.
+        language: Wikipedia language code (e.g. "en", "de", "fr", "es", "ja"). Default: en.
+        sentences: Number of sentences for summary (0 = full article extract). Default: 0.
+        fresh: Bypass the read-through cache and fetch a fresh copy. Default: false.
+    """
+    return await _wikipedia_lookup(query, language, sentences, fresh=fresh)
 
 
 # ---------------------------------------------------------------------------

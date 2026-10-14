@@ -106,7 +106,8 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("bucket", "file_path"),
     ),
     "visit_page": (("url",), ("url",)),
-    "wikipedia": (("language", "query", "sentences"), ("query",)),
+    # `fresh` is an additive cache-bypass param (Phase 5).
+    "wikipedia": (("fresh", "language", "query", "sentences"), ("query",)),
 }
 
 EXPECTED_TOOL_COUNT = 42
