@@ -520,3 +520,76 @@ RETRY_BACKOFF_SECONDS: list[float] = [1.0, 3.0, 5.0]
 
 MAX_PAGE_CHARS: int = 8000
 MAX_OBJECTS: int = 4
+
+
+# ---------------------------------------------------------------------------
+# Namespaced settings (NOAPI_MCP_*)
+# ---------------------------------------------------------------------------
+# New tunables use a ``NOAPI_MCP_`` prefix. For backward compatibility the
+# helper below ALSO honours the legacy bare name (e.g. ``MAX_PAGE_CHARS``), so
+# existing deployments keep working unchanged.
+
+def env(name: str, default: str = "") -> str:
+    """Return ``NOAPI_MCP_<name>`` if set, else legacy ``<name>``, else *default*."""
+    return os.environ.get(f"NOAPI_MCP_{name}") or os.environ.get(name, default)
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = env(name, "1" if default else "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(env(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(env(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+# Maximum number of concurrent Chromium contexts (browser pool cap).
+MAX_BROWSERS: int = env_int("MAX_BROWSERS", 3)
+
+# Read-through cache for read-only tools. TTL is a default; per-tool TTLs are
+# applied in ``core/cache.py``.
+ENABLE_CACHE: bool = env_flag("ENABLE_CACHE", True)
+CACHE_TTL_SECONDS: int = env_int("CACHE_TTL_SECONDS", 3600)
+CACHE_MAX_ENTRIES: int = env_int("CACHE_MAX_ENTRIES", 512)
+CACHE_DB_PATH: str = env("CACHE_DB_PATH", os.path.join(CACHE_DIR, "cache.db"))
+
+# Idempotency store for side-effecting remote writes.
+IDEMPOTENCY_DB_PATH: str = env(
+    "IDEMPOTENCY_DB_PATH", os.path.join(CACHE_DIR, "idempotency.db")
+)
+IDEMPOTENCY_WINDOW_SECONDS: int = env_int("IDEMPOTENCY_WINDOW_SECONDS", 24 * 3600)
+
+# Security. ``ALLOWED_ROOTS`` defaults to the user's home (D5). Private/LAN
+# URLs are ALLOWED by default to protect LAN-local setups (D5).
+ALLOWED_ROOTS: tuple[str, ...] = tuple(
+    p.strip()
+    for p in env("ALLOWED_ROOTS", HOME).split(os.pathsep)
+    if p.strip()
+)
+ALLOW_PRIVATE_URLS: bool = env_flag("ALLOW_PRIVATE_URLS", True)
+
+# Google request rate (token bucket, requests/second) + burst.
+GOOGLE_RPS: float = env_float("GOOGLE_RPS", 0.5)
+GOOGLE_BURST: int = env_int("GOOGLE_BURST", 2)
+
+# Circuit breaker for Google blocks.
+CIRCUIT_COOLDOWN_SECONDS: int = env_int("CIRCUIT_COOLDOWN_SECONDS", 600)
+CIRCUIT_MAX_COOLDOWN_SECONDS: int = env_int("CIRCUIT_MAX_COOLDOWN_SECONDS", 3600)
+
+# Transport: "stdio" (default) or "streamable-http".
+TRANSPORT: str = env("TRANSPORT", "stdio").strip().lower()
+HTTP_HOST: str = env("HTTP_HOST", "127.0.0.1")
+HTTP_PORT: int = env_int("HTTP_PORT", 11498)
+
+# Output caps.
+MAX_TEXT_CHARS: int = env_int("MAX_TEXT_CHARS", MAX_PAGE_CHARS)
