@@ -84,7 +84,7 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "ocr_image": (("image_source",), ("image_source",)),
     "open_manual_browser": (("reason", "timeout_sec", "url"), ()),
     "paste_text": (
-        ("content", "expiry_days", "syntax", "title"),
+        ("content", "expiry_days", "idempotency_key", "syntax", "title"),
         ("content",),
     ),
     "read_document": (("file_path",), ("file_path",)),
