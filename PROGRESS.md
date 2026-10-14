@@ -4,10 +4,10 @@
 > **RULE: read this file first at the start of every session; update it before every commit.**
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
-## Current phase: 3 — Core Infrastructure: Config, Logging, Error Model
-## Current step: 3.0 — Phase 1 COMPLETE (all B1–B11 fixed). Starting config/logging/errors.
+## Current phase: 5 — Idempotency, Annotations & Caching
+## Current step: 5.3 — annotations ✅, cache+singleflight ✅, idempotency (paste_text) ✅. NEXT: rate limit/breaker, browser pool, security, docs.
 ## Status: in-progress
-## Last green commit: tip of `hardening/v0.4` (147 pytest green) — baseline was `cc37fd3` (143 green)
+## Last green commit: tip of `hardening/v0.4` (**251 pytest green**) — baseline was `cc37fd3` (143 green)
 
 ---
 
@@ -35,12 +35,12 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 ## Phase checklist (re-scoped)
 
 - [ ] **Phase 0** — Recon, baseline, safety net *(✅ done: recon, ledger, dev tooling, 42-tool snapshot, artifacts untracked, bug re-verification)*
-- [ ] **Phase 1** — Fix verified bugs B1–B11 *(✅ done: all 11 fixed with offline regression tests)*
+- [ ] **Phase 1** — Fix verified bugs B1–B13 *(✅ done: all fixed with offline regression tests)*
 - [x] ~~Phase 2 — Modularize~~ → **mostly done already**; remaining: remove/deprecate `server_selenium.py`, tidy `__init__` exports
-- [ ] **Phase 3** — Config/logging/error model *(in progress)*
-- [ ] **Phase 4** — Browser pool & concurrency **⚠️ CONFLICT — see open questions**
-- [ ] **Phase 5** — Idempotency, ToolAnnotations, caching
-- [ ] **Phase 6** — Rate limiting, retries, circuit breaker **⚠️ CONFLICT — see open questions**
+- [ ] **Phase 3** — Config/logging/error model *(✅ errors + namespaced config + stdout-hygiene test done; logging already to stderr)*
+- [ ] **Phase 4** — Browser pool & concurrency **⚠️ unblocked (D2) — not started**
+- [ ] **Phase 5** — Idempotency, ToolAnnotations, caching *(✅ annotations (42), TTL cache + singleflight, idempotency store + atomic writes; wired into wikipedia + paste_text. TODO: wire cache/idempotency into the rest of the read-only/write tools)*
+- [ ] **Phase 6** — Rate limiting, retries, circuit breaker **⚠️ unblocked (D2) — not started**
 - [ ] **Phase 7** — Security hardening (SSRF, allowed roots, secrets, output caps)
 - [ ] **Phase 8** — Feeds subsystem optimization
 - [ ] **Phase 9** — MCP protocol polish (typed params, structured output, transports)
@@ -116,6 +116,8 @@ Side-effect legend: **R**=read-only · **LW**=local write/cache · **RW**=remote
 | B9 `google_search` pagination stride | ✅ **FIXED** `cedf20a` | extracted `_build_google_search_url()`; legacy stride kept as default, opt-in `NOAPI_MCP_SEARCH_PAGE_SIZE`; tests `test_search_url_builder.py` |
 | B10 fixed `noapi_tmp` mc alias + secret on argv | ✅ **FIXED** `0a77bcc` | random per-call alias + `MC_HOST_<alias>` env (verified vs minio/docs); tests `tests/unit/test_s3_regressions.py` |
 | B11 `tools/finance.py` missing `import re` | ✅ **FIXED** `35b826d` | added `import re`; test `tests/unit/test_finance_regressions.py` |
+| B12 `transcribe_local` missing `TRANSCRIPT_CACHE_DIR`/`_transcript_cache_path`/`_transcribe_audio` | ✅ **FIXED** `175bc2f` | NameError confirmed at runtime; added imports in `tools/web_utils.py`; test `tests/unit/test_web_utils_regressions.py` |
+| B13 `_read_docx_text` missing `ET` import | ✅ **FIXED** `175bc2f` | every `.docx` read raised NameError; added `import xml.etree.ElementTree as ET`; same test file |
 
 **Migration system** (`703ad3c`): `PRAGMA user_version` + `_MIGRATIONS` (v1 base schema at v2 shape,
 v2 in-place upgrade of pre-hardening DBs). Verified non-destructively on a copy of the real DB
@@ -140,21 +142,27 @@ Owner answers (2026-10-14):
 *(ADR files not yet written — 0001 module layout, 0002 browser pool, 0003 idempotency+caching,
 0004 resilience, 0005 feeds.)*
 
-## Verified API notes (context7)
+## Verified API notes (context7 / introspection)
 - **pytest-asyncio**: `asyncio_mode = "auto"` under `[tool.pytest.ini_options]` (auto-marks async tests + fixtures). Marker registration via `markers = [...]`.
 - **ruff**: `[tool.ruff]` for `line-length`; `[tool.ruff.lint]` for `select` / `ignore` / `extend-select`.
 - **FastMCP**: `await mcp.list_tools()` returns `Tool` objects with `.name`, `.inputSchema` (used by snapshot test + inventory).
 - **hatchling**: dev deps via PEP 621 `[project.optional-dependencies].dev` (universally supported; chosen over PEP 735 `[dependency-groups]` for broad tooling compatibility).
+- **Error API (verified by introspection)**: `from mcp.server.fastmcp.exceptions import ToolError`. Raising `ToolError` in a tool → `isError=true` with our message in `content` (model can read it); any other exception → generic `Error executing tool <name>` (no internal leak).
+- **Annotations (verified by introspection)**: `from mcp.types import ToolAnnotations` — fields `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. `FastMCP.tool(name, title, description, annotations, icons, meta, structured_output)`. `list_tools()` rebuilds Tool objects each call, BUT mutating `mcp._tool_manager._tools[name].annotations` **does** persist into `list_tools()` (the project already mutates the same private registry for metrics) — that is what `tools/annotations.py` uses.
 
 ## Baseline metrics (commit `cc37fd3`)
 - pytest: **143 passed** in ~5s (Python 3.11.15, pytest 9.1.0)
 - ruff: **763** errors (default), **585** errors (project config: line-length 120, E501 ignored, `server_selenium.py` excluded, select E,F,W,I,B,UP,ASYNC,S,SIM) — not yet fixed
 - Installed dev tools into env `mcp-google`: ruff 0.17.0, mypy 2.4.0, pytest-asyncio 1.4.0 (+pytest-timeout, coverage)
 - After Phase 0.4/0.5: **147 passed** (added `tests/unit/test_tool_registry.py` — 4 tests)
-- After Phase 1: **190 passed**. Test files in `tests/unit/`: `test_tool_registry.py`,
-  `test_feeds_regressions.py`, `test_finance_regressions.py`, `test_ytdlp_regressions.py`,
-  `test_version.py`, `test_feeds_like_escape.py`, `test_s3_regressions.py`,
-  `test_feeds_migrations.py`, `test_feeds_dedupe_dates.py`, `test_search_url_builder.py`.
+- After Phase 1: **190 passed**.
+- After Phases 3 + 5(partial): **251 passed**. Test files in `tests/unit/`:
+  `test_tool_registry.py`, `test_feeds_regressions.py`, `test_finance_regressions.py`,
+  `test_ytdlp_regressions.py`, `test_version.py`, `test_feeds_like_escape.py`,
+  `test_s3_regressions.py`, `test_feeds_migrations.py`, `test_feeds_dedupe_dates.py`,
+  `test_search_url_builder.py`, `test_errors.py`, `test_config_env.py`, `test_stdout_hygiene.py`,
+  `test_tool_annotations.py`, `test_cache.py`, `test_wikipedia_cache_wiring.py`,
+  `test_idempotency.py`, `test_web_utils_regressions.py`.
 - mypy: **128 errors in 14 files** (lenient config; `ignore_missing_imports=true`)
 
 ### New finding (from mypy, add to Phase 1)
@@ -169,13 +177,19 @@ Owner answers (2026-10-14):
 3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
-1. **Phase 3** (in progress): read `config.py` + `logging_setup.py`; add env-var settings with
-   `NOAPI_MCP_` prefix (keep existing names working); add error types
-   (`UserInputError`, `UpstreamBlockedError`, `UpstreamError`, `DependencyMissingError`) + a
-   wrapper that converts to MCP errors (`isError: true`) while preserving the human-readable text;
-   add a test that greps the package for `print(` to stdout.
-2. **Phase 5** (core ask): `ToolAnnotations` on all 42 tools + snapshot test; read-through TTL cache
-   + singleflight; idempotency store for paste_text/shorten_url/archive_webpage/upload_to_s3.
-3. **Phases 4 & 6** are unblocked (D2) — browser pool + rate limiter/circuit breaker.
-4. **Phase 7** security: `ALLOWED_ROOTS`=home, private/LAN URLs ALLOWED by default (D5).
-5. Baseline: **190 pytest green**. Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
+1. **Wire the cache + idempotency into the remaining tools** (Phase 5 continuation):
+   - reads: `google_search/news/scholar/images/trends/maps/finance/weather/shopping/books/
+     translate/flights/hotels/visit_page` → `@cached("<tool>")`.
+   - writes: `shorten_url`, `archive_webpage`, `upload_to_s3` → idempotency store (same pattern as
+     `paste_text`: additive `idempotency_key=""` param → update the registry snapshot).
+   - local outputs: `generate_qr`, `extract_video_clip`, `convert_media` → content-addressed paths via
+     `core/atomic.py`.
+2. **Phase 6** (unblocked): `core/ratelimit.py` token bucket (`GOOGLE_RPS`/`GOOGLE_BURST`) +
+   `core/circuit.py` breaker (`CIRCUIT_*`) + transient-only retries w/ jitter. Config already added.
+3. **Phase 4** (unblocked): `core/browser.py` pool with `MAX_BROWSERS` semaphore + lifespan.
+4. **Phase 7** security: `core/fsguard.py` (`ALLOWED_ROOTS`=home) + URL guard
+   (`ALLOW_PRIVATE_URLS` defaults **True**, D5); secrets via env for `fetch_emails`/`upload_to_s3`.
+5. **Phase 9** transports + structured output (SDK already supports `structured_output`).
+6. Then Phases 8, 10, 11, 12 (feeds concurrency/conditional-GET, packaging/CI, docs, v0.4.0).
+7. Baseline: **251 pytest green**. Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
+   Note: `web_utils.py` still has ~54 pre-existing ruff findings (unchanged by this work).
