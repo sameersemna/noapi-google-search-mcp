@@ -5,12 +5,14 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Annotated
 
 from pydantic import AliasChoices, Field
@@ -54,55 +56,154 @@ def _get_feeds_db() -> sqlite3.Connection:
 
 
 def _init_feeds_db(conn: sqlite3.Connection) -> None:
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_type TEXT NOT NULL,
-            identifier TEXT NOT NULL,
-            name TEXT NOT NULL DEFAULT '',
-            feed_url TEXT NOT NULL DEFAULT '',
-            last_checked TEXT,
-            created_at TEXT NOT NULL,
-            UNIQUE(source_type, identifier)
-        );
-        CREATE TABLE IF NOT EXISTS feed_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            subscription_id INTEGER NOT NULL,
-            source_type TEXT NOT NULL,
-            title TEXT NOT NULL DEFAULT '',
-            content TEXT NOT NULL DEFAULT '',
-            url TEXT NOT NULL DEFAULT '',
-            author TEXT NOT NULL DEFAULT '',
-            published_at TEXT NOT NULL DEFAULT '',
-            fetched_at TEXT NOT NULL,
-            metadata TEXT NOT NULL DEFAULT '{}',
-            UNIQUE(subscription_id, url),
-            FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_items_sub ON feed_items(subscription_id);
-        CREATE INDEX IF NOT EXISTS idx_items_type ON feed_items(source_type);
-        CREATE INDEX IF NOT EXISTS idx_items_pub ON feed_items(published_at DESC);
-    """)
-    # FTS5 full-text search index
+    """Create/upgrade the feeds database to the current schema version."""
+    _migrate(conn)
+
+
+# Current schema version. Bump together with a new ``_migrate_to_*`` function.
+_SCHEMA_VERSION = 2
+
+# The feed_items DDL used from v2 onwards. ``dedupe_key`` is the dedupe unit
+# (URL when present, else a content hash) so URL-less items are no longer
+# dropped (B7). The FTS ``AFTER UPDATE`` trigger keeps the index in sync (B5).
+_FEED_ITEMS_DDL = """
+CREATE TABLE IF NOT EXISTS feed_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    source_type TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    published_at TEXT NOT NULL DEFAULT '',
+    fetched_at TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    dedupe_key TEXT NOT NULL DEFAULT '',
+    UNIQUE(subscription_id, dedupe_key),
+    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+);
+"""
+
+_SUBSCRIPTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    feed_url TEXT NOT NULL DEFAULT '',
+    last_checked TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(source_type, identifier)
+);
+"""
+
+_FEED_ITEM_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_items_sub ON feed_items(subscription_id)",
+    "CREATE INDEX IF NOT EXISTS idx_items_type ON feed_items(source_type)",
+    "CREATE INDEX IF NOT EXISTS idx_items_pub ON feed_items(published_at DESC)",
+]
+
+# External-content FTS5 table + the three triggers that keep it consistent.
+# The UPDATE trigger is essential: without it, any future UPDATE desyncs the
+# index (B5).
+_FTS_STATEMENTS = [
+    """CREATE VIRTUAL TABLE IF NOT EXISTS feed_items_fts USING fts5(
+        title, content, author, content='feed_items', content_rowid='id'
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS fts_ai AFTER INSERT ON feed_items BEGIN
+        INSERT INTO feed_items_fts(rowid, title, content, author)
+        VALUES (new.id, new.title, new.content, new.author);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS fts_ad AFTER DELETE ON feed_items BEGIN
+        INSERT INTO feed_items_fts(feed_items_fts, rowid, title, content, author)
+        VALUES ('delete', old.id, old.title, old.content, old.author);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS fts_au AFTER UPDATE ON feed_items BEGIN
+        INSERT INTO feed_items_fts(feed_items_fts, rowid, title, content, author)
+        VALUES ('delete', old.id, old.title, old.content, old.author);
+        INSERT INTO feed_items_fts(rowid, title, content, author)
+        VALUES (new.id, new.title, new.content, new.author);
+    END""",
+]
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _install_fts(conn: sqlite3.Connection) -> None:
+    """Create the FTS table + triggers; rebuild the index from content."""
     try:
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS feed_items_fts USING fts5(
-                title, content, author, content='feed_items', content_rowid='id'
-            )
-        """)
-        conn.executescript("""
-            CREATE TRIGGER IF NOT EXISTS fts_ai AFTER INSERT ON feed_items BEGIN
-                INSERT INTO feed_items_fts(rowid, title, content, author)
-                VALUES (new.id, new.title, new.content, new.author);
-            END;
-            CREATE TRIGGER IF NOT EXISTS fts_ad AFTER DELETE ON feed_items BEGIN
-                INSERT INTO feed_items_fts(feed_items_fts, rowid, title, content, author)
-                VALUES ('delete', old.id, old.title, old.content, old.author);
-            END;
-        """)
-    except Exception:
+        for stmt in _FTS_STATEMENTS:
+            conn.execute(stmt)
+        conn.execute(
+            "INSERT INTO feed_items_fts(feed_items_fts) VALUES('rebuild')"
+        )
+    except sqlite3.OperationalError:
         pass  # FTS5 not available on this build — LIKE fallback used
-    conn.commit()
+
+
+def _migrate_to_1(conn: sqlite3.Connection) -> None:
+    """Migration 1: base schema at v2 shape (fresh databases)."""
+    conn.execute(_SUBSCRIPTIONS_DDL)
+    conn.execute(_FEED_ITEMS_DDL)
+    for stmt in _FEED_ITEM_INDEXES:
+        conn.execute(stmt)
+    _install_fts(conn)
+
+
+def _migrate_to_2(conn: sqlite3.Connection) -> None:
+    """Migration 2: upgrade a pre-hardening (v1) database in place.
+
+    ``CREATE TABLE IF NOT EXISTS`` in migration 1 is a no-op for an existing
+    database, so v1 databases arrive here still missing ``dedupe_key``. Rebuild
+    ``feed_items`` to add it (SQLite cannot add a UNIQUE column in place),
+    backfill ``dedupe_key`` (URL, else a synthetic per-row key), normalize
+    ``published_at`` to ISO-8601 UTC (B4), then resync FTS (B5).
+    """
+    if "dedupe_key" in _table_columns(conn, "feed_items"):
+        return  # already v2-shaped (e.g. a fresh DB created by migration 1)
+
+    conn.execute("ALTER TABLE feed_items RENAME TO feed_items_old")
+    conn.execute(_FEED_ITEMS_DDL)
+    conn.execute(
+        """INSERT INTO feed_items
+           (id, subscription_id, source_type, title, content, url, author,
+            published_at, fetched_at, metadata, dedupe_key)
+           SELECT id, subscription_id, source_type, title, content, url, author,
+                  published_at, fetched_at, metadata,
+                  CASE WHEN url <> '' THEN url ELSE 'legacy-' || id END
+           FROM feed_items_old"""
+    )
+
+    # Normalize published_at in Python (RFC 822 / ISO / offset variants).
+    rows = conn.execute("SELECT id, published_at FROM feed_items").fetchall()
+    for row_id, raw in rows:
+        normalized = _normalize_published(raw or "")
+        if normalized != (raw or ""):
+            conn.execute(
+                "UPDATE feed_items SET published_at = ? WHERE id = ?",
+                (normalized, row_id),
+            )
+
+    conn.execute("DROP TABLE feed_items_old")
+    for stmt in _FEED_ITEM_INDEXES:
+        conn.execute(stmt)
+    _install_fts(conn)
+
+
+_MIGRATIONS = {1: _migrate_to_1, 2: _migrate_to_2}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Run all pending migrations, recording progress in ``PRAGMA user_version``."""
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current >= _SCHEMA_VERSION:
+        return
+    for version in range(current + 1, _SCHEMA_VERSION + 1):
+        _MIGRATIONS[version](conn)
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +233,58 @@ def _like_escape(value: str) -> str:
     SQL statement. Escape the escape character first.
     """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _normalize_published(raw: str) -> str:
+    """Normalize a feed timestamp to ISO-8601 UTC (B4).
+
+    Feeds mix RFC 822 (RSS), ISO 8601 (Atom) and epoch-derived values, so a
+    lexical ``ORDER BY published_at`` sorted incorrectly. Unparseable values
+    are returned unchanged (never dropped).
+    """
+    if not raw:
+        return ""
+    value = raw.strip()
+    if not value:
+        return ""
+    iso_candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        dt = datetime.fromisoformat(iso_candidate)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _dedupe_key(item: dict) -> str:
+    """Deterministic dedupe key for a feed item (B7).
+
+    Prefer the URL. Items without a URL (some podcast / Twitter / arXiv feeds)
+    fall back to a content hash so they are still stored and deduped instead
+    of being silently dropped.
+    """
+    url = (item.get("url") or "").strip()
+    if url:
+        return url
+    material = "|".join(
+        [
+            item.get("source_type", ""),
+            (item.get("title") or "").strip(),
+            (item.get("published") or "").strip(),
+            (item.get("content") or "").strip(),
+        ]
+    )
+    return "hash:" + hashlib.sha256(material.encode("utf-8", "ignore")).hexdigest()
 
 
 def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
@@ -224,24 +377,29 @@ def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
 def _store_items(
     conn: sqlite3.Connection, sub_id: int, source_type: str, items: list[dict]
 ) -> int:
-    """Store feed items in the database; skip duplicates. Returns new-item count."""
+    """Store feed items in the database; skip duplicates. Returns new-item count.
+
+    Dedupe is by ``dedupe_key`` (URL, else content hash) so URL-less items are
+    kept (B7); ``published_at`` is normalized to ISO-8601 UTC (B4).
+    """
     new_count = 0
     now = datetime.now(timezone.utc).isoformat()
     for item in items:
-        url = item.get("url", "")
-        if not url:
+        item_type = item.get("source_type") or source_type
+        dedupe_key = _dedupe_key({**item, "source_type": item_type})
+        if not dedupe_key:
             continue
         cur = conn.execute(
             """INSERT OR IGNORE INTO feed_items
                (subscription_id, source_type, title, content, url, author,
-                published_at, fetched_at, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                published_at, fetched_at, metadata, dedupe_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                sub_id, source_type,
+                sub_id, item_type,
                 item.get("title", ""), item.get("content", ""),
-                url, item.get("author", ""),
-                item.get("published", ""), now,
-                item.get("metadata", "{}"),
+                item.get("url", ""), item.get("author", ""),
+                _normalize_published(item.get("published", "")), now,
+                item.get("metadata", "{}"), dedupe_key,
             ),
         )
         if cur.rowcount > 0:
