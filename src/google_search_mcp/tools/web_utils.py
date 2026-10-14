@@ -12,6 +12,7 @@ import re
 import subprocess
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from email import policy as email_policy
@@ -1100,21 +1101,26 @@ async def upload_to_s3(
                 continue
 
         if mc_path:
-            # Configure alias and upload
-            alias = "noapi_tmp"
-            ep = endpoint or "https://s3.amazonaws.com"
-            subprocess.run(
-                [mc_path, "alias", "set", alias, ep, access_key, secret_key],
-                capture_output=True, timeout=10,
+            # B10: use a per-call RANDOM alias and pass credentials through the
+            # ``MC_HOST_<alias>`` environment variable. The old code used a
+            # fixed alias name (concurrent uploads raced on it) and put the
+            # secret key on argv (world-readable via `ps`).
+            # Verified format (minio/docs, minio-client-settings.rst):
+            #   MC_HOST_<alias>=https://<AccessKey>:<SecretKey>@<endpoint>
+            alias = f"noapi_{uuid.uuid4().hex[:12]}"
+            base = endpoint or "https://s3.amazonaws.com"
+            scheme, sep, rest = base.partition("://")
+            if not sep:
+                scheme, rest = "https", base
+            userinfo = (
+                f"{urllib.parse.quote(access_key, safe='')}:"
+                f"{urllib.parse.quote(secret_key, safe='')}"
             )
+            env = os.environ.copy()
+            env[f"MC_HOST_{alias}"] = f"{scheme}://{userinfo}@{rest}"
             r = subprocess.run(
                 [mc_path, "cp", file_path, f"{alias}/{bucket}/{key}"],
-                capture_output=True, text=True, timeout=300,
-            )
-            # Clean up alias
-            subprocess.run(
-                [mc_path, "alias", "remove", alias],
-                capture_output=True, timeout=5,
+                capture_output=True, text=True, timeout=300, env=env,
             )
             if r.returncode == 0:
                 return f"s3://{bucket}/{key}"
