@@ -124,6 +124,16 @@ def _normalize_subreddit(identifier: str) -> str:
     return ident.strip("/")
 
 
+def _like_escape(value: str) -> str:
+    """Escape LIKE wildcards so user input is matched literally (B6).
+
+    Without this, a query containing ``%`` or ``_`` acts as a wildcard and can
+    match unintended rows. Must be used together with ``ESCAPE '\\'`` in the
+    SQL statement. Escape the escape character first.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _parse_rss_atom(xml_bytes: bytes) -> list[dict]:
     """Parse RSS 2.0 or Atom feed XML into a flat list of items."""
     root = ET.fromstring(xml_bytes)
@@ -816,8 +826,12 @@ async def unsubscribe(
 
         if not row:
             row = conn.execute(
-                "SELECT id, name FROM subscriptions WHERE name LIKE ? OR identifier LIKE ?",
-                (f"%{identifier.strip()}%", f"%{identifier.strip()}%"),
+                "SELECT id, name FROM subscriptions "
+                "WHERE name LIKE ? ESCAPE '\\' OR identifier LIKE ? ESCAPE '\\'",
+                (
+                    f"%{_like_escape(identifier.strip())}%",
+                    f"%{_like_escape(identifier.strip())}%",
+                ),
             ).fetchone()
 
         if not row:
@@ -1014,13 +1028,14 @@ async def search_feeds(
 
         # Fallback to LIKE
         if rows is None:
-            like_q = f"%{query}%"
+            like_q = f"%{_like_escape(query)}%"
             if source_type:
                 rows = conn.execute(
                     """SELECT f.*, s.name as source_name
                        FROM feed_items f
                        JOIN subscriptions s ON s.id = f.subscription_id
-                       WHERE (f.title LIKE ? OR f.content LIKE ?) AND f.source_type = ?
+                       WHERE (f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\')
+                             AND f.source_type = ?
                        ORDER BY f.published_at DESC LIMIT ?""",
                     (like_q, like_q, source_type.lower(), limit),
                 ).fetchall()
@@ -1029,7 +1044,7 @@ async def search_feeds(
                     """SELECT f.*, s.name as source_name
                        FROM feed_items f
                        JOIN subscriptions s ON s.id = f.subscription_id
-                       WHERE f.title LIKE ? OR f.content LIKE ?
+                       WHERE f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\'
                        ORDER BY f.published_at DESC LIMIT ?""",
                     (like_q, like_q, limit),
                 ).fetchall()
@@ -1086,9 +1101,13 @@ async def get_feed_items(
                 """SELECT f.*, s.name as source_name
                    FROM feed_items f
                    JOIN subscriptions s ON s.id = f.subscription_id
-                   WHERE s.name LIKE ? OR s.identifier LIKE ?
+                   WHERE s.name LIKE ? ESCAPE '\\' OR s.identifier LIKE ? ESCAPE '\\'
                    ORDER BY f.published_at DESC LIMIT ?""",
-                (f"%{source}%", f"%{source}%", limit),
+                (
+                    f"%{_like_escape(source)}%",
+                    f"%{_like_escape(source)}%",
+                    limit,
+                ),
             ).fetchall()
         elif source_type:
             rows = conn.execute(
