@@ -5,6 +5,7 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 """
 
 import asyncio
+import re
 from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, Image
