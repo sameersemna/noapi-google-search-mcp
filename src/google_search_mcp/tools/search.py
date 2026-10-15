@@ -12,6 +12,7 @@ from mcp.server.fastmcp import Context, Image
 from playwright.async_api import async_playwright
 
 from ..config import TIME_RANGE_MAP
+from ..core.cache import cached
 from ..server import (
     mcp,
     browse_google,
@@ -89,6 +90,7 @@ def _build_google_search_url(
     return url, stride
 
 
+@cached("google_search")
 async def do_google_search(
     query: str,
     num_results: int = 5,
@@ -308,6 +310,7 @@ async def google_search(
 # google_news
 # ---------------------------------------------------------------------------
 
+@cached("google_news")
 async def do_google_news(query: str, num_results: int = 5) -> list:
     """Launch headless Chromium, search Google News, and scrape results."""
     encoded_query = quote_plus(query)
@@ -500,6 +503,7 @@ async def google_news(query: str, num_results: int = 5) -> list:
 # google_scholar
 # ---------------------------------------------------------------------------
 
+@cached("google_scholar")
 async def do_google_scholar(query: str, num_results: int = 5) -> str:
     """Launch headless Chromium, search Google Scholar, and scrape results."""
     encoded_query = quote_plus(query)
@@ -768,6 +772,7 @@ async def google_images(query: str, num_results: int = 5) -> list:
 # google_trends
 # ---------------------------------------------------------------------------
 
+@cached("google_trends")
 async def do_google_trends(query: str) -> str:
     """Launch headless Chromium, check Google Trends, and scrape interest data."""
     encoded_query = quote_plus(query)

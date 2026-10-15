@@ -10,6 +10,7 @@ from urllib.parse import quote_plus
 from mcp.server.fastmcp import Context, Image
 from playwright.async_api import async_playwright
 
+from ..core.cache import cached
 from ..server import (
     mcp,
     browse_google,
@@ -27,6 +28,7 @@ from ..server import (
 # google_maps
 # ---------------------------------------------------------------------------
 
+@cached("google_maps")
 async def do_google_maps(query: str, num_results: int = 5) -> list:
     """Search Google Maps for places and return results with a map screenshot."""
     encoded_query = quote_plus(query)
@@ -269,6 +271,7 @@ async def google_maps(query: str, num_results: int = 5) -> list:
 # ---------------------------------------------------------------------------
 
 
+@cached("google_maps_directions")
 async def do_google_maps_directions(
     origin: str, destination: str, mode: str = "driving"
 ) -> list:

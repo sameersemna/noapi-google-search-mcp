@@ -61,6 +61,63 @@ PER_TOOL_TTL: dict[str, int] = {
 }
 
 
+# Result strings containing any of these markers are failures / blocks and
+# must NEVER be cached (a cached block would persist long after the block
+# lifted).
+_ERROR_MARKERS: tuple[str, ...] = (
+    "failed",
+    "blocked",
+    "bot detection",
+    "rate limit",
+    "rate-limit",
+    "captcha",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "not found:",
+    "no results found",
+    "could not",
+    "unavailable",
+)
+
+
+def default_should_cache(result: Any) -> bool:
+    """Return ``False`` for empty or error/blocked results (never cache those)."""
+    if result is None:
+        return False
+    if isinstance(result, str):
+        text = result.strip()
+        if not text:
+            return False
+        lowered = text.casefold()
+        if any(marker in lowered for marker in _ERROR_MARKERS):
+            return False
+        return True
+    if isinstance(result, (list, dict)):
+        return len(result) > 0
+    return False
+
+
+def _encode(result: Any) -> str | None:
+    """Serialise a cacheable result into a JSON envelope."""
+    try:
+        if isinstance(result, str):
+            return json.dumps({"t": "s", "v": result})
+        if isinstance(result, (list, dict)):
+            return json.dumps({"t": "j", "v": result})
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _decode(payload: str) -> Any:
+    try:
+        envelope = json.loads(payload)
+        return envelope["v"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def _normalize_value(value: Any) -> Any:
     """Normalize an argument value so semantically-equal calls share a key."""
     if value is None:
@@ -205,26 +262,33 @@ class Cache:
         self.misses = 0
         self.singleflight_collapsed = 0
 
-    async def get(self, key: str) -> str | None:
+    async def get(self, key: str) -> Any:
         if not config.ENABLE_CACHE:
             return None
-        value = await self.memory.get(key)
-        if value is None and self.disk is not None:
-            value = await self.disk.get(key)
-            if value is not None:
-                await self.memory.set(key, value, config.CACHE_TTL_SECONDS)
+        payload = await self.memory.get(key)
+        if payload is None and self.disk is not None:
+            payload = await self.disk.get(key)
+            if payload is not None:
+                await self.memory.set(key, payload, config.CACHE_TTL_SECONDS)
+        if payload is None:
+            self.misses += 1
+            return None
+        value = _decode(payload)
         if value is None:
             self.misses += 1
-        else:
-            self.hits += 1
+            return None
+        self.hits += 1
         return value
 
-    async def set(self, key: str, value: str, ttl: int) -> None:
+    async def set(self, key: str, value: Any, ttl: int) -> None:
         if not config.ENABLE_CACHE:
             return
-        await self.memory.set(key, value, ttl)
+        payload = _encode(value)
+        if payload is None:
+            return
+        await self.memory.set(key, payload, ttl)
         if self.disk is not None:
-            await self.disk.set(key, value, ttl)
+            await self.disk.set(key, payload, ttl)
 
     async def singleflight(
         self, key: str, factory: Callable[[], Awaitable[str]]
@@ -268,16 +332,24 @@ cache = Cache(
 )
 
 
-def cached(tool_name: str, ttl: int | None = None):
-    """Decorator: read-through cache a read-only async tool function.
+def cached(
+    tool_name: str,
+    ttl: int | None = None,
+    should_cache: Callable[[Any], bool] | None = None,
+):
+    """Decorator: read-through cache an async tool function.
 
     The cache key is derived from the function's bound arguments (excluding
-    ``ctx`` and ``fresh``). Only successful results are cached; exceptions
+    ``ctx`` and ``fresh``). Only results that pass *should_cache* (default:
+    non-empty and not an error/blocked message) are stored; exceptions
     propagate and are never stored. ``fresh=True`` bypasses the read.
+
+    Handles ``str`` and JSON-serialisable ``list``/``dict`` results.
     """
     effective_ttl = ttl if ttl is not None else PER_TOOL_TTL.get(
         tool_name, config.CACHE_TTL_SECONDS
     )
+    predicate = should_cache or default_should_cache
 
     def _decorator(fn: Callable[..., Awaitable[str]]):
         sig = inspect.signature(fn)
@@ -299,7 +371,7 @@ def cached(tool_name: str, ttl: int | None = None):
                     return hit
 
             result = await cache.singleflight(key, lambda: fn(*args, **kwargs))
-            if isinstance(result, str) and result:
+            if predicate(result):
                 await cache.set(key, result, effective_ttl)
             return result
 

@@ -10,6 +10,7 @@ from urllib.parse import quote_plus
 from mcp.server.fastmcp import Context, Image
 from playwright.async_api import async_playwright
 
+from ..core.cache import cached
 from ..server import (
     mcp,
     browse_google,
@@ -100,6 +101,7 @@ def _translate_via_mymemory(text: str, sl: str, tl: str) -> str:
     return "\n".join(out).strip()
 
 
+@cached("google_translate")
 async def do_google_translate(text: str, to_language: str, from_language: str = "") -> str:
     """Translate text using Google Translate directly."""
     # Resolve language names to codes
@@ -248,6 +250,7 @@ async def google_translate(text: str, to_language: str, from_language: str = "")
 # google_flights
 # ---------------------------------------------------------------------------
 
+@cached("google_flights")
 async def do_google_flights(
     origin: str, destination: str, date: str = "", return_date: str = ""
 ) -> str:
@@ -431,6 +434,7 @@ async def google_flights(
 # google_hotels
 # ---------------------------------------------------------------------------
 
+@cached("google_hotels")
 async def do_google_hotels(query: str, num_results: int = 5) -> list:
     """Search Google for hotel information."""
     encoded_query = quote_plus(f"hotels {query}")

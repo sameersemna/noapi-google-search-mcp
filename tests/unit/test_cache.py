@@ -114,3 +114,52 @@ def test_disk_tier_roundtrip(tmp_path):
     # a second cache instance sharing the disk file should see the value
     c2 = cachemod.Cache(max_entries=4, disk_path=str(tmp_path / "c.db"))
     assert asyncio.run(c2.get("k1")) == "v1"
+
+
+# ── error/blocked results must never be cached ──────────────────────────────
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Search failed. Please try again.",
+        "Search blocked by Google bot detection.",
+        "Your IP may be temporarily rate-limited.",
+        "Upstream timeout",
+        "",
+        "   ",
+    ],
+)
+def test_default_should_cache_rejects_errors(text):
+    assert cachemod.default_should_cache(text) is False
+
+
+@pytest.mark.parametrize("value", ["Python is a language.", [{"a": 1}], {"k": "v"}])
+def test_default_should_cache_accepts_content(value):
+    assert cachemod.default_should_cache(value) is True
+
+
+def test_blocked_result_is_not_cached(fresh_cache):
+    calls = {"n": 0}
+
+    @cachemod.cached("google_search", ttl=60)
+    async def tool(query: str):
+        calls["n"] += 1
+        return "Search blocked by Google bot detection."
+
+    asyncio.run(tool("q"))
+    asyncio.run(tool("q"))
+    assert calls["n"] == 2, "blocked results must not be cached"
+
+
+def test_list_result_is_cached_and_restored(fresh_cache):
+    calls = {"n": 0}
+
+    @cachemod.cached("google_news", ttl=60)
+    async def tool(query: str):
+        calls["n"] += 1
+        return [{"title": "x", "url": "https://example.invalid"}]
+
+    first = asyncio.run(tool("q"))
+    second = asyncio.run(tool("q"))
+    assert first == second == [{"title": "x", "url": "https://example.invalid"}]
+    assert calls["n"] == 1, "list results must be cached"

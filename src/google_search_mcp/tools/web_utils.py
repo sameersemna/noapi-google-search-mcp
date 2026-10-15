@@ -38,6 +38,7 @@ from ..utils.text import format_timestamp
 from playwright.async_api import async_playwright
 
 
+@cached("visit_page")
 async def _fetch_page_text(url: str) -> str:
     """Fetch a URL with headless Chromium and extract readable text."""
     async with async_playwright() as pw:

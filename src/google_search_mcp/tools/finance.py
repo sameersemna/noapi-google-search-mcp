@@ -11,6 +11,7 @@ from urllib.parse import quote_plus
 from mcp.server.fastmcp import Context, Image
 from playwright.async_api import async_playwright
 
+from ..core.cache import cached
 from ..server import (
     mcp,
     browse_google,
@@ -28,6 +29,7 @@ from ..server import (
 # google_finance
 # ---------------------------------------------------------------------------
 
+@cached("google_finance")
 async def do_google_finance(query: str) -> str:
     """Search Google Finance for stock/market data."""
     encoded_query = quote_plus(query)
@@ -204,6 +206,7 @@ async def google_finance(query: str) -> str:
 # google_weather
 # ---------------------------------------------------------------------------
 
+@cached("google_weather")
 async def do_google_weather(location: str) -> str:
     """Get weather data from Google's weather card."""
     encoded_location = quote_plus(f"weather {location}")
@@ -360,6 +363,7 @@ async def google_weather(location: str) -> str:
 # google_shopping
 # ---------------------------------------------------------------------------
 
+@cached("google_shopping")
 async def do_google_shopping(query: str, num_results: int = 5) -> list:
     """Search Google Shopping for products and prices."""
     encoded_query = quote_plus(query)
@@ -581,6 +585,7 @@ async def google_shopping(query: str, num_results: int = 5) -> list:
 # google_books
 # ---------------------------------------------------------------------------
 
+@cached("google_books")
 async def do_google_books(query: str, num_results: int = 5) -> str:
     """Search Google Books for books and publications."""
     encoded_query = quote_plus(query)
