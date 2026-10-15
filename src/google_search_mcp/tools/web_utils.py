@@ -23,7 +23,7 @@ from pathlib import Path
 from mcp.server.fastmcp import Context, Image
 
 from ..config import IMAP_SERVERS, MAX_PAGE_CHARS, TRANSCRIPT_CACHE_DIR
-from ..core import idempotency
+from ..core import fsguard, idempotency, netguard
 from ..core.cache import cached
 from ..server import (
     mcp,
@@ -41,6 +41,7 @@ from playwright.async_api import async_playwright
 @cached("visit_page")
 async def _fetch_page_text(url: str) -> str:
     """Fetch a URL with headless Chromium and extract readable text."""
+    netguard.assert_url_allowed(url)
     async with async_playwright() as pw:
         context = await launch_browser(pw)
         page = await context.new_page()
@@ -130,6 +131,7 @@ async def transcribe_local(
         model_size: Whisper model size (tiny/base/small/medium/large). Default: tiny.
         language: Language code (e.g. "en", "de", "fr"). Auto-detected if empty.
     """
+    fsguard.assert_path_allowed(file_path)
     file_path = os.path.expanduser(file_path)
     if not os.path.isfile(file_path):
         return f"File not found: {file_path}"
@@ -417,6 +419,7 @@ async def read_document(
     Args:
         file_path: Absolute path to the document file.
     """
+    fsguard.assert_path_allowed(file_path)
     file_path = os.path.expanduser(file_path)
     if not os.path.isfile(file_path):
         return f"File not found: {file_path}"
@@ -500,8 +503,8 @@ IMAP_SERVERS: dict[str, str] = {
 
 @mcp.tool()
 async def fetch_emails(
-    email_address: str,
-    password: str,
+    email_address: str = "",
+    password: str = "",
     imap_server: str = "",
     folder: str = "INBOX",
     search: str = "UNSEEN",
@@ -515,16 +518,22 @@ async def fetch_emails(
 
     For Outlook: enable IMAP in settings, use your regular password or app password.
 
+    SECURITY: prefer setting credentials via environment variables so they are
+    never placed in the model transcript:  NOAPI_MCP_IMAP_USER,
+    NOAPI_MCP_IMAP_PASSWORD. The explicit arguments are still accepted for
+    backward compatibility. Read-only: messages are fetched with BODY.PEEK and
+    are not marked as seen.
+
     Sample prompts that trigger this tool:
-        - "Check my email: user@gmail.com password: xxxx-xxxx-xxxx-xxxx"
         - "Fetch unread emails from my Gmail"
         - "Search my inbox for emails about invoice"
         - "Get my latest 5 emails"
         - "Show emails from sender@example.com"
 
     Args:
-        email_address: Your email address.
-        password: Password or app password (Gmail requires app password).
+        email_address: Your email address. Falls back to NOAPI_MCP_IMAP_USER.
+        password: Password or app password. Falls back to NOAPI_MCP_IMAP_PASSWORD.
+            Prefer the environment variable — do not put secrets in prompts.
         imap_server: IMAP server hostname. Auto-detected for Gmail/Outlook/Yahoo if empty.
         folder: Mailbox folder. Default: INBOX. Common: INBOX, Sent, Drafts, Trash, Spam.
         search: IMAP search criteria. Default: UNSEEN (unread).
@@ -532,6 +541,15 @@ async def fetch_emails(
             SUBJECT "keyword", SINCE "01-Jan-2024", BEFORE "01-Feb-2024".
         limit: Maximum number of emails to fetch. Default: 10.
     """
+    email_address = email_address or os.environ.get("NOAPI_MCP_IMAP_USER", "")
+    password = password or os.environ.get("NOAPI_MCP_IMAP_PASSWORD", "")
+    if not email_address or not password:
+        return (
+            "Missing email credentials. Set NOAPI_MCP_IMAP_USER and "
+            "NOAPI_MCP_IMAP_PASSWORD in the environment (recommended), or pass "
+            "email_address/password arguments."
+        )
+
     # Auto-detect IMAP server from email domain
     if not imap_server:
         domain = email_address.split("@")[-1].lower()
@@ -560,7 +578,10 @@ async def fetch_emails(
 
             emails: list[dict] = []
             for mid in ids:
-                _, data = mail.fetch(mid, "(RFC822)")
+                # BODY.PEEK[] fetches the full message WITHOUT setting the
+                # \Seen flag, so this tool is genuinely read-only. Plain
+                # "(RFC822)" would silently mark every fetched mail as read.
+                _, data = mail.fetch(mid, "(BODY.PEEK[])")
                 if not data or not data[0] or not isinstance(data[0], tuple):
                     continue
                 msg = parser.parsebytes(data[0][1])
@@ -899,6 +920,7 @@ async def archive_webpage(
     """
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+    netguard.assert_url_allowed(url)
 
     def _archive() -> str:
         # First check if already archived

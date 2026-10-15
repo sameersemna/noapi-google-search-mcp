@@ -569,11 +569,16 @@ IDEMPOTENCY_DB_PATH: str = env(
 )
 IDEMPOTENCY_WINDOW_SECONDS: int = env_int("IDEMPOTENCY_WINDOW_SECONDS", 24 * 3600)
 
-# Security. ``ALLOWED_ROOTS`` defaults to the user's home (D5). Private/LAN
-# URLs are ALLOWED by default to protect LAN-local setups (D5).
+# Security. ``ALLOWED_ROOTS`` defaults to the user's home plus the system temp
+# directory (so /tmp scratch files keep working). Private/LAN URLs are ALLOWED
+# by default to protect LAN-local setups (D5).
+import tempfile as _tempfile
+
 ALLOWED_ROOTS: tuple[str, ...] = tuple(
     p.strip()
-    for p in env("ALLOWED_ROOTS", HOME).split(os.pathsep)
+    for p in env(
+        "ALLOWED_ROOTS", os.pathsep.join((HOME, _tempfile.gettempdir()))
+    ).split(os.pathsep)
     if p.strip()
 )
 ALLOW_PRIVATE_URLS: bool = env_flag("ALLOW_PRIVATE_URLS", True)

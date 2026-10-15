@@ -19,6 +19,7 @@ from ..config import (
     MAX_OBJECTS,
     MOBILENET_ONNX_PATH,
 )
+from ..core import fsguard
 from ..server import (
     mcp,
     browse_google,
@@ -759,6 +760,8 @@ async def list_images(directory: str = "") -> str:
         directory: Folder to scan for images. Defaults to ~/lens/.
     """
     scan_dir = directory.strip() if directory.strip() else DEFAULT_IMAGE_DIR
+    fsguard.assert_path_allowed(scan_dir)
+    fsguard.assert_path_allowed(scan_dir)
     scan_dir = str(Path(scan_dir).expanduser().resolve())
 
     if not os.path.isdir(scan_dir):

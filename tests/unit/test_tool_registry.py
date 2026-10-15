@@ -37,7 +37,7 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "fetch_emails": (
         ("email_address", "folder", "imap_server", "limit", "password", "search"),
-        ("email_address", "password"),
+        (),
     ),
     "generate_qr": (("data", "output_path", "size"), ("data",)),
     "get_feed_items": (("limit", "source", "source_type"), ()),
