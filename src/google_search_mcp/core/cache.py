@@ -90,9 +90,7 @@ def default_should_cache(result: Any) -> bool:
         if not text:
             return False
         lowered = text.casefold()
-        if any(marker in lowered for marker in _ERROR_MARKERS):
-            return False
-        return True
+        return not any(marker in lowered for marker in _ERROR_MARKERS)
     if isinstance(result, (list, dict)):
         return len(result) > 0
     return False
