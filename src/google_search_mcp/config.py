@@ -556,6 +556,10 @@ def env_float(name: str, default: float) -> float:
 # Maximum number of concurrent Chromium contexts (browser pool cap).
 MAX_BROWSERS: int = env_int("MAX_BROWSERS", 3)
 
+# Whether to reuse one shared Chromium context across browser tool calls
+# (see docs/adr/0002-browser-pool.md). Set to 0 to restore launch-per-call.
+BROWSER_POOL: bool = env_flag("BROWSER_POOL", True)
+
 # Read-through cache for read-only tools. TTL is a default; per-tool TTLs are
 # applied in ``core/cache.py``.
 ENABLE_CACHE: bool = env_flag("ENABLE_CACHE", True)

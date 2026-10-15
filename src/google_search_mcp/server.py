@@ -183,6 +183,20 @@ _REQUIRED_AUTH_COOKIES: set[str] = {
 }
 
 
+async def _shutdown_services(health) -> None:
+    """Stop background services on shutdown (health server, browser pool)."""
+    try:
+        await health.stop()
+    except Exception:  # noqa: BLE001 - shutdown is best-effort
+        pass
+    try:
+        from .core import browser as _browser_pool
+
+        await _browser_pool.aclose()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[shutdown] browser pool close failed: {exc}", file=sys.stderr)
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP):
     """Validate Google cookies at server startup.
@@ -235,7 +249,7 @@ async def app_lifespan(server: FastMCP):
         try:
             yield {}
         finally:
-            await health.stop()
+            await _shutdown_services(health)
         return
 
     print("Validating Google cookies at startup...", file=sys.stderr)
@@ -290,7 +304,7 @@ async def app_lifespan(server: FastMCP):
                     try:
                         yield {}
                     finally:
-                        await health.stop()
+                        await _shutdown_services(health)
                     return
                 else:
                     print("Cookie validation still FAILED after login.", file=sys.stderr)
@@ -321,7 +335,7 @@ async def app_lifespan(server: FastMCP):
     try:
         yield {}
     finally:
-        await health.stop()
+        await _shutdown_services(health)
 
 
 mcp = FastMCP("google-search", lifespan=app_lifespan)
