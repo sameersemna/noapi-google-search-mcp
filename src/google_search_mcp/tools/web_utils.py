@@ -25,6 +25,7 @@ from mcp.server.fastmcp import Context, Image
 from ..config import IMAP_SERVERS, MAX_PAGE_CHARS, TRANSCRIPT_CACHE_DIR
 from ..core import fsguard, idempotency, netguard
 from ..core.cache import cached
+from ..errors import UserInputError
 from ..server import (
     mcp,
     _fetch_url_bytes,
@@ -36,6 +37,27 @@ from ..server import (
 )
 from ..utils.text import format_timestamp
 from playwright.async_api import async_playwright
+
+
+def _normalize_web_url(url: str) -> str:
+    """Scheme-check, add a missing scheme, then run the SSRF guard.
+
+    Bare hosts ("example.com/x") are accepted for backward compatibility, but
+    an *explicit* non-http(s) scheme (``file:``, ``data:``, ``javascript:``)
+    is rejected before prefixing, which would otherwise mask it.
+    """
+    from urllib.parse import urlparse
+
+    scheme = urlparse(url.strip()).scheme.lower()
+    if scheme and scheme not in ("http", "https"):
+        raise UserInputError(
+            f"Refusing to fetch {url!r}: scheme '{scheme}' is not allowed "
+            f"(use http or https)."
+        )
+    if not scheme:
+        url = "https://" + url
+    netguard.assert_url_allowed(url)
+    return url
 
 
 @cached("visit_page")
@@ -792,9 +814,13 @@ async def paste_text(
 @mcp.tool()
 async def shorten_url(
     url: str,
+    idempotency_key: str = "",
     ctx: Context = None,
 ) -> str:
     """Shorten a long URL using TinyURL. No account or API key needed.
+
+    Idempotent: repeating the same URL within 24h returns the existing short
+    link instead of creating a new one (supply idempotency_key to override).
 
     Sample prompts that trigger this tool:
         - "Shorten this URL: https://very-long-url.com/path/..."
@@ -803,9 +829,15 @@ async def shorten_url(
 
     Args:
         url: The URL to shorten.
+        idempotency_key: Optional key to dedupe retries. Default: derived from url.
     """
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    url = _normalize_web_url(url)
+
+    key = idempotency_key or idempotency.derived_key("shorten_url", url)
+    cached = await idempotency.lookup(key)
+    if cached is not None:
+        return f"{cached}\n{idempotency.CACHED_NOTE}"
+    owned = await idempotency.store.reserve(key, "shorten_url")
 
     def _shorten() -> str:
         api_url = f"https://tinyurl.com/api-create.php?url={urllib.request.quote(url, safe='')}"
@@ -818,9 +850,18 @@ async def shorten_url(
     try:
         short = await asyncio.to_thread(_shorten)
     except Exception as e:
+        if owned:
+            await idempotency.abandon(key)
         return f"Failed to shorten URL: {e}"
 
-    return f"Short URL: {short}\nOriginal: {url}"
+    result = f"Short URL: {short}\nOriginal: {url}"
+    if owned:
+        await idempotency.complete(key, "shorten_url", result)
+    else:
+        prior = await idempotency.lookup(key)
+        if prior is not None:
+            return f"{prior}\n{idempotency.CACHED_NOTE}"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +940,7 @@ async def generate_qr(
 @mcp.tool()
 async def archive_webpage(
     url: str,
+    idempotency_key: str = "",
     ctx: Context = None,
 ) -> str:
     """Archive a webpage on archive.today (archive.is) for permanent preservation.
@@ -909,6 +951,9 @@ async def archive_webpage(
         - Product pages with specific prices
         - Any web content you want to reference later
 
+    Idempotent: repeating the same URL within 24h returns the existing snapshot
+    instead of submitting a duplicate save (supply idempotency_key to override).
+
     Sample prompts that trigger this tool:
         - "Archive this page: https://example.com/article"
         - "Save this webpage to archive.is"
@@ -917,10 +962,14 @@ async def archive_webpage(
 
     Args:
         url: The URL of the webpage to archive.
+        idempotency_key: Optional key to dedupe retries. Default: derived from url.
     """
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    netguard.assert_url_allowed(url)
+    url = _normalize_web_url(url)
+
+    key = idempotency_key or idempotency.derived_key("archive_webpage", url)
+    cached = await idempotency.lookup(key)
+    if cached is not None:
+        return f"{cached}\n{idempotency.CACHED_NOTE}"
 
     def _archive() -> str:
         # First check if already archived
@@ -969,10 +1018,12 @@ async def archive_webpage(
     except Exception as e:
         return format_error("Webpage archiving", e)
 
-    return (
+    result = (
         f"Archived: {archive_url}\n"
         f"Original: {url}"
     )
+    await idempotency.complete(key, "archive_webpage", result)
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from google_search_mcp.server import mcp
 
 # name -> (sorted param names, sorted required param names)
 EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "archive_webpage": (("url",), ("url",)),
+    "archive_webpage": (("idempotency_key", "url"), ("url",)),
     "check_cookies": ((), ()),
     "check_feeds": (("source_type",), ()),
     "convert_media": (
@@ -93,7 +93,7 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("context_segments", "model_size", "query", "url"),
         ("query", "url"),
     ),
-    "shorten_url": (("url",), ("url",)),
+    "shorten_url": (("idempotency_key", "url"), ("url",)),
     "subscribe": (("identifier", "name", "source_type"), ("identifier", "source_type")),
     "transcribe_local": (("file_path", "language", "model_size"), ("file_path",)),
     "transcribe_video": (
