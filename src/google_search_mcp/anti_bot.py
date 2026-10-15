@@ -54,27 +54,26 @@ from .browser import (
 from .captcha import is_blocked, try_solve_captcha
 from .config import (
     ENABLE_MANUAL_INTERVENTION,
-    GOOGLE_REQUEST_MIN_GAP,
     MANUAL_INTERVENTION_REASONS,
     MAX_GOOGLE_RETRIES,
     RETRY_BACKOFF_SECONDS,
 )
 
 
-# ── Session-level rate limiter ──
-
-_last_request_time: float = 0.0
+# ── Session-level rate limiter (delegates to core.ratelimit) ──
 
 
 async def _enforce_rate_limit() -> None:
-    """Ensure minimum gap between consecutive Google requests."""
-    global _last_request_time
-    if _last_request_time > 0:
-        elapsed = time.time() - _last_request_time
-        if elapsed < GOOGLE_REQUEST_MIN_GAP:
-            wait = GOOGLE_REQUEST_MIN_GAP - elapsed + random.uniform(0.1, 0.5)
-            await asyncio.sleep(wait)
-    _last_request_time = time.time()
+    """Throttle Google requests via the shared token-bucket limiter.
+
+    Delegates to ``core.ratelimit`` so the per-upstream budget is enforced in
+    one place (config: ``NOAPI_MCP_GOOGLE_RPS`` / ``NOAPI_MCP_GOOGLE_BURST``).
+    The legacy ``GOOGLE_REQUEST_MIN_GAP`` setting is preserved as a floor by
+    the caller-side default rate when unset.
+    """
+    from .core import ratelimit
+
+    await ratelimit.acquire_for_url("https://www.google.com/")
 
 
 async def _is_any_block(page) -> tuple[bool, str]:
@@ -230,6 +229,12 @@ async def browse_google(
         fallback was used / all retries exhausted.
     """
     await _enforce_rate_limit()
+
+    # Fail fast while a Google block is in effect: retrying immediately only
+    # deepens the block. Cache hits never reach here (they are served before
+    # the scrape), so serving cached/non-Google results still works.
+    from .core import circuit
+    circuit.google_breaker.check()
 
     async with async_playwright() as pw:
         # Mutable holders so the manual-intervention flow can swap in a
@@ -439,10 +444,27 @@ async def browse_google(
                         await save_cookies(context)
                     except Exception:
                         pass
+                # Open the breaker so subsequent calls fail fast instead of
+                # immediately re-hitting Google (cooldown escalates on repeats).
+                try:
+                    from .core import circuit
+                    cooldown = circuit.google_breaker.record_block()
+                    print(
+                        f"[browse_google] Circuit opened for {int(cooldown)}s "
+                        f"(reason={reason or 'unknown'}).",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception:
+                    pass
                 yield None
                 return
 
             # ── Success — yield the page to the caller ──
+            try:
+                from .core import circuit
+                circuit.google_breaker.record_success()
+            except Exception:
+                pass
             try:
                 await take_debug_screenshot(page, f"{screenshot_label}_08_ok")
             except Exception:

@@ -578,8 +578,9 @@ ALLOWED_ROOTS: tuple[str, ...] = tuple(
 )
 ALLOW_PRIVATE_URLS: bool = env_flag("ALLOW_PRIVATE_URLS", True)
 
-# Google request rate (token bucket, requests/second) + burst.
-GOOGLE_RPS: float = env_float("GOOGLE_RPS", 0.5)
+# Google request rate (token bucket, requests/second) + burst. The default
+# derives from the legacy GOOGLE_REQUEST_MIN_GAP so existing tuning is kept.
+GOOGLE_RPS: float = env_float("GOOGLE_RPS", 1.0 / max(GOOGLE_REQUEST_MIN_GAP, 0.1))
 GOOGLE_BURST: int = env_int("GOOGLE_BURST", 2)
 
 # Circuit breaker for Google blocks.

@@ -706,8 +706,18 @@ def _install_metrics_wrappers() -> None:
             ok = True
             try:
                 return await _orig(arguments, context, convert_result)
-            except Exception:
+            except asyncio.CancelledError:
                 ok = False
+                raise
+            except Exception as exc:
+                ok = False
+                # Convert our typed failures into MCP ToolErrors so the client
+                # sees isError=true with an actionable message instead of a
+                # generic crash. Non-GoogleMcpError exceptions re-raise as-is.
+                from .errors import GoogleMcpError, to_tool_error
+
+                if isinstance(exc, GoogleMcpError):
+                    raise to_tool_error(exc, tool=_name) from exc
                 raise
             finally:
                 latency_ms = (_time.monotonic() - start) * 1000.0
