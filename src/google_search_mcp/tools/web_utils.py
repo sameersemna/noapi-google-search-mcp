@@ -24,6 +24,7 @@ from mcp.server.fastmcp import Context, Image
 
 from ..config import IMAP_SERVERS, MAX_PAGE_CHARS, TRANSCRIPT_CACHE_DIR
 from ..core import fsguard, idempotency, netguard
+from ..core.browser import pooled_browser
 from ..core.cache import cached
 from ..errors import UserInputError
 from ..server import (
@@ -32,11 +33,9 @@ from ..server import (
     _transcribe_audio,
     _transcript_cache_path,
     format_error,
-    launch_browser,
     strip_html,
 )
 from ..utils.text import format_timestamp
-from playwright.async_api import async_playwright
 
 
 def _normalize_web_url(url: str) -> str:
@@ -64,10 +63,7 @@ def _normalize_web_url(url: str) -> str:
 async def _fetch_page_text(url: str) -> str:
     """Fetch a URL with headless Chromium and extract readable text."""
     netguard.assert_url_allowed(url)
-    async with async_playwright() as pw:
-        context = await launch_browser(pw)
-        page = await context.new_page()
-
+    async with pooled_browser() as (context, page):
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)

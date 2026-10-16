@@ -151,6 +151,70 @@ class BrowserPool:
 pool = BrowserPool()
 
 
+class _SharedContextProxy:
+    """Proxy for the pool's shared context whose ``close()`` is a no-op.
+
+    Tool call sites close the context they are handed at the end of a call
+    (``finally: await context.close()``). When that context is the *shared*
+    pooled one, actually closing it would defeat the pool, so the proxy
+    swallows ``close()`` while delegating every other attribute to the real
+    context (``load_cookies``/``save_cookies``/``new_page``/... keep working).
+    """
+
+    __slots__ = ("_ctx",)
+
+    def __init__(self, ctx: Any):
+        self._ctx = ctx
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ctx, name)
+
+    async def close(self) -> None:
+        return None
+
+
+@asynccontextmanager
+async def pooled_browser(
+    viewport: dict | None = None, *, headless: bool = True
+) -> AsyncIterator[tuple[Any, Any]]:
+    """Yield ``(context, page)`` from the shared pool, or a per-call launch.
+
+    Drop-in replacement for the repeated boilerplate::
+
+        async with async_playwright() as pw:
+            context = await launch_browser(pw, viewport=...)
+            page = await context.new_page()
+            try:
+                ...
+            finally:
+                await context.close()
+
+    With the pool enabled (default) the shared Chromium context is reused and
+    only the per-call page is closed — the yielded context proxy makes
+    ``context.close()`` a no-op so existing ``finally`` blocks stay correct.
+    Set ``NOAPI_MCP_BROWSER_POOL=0`` to restore per-call launches.
+    """
+    if enabled():
+        async with pool.page(viewport=viewport) as page:
+            yield _SharedContextProxy(page.context), page
+        return
+
+    from playwright.async_api import async_playwright
+
+    from ..browser import launch_browser
+
+    async with async_playwright() as pw:
+        context = await launch_browser(pw, viewport=viewport, headless=headless)
+        page = await context.new_page()
+        try:
+            yield context, page
+        finally:
+            try:
+                await context.close()
+            except Exception:  # noqa: BLE001 - close is best effort
+                pass
+
+
 async def aclose() -> None:
     """Shut the shared pool down (called from the server lifespan)."""
     await pool.aclose()
