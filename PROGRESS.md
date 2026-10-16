@@ -4,10 +4,10 @@
 > **RULE: read this file first at the start of every session; update it before every commit.**
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
-## Current phase: 8 — Feeds Subsystem Optimization  *(Phase 4 ✅ done; next: Phase 8 feeds, or Phase 7/5 remainders)*
-## Current step: 8.0 — Phase 4 COMPLETE (shared browser pool, 8.58x faster per call)
+## Current phase: 8 — Feeds Subsystem Optimization  ✅ COMPLETE  *(next: Phase 9 protocol polish / Phase 7+5 remainders)*
+## Current step: 8.x — concurrent check_feeds, conditional GET (migration 3), batch inserts, bm25+snippet, since/until, retention
 ## Status: in-progress
-## Last green commit: tip of `hardening/v0.4` (**340 pytest green**) — baseline was `cc37fd3` (143 green)
+## Last green commit: tip of `hardening/v0.4` (**358 pytest green**) — baseline was `cc37fd3` (143 green)
 
 ---
 
@@ -42,8 +42,7 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 - [ ] **Phase 5** — Idempotency, ToolAnnotations, caching *(✅ annotations (42); ✅ TTL cache + singleflight wired into all read-only lookups; ✅ idempotency store wired into paste_text/shorten_url/archive_webpage + atomic writes. TODO: upload_to_s3, content-addressed local outputs)*
 - [ ] **Phase 6** — Rate limiting, retries, circuit breaker *(✅ token bucket + breaker + transient-only retries, wired into browse_google; retry helper available but not yet applied to non-Google fetches)*
 - [ ] **Phase 7** — Security hardening *(✅ netguard (SSRF) + fsguard; ✅ secrets via env for fetch_emails; ✅ email now PEEK (read-only); TODO: output caps for email/feed/doc text; sha256 over md5 in video cache)*
-- [ ] **Phase 7** — Security hardening (SSRF, allowed roots, secrets, output caps)
-- [ ] **Phase 8** — Feeds subsystem optimization
+- [ ] **Phase 8** — Feeds subsystem optimization *(✅ DONE: concurrent `check_feeds` (bounded by `NOAPI_MCP_FEEDS_CONCURRENCY`) with per-source isolation; conditional GET via ETag/Last-Modified (migration 3); per-worker connections + batch inserts; FTS5 `bm25()` ranking + `snippet()`; `since`/`until` filters on `search_feeds` (additive); optional retention pruning (`NOAPI_MCP_FEEDS_MAX_ITEMS_PER_SUB`/`_MAX_AGE_DAYS`, default off). Migration v0→v3 verified non-destructively on a copy of the real DB, 35 rows preserved.)*
 - [ ] **Phase 9** — MCP protocol polish (typed params, structured output, transports)
 - [ ] **Phase 10** — Packaging & CI (optional extras, fork metadata)
 - [ ] **Phase 11** — Documentation (README/CHANGELOG/ARCHITECTURE/SECURITY/ADRs)
@@ -187,25 +186,27 @@ Owner answers (2026-10-14):
 3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
-1. **Phase 8 (feeds)** — the next substantial item:
-   - `check_feeds`: fetch subscriptions **concurrently** with a bounded `asyncio.gather`
-     (semaphore ~8), per-source error isolation, per-source summary.
-   - **Conditional GET**: store `etag`/`last_modified` per subscription (migration 3), send
-     `If-None-Match`/`If-Modified-Since`, treat 304 as "no new items".
-   - Make DB access non-blocking (`asyncio.to_thread`) + `busy_timeout`; batch inserts with
-     `executemany` in one transaction per source.
-   - `search_feeds`: FTS5 `bm25()` + `snippet()` when available; optional `since`/`until`.
-   - Optional retention pruning (`NOAPI_MCP_FEEDS_MAX_ITEMS_PER_SUB` / `..._MAX_AGE_DAYS`).
-2. **Phase 7 remainder**: output caps for email bodies / feed content / document text
-   (`config.MAX_TEXT_CHARS`); replace `md5` cache keys with `sha256` in `tools/video.py`
-   (keep reading old md5-keyed transcript caches as a fallback).
-3. **Phase 5 remainder**: `upload_to_s3` idempotency (`HEAD` before upload + `overwrite` flag);
-   content-addressed atomic outputs for `generate_qr` / `extract_video_clip` / `convert_media`.
-4. **Phase 9**: `Literal` enum params, structured output, `--transport streamable-http`, `--check`.
-5. **Phases 10–12**: optional extras (D4 = unchanged), CI gate, docs/CHANGELOG/ADRs, v0.4.0.
-6. Deferred/low-priority: `browser.py:validate_google_cookies` still launches its own Chromium
+1. **Phase 7 remainder** (small, high value):
+   - Output caps for email bodies / feed content / document text (`config.MAX_TEXT_CHARS`) with a
+     `[truncated …]` marker.
+   - Replace `md5` cache keys with `sha256` in `tools/video.py` (keep reading old md5-keyed
+     transcript caches as a fallback so existing caches aren't lost).
+2. **Phase 5 remainder**:
+   - `upload_to_s3` idempotency: `HEAD` the object before upload, skip when size/ETag match, add
+     `overwrite: bool = True`.
+   - Content-addressed atomic outputs for `generate_qr` / `extract_video_clip` / `convert_media`
+     (never silently clobber a user path; append `-1`, `-2`… unless `overwrite=True`).
+3. **Phase 9**: `Literal` enum params (must keep every previously-valid value valid), structured
+   output for the high-value read tools (keep the existing text rendering too — verify with
+   context7 how FastMCP emits both `structuredContent` and text), `--transport streamable-http`
+   (bind 127.0.0.1), `--version`/`--check` CLI.
+4. **Phases 10–12**: optional extras (D4 = unchanged for now), CI gate, docs/CHANGELOG/ARCHITECTURE/
+   SECURITY/ADRs, v0.4.0 bump + PR.
+5. Deferred/low-priority: `browser.py:validate_google_cookies` still launches its own Chromium
    (one-shot startup diagnostic); `server_selenium.py` is dead code (needs owner OK to delete).
-7. Baseline: **340 pytest green**. Bench: `python scripts/bench_browser.py`.
+6. Baseline: **358 pytest green**. Bench: `python scripts/bench_browser.py`.
    Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
    Pre-existing ruff findings remain in `web_utils.py`/`maps.py`/`travel.py`/`vision.py`/`feeds.py`/
    `search.py` (unused imports) and `server.py`/`anti_bot.py` — untouched, documented.
+   NOTE: `browse_google` and the pool are covered; `check_feeds` concurrency is covered by an
+   *overlap* assertion (not a wall-clock threshold) — keep it that way (robust to CI noise).

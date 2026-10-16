@@ -603,3 +603,11 @@ HTTP_PORT: int = env_int("HTTP_PORT", 11498)
 
 # Output caps.
 MAX_TEXT_CHARS: int = env_int("MAX_TEXT_CHARS", MAX_PAGE_CHARS)
+
+# ── Feeds subsystem (Phase 8) ──
+# How many subscriptions to refresh in parallel inside check_feeds.
+FEEDS_CONCURRENCY: int = env_int("FEEDS_CONCURRENCY", 8)
+# Retention: prune stored items after each check. 0 = keep everything (default,
+# preserving the historical behaviour).
+FEEDS_MAX_ITEMS_PER_SUB: int = env_int("FEEDS_MAX_ITEMS_PER_SUB", 0)
+FEEDS_MAX_AGE_DAYS: int = env_int("FEEDS_MAX_AGE_DAYS", 0)

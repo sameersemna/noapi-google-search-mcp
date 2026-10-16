@@ -88,7 +88,10 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("content",),
     ),
     "read_document": (("file_path",), ("file_path",)),
-    "search_feeds": (("limit", "query", "source_type"), ("query",)),
+    "search_feeds": (
+        ("limit", "query", "since", "source_type", "until"),
+        ("query",),
+    ),
     "search_transcript": (
         ("context_segments", "model_size", "query", "url"),
         ("query", "url"),

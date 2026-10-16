@@ -5,13 +5,16 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Annotated
 
@@ -19,12 +22,14 @@ from pydantic import AliasChoices, Field
 
 from mcp.server.fastmcp import Context
 
+from .. import config
 from ..config import (
     ARXIV_CATEGORIES,
     FEEDS_DB_PATH,
     PRESET_NEWS_FEEDS,
     TRANSCRIBE_CACHE_DIR,
     TRANSCRIPT_CACHE_DIR,
+    USER_AGENT,
 )
 from ..core.browser import pooled_browser
 from ..server import (
@@ -46,9 +51,12 @@ def _get_feeds_db() -> sqlite3.Connection:
     """Open (and initialise if needed) the feeds SQLite database."""
     db_path = os.environ.get("FEEDS_DB_PATH", FEEDS_DB_PATH)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Wait (rather than fail) if another connection holds the write lock: the
+    # concurrent check_feeds workers each open their own connection.
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=ON")
     _init_feeds_db(conn)
     return conn
@@ -60,7 +68,7 @@ def _init_feeds_db(conn: sqlite3.Connection) -> None:
 
 
 # Current schema version. Bump together with a new ``_migrate_to_*`` function.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 # The feed_items DDL used from v2 onwards. ``dedupe_key`` is the dedupe unit
 # (URL when present, else a content hash) so URL-less items are no longer
@@ -92,6 +100,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     feed_url TEXT NOT NULL DEFAULT '',
     last_checked TEXT,
     created_at TEXT NOT NULL,
+    etag TEXT NOT NULL DEFAULT '',
+    last_modified TEXT NOT NULL DEFAULT '',
     UNIQUE(source_type, identifier)
 );
 """
@@ -191,7 +201,26 @@ def _migrate_to_2(conn: sqlite3.Connection) -> None:
     _install_fts(conn)
 
 
-_MIGRATIONS = {1: _migrate_to_1, 2: _migrate_to_2}
+def _migrate_to_3(conn: sqlite3.Connection) -> None:
+    """Migration 3: per-subscription HTTP validators for conditional GET.
+
+    Storing the last ``ETag`` / ``Last-Modified`` lets ``check_feeds`` send
+    ``If-None-Match`` / ``If-Modified-Since`` and treat a ``304 Not Modified``
+    as "no new items", which stops re-downloading unchanged feeds on every
+    check (both faster and friendlier to the upstream).
+    """
+    cols = _table_columns(conn, "subscriptions")
+    if "etag" not in cols:
+        conn.execute(
+            "ALTER TABLE subscriptions ADD COLUMN etag TEXT NOT NULL DEFAULT ''"
+        )
+    if "last_modified" not in cols:
+        conn.execute(
+            "ALTER TABLE subscriptions ADD COLUMN last_modified TEXT NOT NULL DEFAULT ''"
+        )
+
+
+_MIGRATIONS = {1: _migrate_to_1, 2: _migrate_to_2, 3: _migrate_to_3}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -379,32 +408,219 @@ def _store_items(
     """Store feed items in the database; skip duplicates. Returns new-item count.
 
     Dedupe is by ``dedupe_key`` (URL, else content hash) so URL-less items are
-    kept (B7); ``published_at`` is normalized to ISO-8601 UTC (B4).
+    kept (B7); ``published_at`` is normalized to ISO-8601 UTC (B4). Inserts are
+    batched via ``executemany`` in a single transaction, and the number of
+    rows actually inserted is measured with ``total_changes`` (``cursor.rowcount``
+    is unusable for a bulk ``INSERT OR IGNORE``).
     """
-    new_count = 0
     now = datetime.now(timezone.utc).isoformat()
+    rows: list[tuple] = []
     for item in items:
         item_type = item.get("source_type") or source_type
         dedupe_key = _dedupe_key({**item, "source_type": item_type})
         if not dedupe_key:
             continue
-        cur = conn.execute(
-            """INSERT OR IGNORE INTO feed_items
-               (subscription_id, source_type, title, content, url, author,
-                published_at, fetched_at, metadata, dedupe_key)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        rows.append(
             (
                 sub_id, item_type,
                 item.get("title", ""), item.get("content", ""),
                 item.get("url", ""), item.get("author", ""),
                 _normalize_published(item.get("published", "")), now,
                 item.get("metadata", "{}"), dedupe_key,
-            ),
+            )
         )
-        if cur.rowcount > 0:
-            new_count += 1
+    if not rows:
+        return 0
+    # Count via COUNT(*) rather than ``conn.total_changes``: the FTS triggers
+    # fire extra changes, which would inflate the delta.
+    before = conn.execute(
+        "SELECT COUNT(*) FROM feed_items WHERE subscription_id = ?", (sub_id,)
+    ).fetchone()[0]
+    conn.executemany(
+        """INSERT OR IGNORE INTO feed_items
+           (subscription_id, source_type, title, content, url, author,
+            published_at, fetched_at, metadata, dedupe_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+    after = conn.execute(
+        "SELECT COUNT(*) FROM feed_items WHERE subscription_id = ?", (sub_id,)
+    ).fetchone()[0]
     conn.commit()
-    return new_count
+    return after - before
+
+
+# ---------------------------------------------------------------------------
+# Conditional GET + per-source refresh plumbing (Phase 8)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_feed_bytes(
+    url: str, etag: str = "", last_modified: str = ""
+) -> tuple[bytes | None, str, str]:
+    """Fetch a feed, optionally with HTTP validators.
+
+    Returns ``(data, etag, last_modified)``. ``data`` is ``None`` when the
+    server replied ``304 Not Modified`` — the caller should then skip parsing
+    and storing entirely. With no validators this is byte-for-byte the old
+    behaviour (delegates to ``_fetch_url_bytes``), which keeps existing
+    monkeypatched tests working.
+    """
+    if not etag and not last_modified:
+        return _fetch_url_bytes(url), "", ""
+    headers = {"User-Agent": USER_AGENT}
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+            return (
+                data,
+                resp.headers.get("ETag", "") or "",
+                resp.headers.get("Last-Modified", "") or "",
+            )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return None, etag, last_modified
+        raise
+
+
+async def _fetch_source_items(sub: dict) -> list[dict]:
+    """Dispatch to the right source fetcher for a subscription row."""
+    st = sub.get("source_type", "")
+    if st == "news":
+        return await _check_source_rss(sub.get("feed_url", ""))
+    if st == "reddit":
+        return await _check_source_reddit(sub.get("identifier", ""))
+    if st == "hackernews":
+        return await _check_source_hackernews(sub.get("identifier", ""))
+    if st == "github":
+        return await _check_source_github(sub.get("identifier", ""))
+    if st == "arxiv":
+        return await _check_source_arxiv(sub.get("identifier", ""))
+    if st == "youtube":
+        return await _check_source_youtube(sub.get("feed_url", ""))
+    if st == "podcast":
+        return await _check_source_podcast(sub.get("feed_url", ""))
+    if st == "twitter":
+        return await _check_source_twitter(sub.get("identifier", ""))
+    return []
+
+
+async def _refresh_subscription(
+    sub: dict,
+) -> tuple[list[dict] | None, str, str]:
+    """Fetch a subscription's items, using conditional GET where applicable.
+
+    Returns ``(items, etag, last_modified)``; ``items is None`` means the feed
+    was unchanged (HTTP 304) so nothing should be stored.
+    """
+    etag = sub.get("etag", "") or ""
+    last_modified = sub.get("last_modified", "") or ""
+    feed_url = sub.get("feed_url", "") or ""
+    st = sub.get("source_type", "")
+
+    # Only the pure-URL sources can be refreshed conditionally. Reddit / arXiv
+    # / GitHub / Hacker News / Twitter derive their URL (or use JSON APIs) at
+    # fetch time; adding validators there is future work.
+    if st in ("news", "podcast") and feed_url.startswith(("http://", "https://")):
+        data, new_etag, new_lm = await asyncio.to_thread(
+            _fetch_feed_bytes, feed_url, etag, last_modified
+        )
+        if data is None:
+            return None, etag, last_modified
+        return _parse_rss_atom(data), new_etag, new_lm
+
+    return await _fetch_source_items(sub), etag, last_modified
+
+
+def _store_source(sub_id: int, source_type: str, items: list[dict]) -> int:
+    """Store items for one source using its own short-lived connection.
+
+    Each concurrent worker opens its own connection (WAL + busy_timeout) so a
+    single ``sqlite3.Connection`` is never shared across tasks.
+    """
+    conn = _get_feeds_db()
+    try:
+        return _store_items(conn, sub_id, source_type, items)
+    finally:
+        conn.close()
+
+
+def _update_subscription_meta(
+    sub_id: int, etag: str, last_modified: str
+) -> None:
+    """Record the HTTP validators + last-checked timestamp for a subscription."""
+    conn = _get_feeds_db()
+    try:
+        conn.execute(
+            "UPDATE subscriptions SET last_checked = ?, etag = ?, last_modified = ?"
+            " WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), etag, last_modified, sub_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _auto_transcribe_youtube_isolated(
+    sub_id: int, items: list[dict], ctx: Context = None
+) -> str:
+    """Run the YouTube auto-transcription with its own DB connection.
+
+    ``check_feeds`` workers run concurrently and must not share a connection,
+    so this opens (and closes) a dedicated one around
+    :func:`_auto_transcribe_youtube`.
+    """
+    conn = await asyncio.to_thread(_get_feeds_db)
+    try:
+        return await _auto_transcribe_youtube(conn, sub_id, items, ctx=ctx)
+    finally:
+        await asyncio.to_thread(conn.close)
+
+
+def _prune_items() -> int:
+    """Apply the optional retention policy. Returns the number of rows removed.
+
+    Disabled by default (both limits 0), which preserves current behaviour.
+    """
+    max_items = getattr(config, "FEEDS_MAX_ITEMS_PER_SUB", 0)
+    max_age_days = getattr(config, "FEEDS_MAX_AGE_DAYS", 0)
+    if not max_items and not max_age_days:
+        return 0
+    conn = _get_feeds_db()
+    removed = 0
+    try:
+        if max_age_days:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            ).isoformat()
+            cur = conn.execute(
+                "DELETE FROM feed_items WHERE published_at <> '' AND published_at < ?",
+                (cutoff,),
+            )
+            removed += cur.rowcount
+        if max_items:
+            cur = conn.execute(
+                """DELETE FROM feed_items WHERE id IN (
+                       SELECT id FROM (
+                           SELECT id, ROW_NUMBER() OVER (
+                               PARTITION BY subscription_id
+                               ORDER BY published_at DESC, id DESC
+                           ) AS rn
+                           FROM feed_items
+                       ) WHERE rn > ?
+                   )""",
+                (max_items,),
+            )
+            removed += cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1264,12 @@ async def list_subscriptions() -> str:
 async def check_feeds(source_type: str = "", ctx: Context = None) -> str:
     """Check all (or specific) subscriptions for new content. Fetches and stores latest items.
 
+    Subscriptions are refreshed concurrently (bounded by
+    NOAPI_MCP_FEEDS_CONCURRENCY, default 8) and each source is isolated: one
+    failing feed does not abort the batch. Feeds that advertise ETag /
+    Last-Modified are fetched conditionally, so an unchanged feed costs no
+    re-download.
+
     Sample prompts that trigger this tool:
         - "Check my feeds"
         - "What's new in my subscriptions?"
@@ -1061,76 +1283,82 @@ async def check_feeds(source_type: str = "", ctx: Context = None) -> str:
     conn = _get_feeds_db()
     try:
         if source_type:
-            subs = conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM subscriptions WHERE source_type = ?",
                 (source_type.lower().strip(),),
             ).fetchall()
         else:
-            subs = conn.execute("SELECT * FROM subscriptions").fetchall()
-
-        if not subs:
-            return "No subscriptions to check. Use subscribe() first."
-
-        results = []
-        total_new = 0
-
-        for idx, sub in enumerate(subs):
-            try:
-                if ctx:
-                    await ctx.report_progress(
-                        progress=idx, total=len(subs),
-                        message=f"Checking {sub['name']}...",
-                    )
-
-                st = sub["source_type"]
-                items: list[dict] = []
-
-                if st == "news":
-                    items = await _check_source_rss(sub["feed_url"])
-                elif st == "reddit":
-                    items = await _check_source_reddit(sub["identifier"])
-                elif st == "hackernews":
-                    items = await _check_source_hackernews(sub["identifier"])
-                elif st == "github":
-                    items = await _check_source_github(sub["identifier"])
-                elif st == "arxiv":
-                    items = await _check_source_arxiv(sub["identifier"])
-                elif st == "youtube":
-                    items = await _check_source_youtube(sub["feed_url"])
-                elif st == "podcast":
-                    items = await _check_source_podcast(sub["feed_url"])
-                elif st == "twitter":
-                    items = await _check_source_twitter(sub["identifier"])
-
-                new_count = _store_items(conn, sub["id"], st, items)
-
-                conn.execute(
-                    "UPDATE subscriptions SET last_checked = ? WHERE id = ?",
-                    (datetime.now(timezone.utc).isoformat(), sub["id"]),
-                )
-                conn.commit()
-
-                total_new += new_count
-                note = ""
-                if st == "youtube":
-                    note = await _auto_transcribe_youtube(
-                        conn, sub["id"], items, ctx=ctx,
-                    )
-                elif st == "podcast" and new_count > 0:
-                    note = " — audio URLs stored, use transcribe_video to transcribe"
-
-                results.append(f"  {sub['name']}: {new_count} new items{note}")
-
-            except Exception as e:
-                results.append(f"  {sub['name']}: ERROR — {e}")
-
-        lines = ["Feed Check Complete\n"]
-        lines.extend(results)
-        lines.append(f"\nTotal: {total_new} new items across {len(subs)} sources")
-
-        return "\n".join(lines)
+            rows = conn.execute("SELECT * FROM subscriptions").fetchall()
+        # Detach from the connection before it closes: the workers below each
+        # use their own connection.
+        subs = [dict(r) for r in rows]
     finally:
         conn.close()
+
+    if not subs:
+        return "No subscriptions to check. Use subscribe() first."
+
+    total = len(subs)
+    semaphore = asyncio.Semaphore(max(1, config.FEEDS_CONCURRENCY))
+    counter = {"done": 0}
+    counter_lock = asyncio.Lock()
+    results: list[str] = [""] * total
+    new_counts: list[int] = [0] * total
+
+    async def _worker(idx: int, sub: dict) -> None:
+        async with semaphore:
+            try:
+                items, etag, last_modified = await _refresh_subscription(sub)
+                st = sub.get("source_type", "")
+
+                if items is None:
+                    # HTTP 304 — nothing changed since the last check.
+                    new_count = 0
+                    note = " (not modified)"
+                else:
+                    new_count = await asyncio.to_thread(
+                        _store_source, sub["id"], st, items
+                    )
+                    note = ""
+                    if st == "youtube" and items:
+                        note = await _auto_transcribe_youtube_isolated(
+                            sub["id"], items, ctx=ctx,
+                        )
+                    elif st == "podcast" and new_count > 0:
+                        note = " — audio URLs stored, use transcribe_video to transcribe"
+
+                await asyncio.to_thread(
+                    _update_subscription_meta, sub["id"], etag, last_modified
+                )
+                new_counts[idx] = new_count
+                results[idx] = f"  {sub.get('name', '')}: {new_count} new items{note}"
+
+            except Exception as e:
+                results[idx] = f"  {sub.get('name', '')}: ERROR — {e}"
+
+            finally:
+                async with counter_lock:
+                    counter["done"] += 1
+                    done = counter["done"]
+                if ctx:
+                    with contextlib.suppress(Exception):
+                        await ctx.report_progress(
+                            progress=done, total=total,
+                            message=f"Checked {done}/{total} sources...",
+                        )
+
+    await asyncio.gather(*(_worker(i, s) for i, s in enumerate(subs)))
+
+    total_new = sum(new_counts)
+    lines = ["Feed Check Complete\n"]
+    lines.extend(results)
+
+    pruned = await asyncio.to_thread(_prune_items)
+    if pruned:
+        lines.append(f"\n(pruned {pruned} old items by retention policy)")
+
+    lines.append(f"\nTotal: {total_new} new items across {total} sources")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -1138,8 +1366,13 @@ async def search_feeds(
     query: str,
     source_type: str = "",
     limit: int = 20,
+    since: str = "",
+    until: str = "",
 ) -> str:
     """Full-text search across all stored feed content (articles, posts, tweets, transcripts).
+
+    Results are ranked by FTS5 relevance (bm25) when available and include a
+    highlighted snippet; otherwise a literal LIKE match is used.
 
     Sample prompts that trigger this tool:
         - "Search my feeds for machine learning"
@@ -1152,60 +1385,72 @@ async def search_feeds(
         query: Search query (supports FTS5 syntax: AND, OR, NOT, "quoted phrases").
         source_type: Optionally limit to one type. Leave empty to search everything.
         limit: Max results to return (default 20).
+        since: Only items published on/after this ISO date (e.g. "2026-01-01"). Optional.
+        until: Only items published on/before this ISO date (e.g. "2026-03-31"). Optional.
     """
     conn = _get_feeds_db()
+
+    date_clauses: list[str] = []
+    date_params: list[str] = []
+    if since:
+        date_clauses.append("f.published_at >= ?")
+        date_params.append(since)
+    if until:
+        # Date-only upper bound means "end of that day".
+        bound = f"{until}T23:59:59+00:00" if len(until) == 10 else until
+        date_clauses.append("f.published_at <= ?")
+        date_params.append(bound)
+    date_sql = (" AND " + " AND ".join(date_clauses)) if date_clauses else ""
+
     try:
         rows = None
-        # Try FTS5 first
+        # Try FTS5 first: bm25() gives a proper relevance score (lower is a
+        # better match) and snippet() returns highlighted context.
         try:
+            sql = """SELECT f.*, s.name as source_name,
+                             bm25(feed_items_fts) AS score,
+                             snippet(feed_items_fts, 1, '', '', '…', 20) AS snippet
+                      FROM feed_items_fts fts
+                      JOIN feed_items f ON f.id = fts.rowid
+                      JOIN subscriptions s ON s.id = f.subscription_id
+                      WHERE feed_items_fts MATCH ?"""
+            params: list = [query]
             if source_type:
-                rows = conn.execute(
-                    """SELECT f.*, s.name as source_name
-                       FROM feed_items_fts fts
-                       JOIN feed_items f ON f.id = fts.rowid
-                       JOIN subscriptions s ON s.id = f.subscription_id
-                       WHERE feed_items_fts MATCH ? AND f.source_type = ?
-                       ORDER BY rank LIMIT ?""",
-                    (query, source_type.lower(), limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT f.*, s.name as source_name
-                       FROM feed_items_fts fts
-                       JOIN feed_items f ON f.id = fts.rowid
-                       JOIN subscriptions s ON s.id = f.subscription_id
-                       WHERE feed_items_fts MATCH ?
-                       ORDER BY rank LIMIT ?""",
-                    (query, limit),
-                ).fetchall()
+                sql += " AND f.source_type = ?"
+                params.append(source_type.lower())
+            sql += date_sql
+            params.extend(date_params)
+            sql += " ORDER BY score LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
         except Exception:
             rows = None  # FTS5 unavailable or query syntax error
 
         # Fallback to LIKE
         if rows is None:
             like_q = f"%{_like_escape(query)}%"
+            sql = """SELECT f.*, s.name as source_name, NULL as score, NULL as snippet
+                     FROM feed_items f
+                     JOIN subscriptions s ON s.id = f.subscription_id
+                     WHERE (f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\')"""
+            params = [like_q, like_q]
             if source_type:
-                rows = conn.execute(
-                    """SELECT f.*, s.name as source_name
-                       FROM feed_items f
-                       JOIN subscriptions s ON s.id = f.subscription_id
-                       WHERE (f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\')
-                             AND f.source_type = ?
-                       ORDER BY f.published_at DESC LIMIT ?""",
-                    (like_q, like_q, source_type.lower(), limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT f.*, s.name as source_name
-                       FROM feed_items f
-                       JOIN subscriptions s ON s.id = f.subscription_id
-                       WHERE f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\'
-                       ORDER BY f.published_at DESC LIMIT ?""",
-                    (like_q, like_q, limit),
-                ).fetchall()
+                sql += " AND f.source_type = ?"
+                params.append(source_type.lower())
+            sql += date_sql
+            params.extend(date_params)
+            sql += " ORDER BY f.published_at DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
 
         if not rows:
             return f'No results found for: "{query}"'
+
+        def _row_value(row, key):
+            try:
+                return row[key]
+            except (IndexError, KeyError):
+                return None
 
         lines = [f'Feed Search: "{query}" ({len(rows)} results)\n']
         for i, r in enumerate(rows, 1):
@@ -1216,7 +1461,10 @@ async def search_feeds(
                 lines.append(f"   Published: {r['published_at']}")
             if r["url"]:
                 lines.append(f"   URL: {r['url']}")
-            if r["content"]:
+            highlighted = _row_value(r, "snippet")
+            if highlighted:
+                lines.append(f"   {highlighted}")
+            elif r["content"]:
                 snippet = r["content"][:200]
                 if len(r["content"]) > 200:
                     snippet += "..."
