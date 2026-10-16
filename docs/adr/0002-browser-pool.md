@@ -61,3 +61,27 @@ Rejected alternatives:
 * New failure mode: if the shared context dies, the first call after the crash pays the
   relaunch cost (acceptable, and handled).
 * `server_selenium.py` is untouched (dead code).
+
+## Measured result (2026-10-16)
+
+`scripts/bench_browser.py` (offline, `page.set_content` fixture, Chromium 148, 3 iterations):
+
+| mode | ms per call |
+|---|---|
+| per-call launch (baseline) | 2699.3 |
+| pooled (reuse) | 314.7 |
+| **speedup** | **8.58x** (~2384.7 ms saved per call) |
+
+## Adoption
+
+All hot tool paths use `pooled_browser(viewport=...)` (a drop-in replacement that
+yields `(context, page)` and makes `context.close()` a no-op so pre-existing
+`finally` blocks cannot close the shared context):
+
+`visit_page`, `google_maps`, `google_maps_directions`, `google_translate`,
+`google_flights`, `google_hotels`, `google_lens`, `google_lens_detect`,
+`google_trends` and the Twitter feed scraper.
+
+Deliberately still per-call: `open_manual_browser` and the headful
+manual-intervention flow (they need a *visible* browser), and
+`validate_google_cookies` (a one-shot startup diagnostic).
