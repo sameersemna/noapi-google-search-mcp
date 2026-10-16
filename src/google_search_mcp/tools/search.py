@@ -9,9 +9,9 @@ import os
 from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, Image
-from playwright.async_api import async_playwright
 
 from ..config import TIME_RANGE_MAP
+from ..core.browser import pooled_browser
 from ..core.cache import cached
 from ..server import (
     mcp,
@@ -20,7 +20,6 @@ from ..server import (
     format_error,
     human_delay,
     is_blocked,
-    launch_browser,
     load_cookies,
     save_cookies,
     try_solve_captcha,
@@ -778,10 +777,8 @@ async def do_google_trends(query: str) -> str:
     encoded_query = quote_plus(query)
     url = f"https://trends.google.com/trends/explore?q={encoded_query}&hl=en"
 
-    async with async_playwright() as pw:
-        context = await launch_browser(pw)
+    async with pooled_browser() as (context, page):
         await load_cookies(context)
-        page = await context.new_page()
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)

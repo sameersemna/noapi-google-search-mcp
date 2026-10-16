@@ -11,7 +11,6 @@ import re
 from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, Image
-from playwright.async_api import async_playwright
 
 from ..config import (
     DEFAULT_IMAGE_DIR,
@@ -20,6 +19,7 @@ from ..config import (
     MOBILENET_ONNX_PATH,
 )
 from ..core import fsguard
+from ..core.browser import pooled_browser
 from ..server import (
     mcp,
     browse_google,
@@ -27,7 +27,6 @@ from ..server import (
     format_error,
     human_delay,
     is_blocked,
-    launch_browser,
     load_cookies,
     save_cookies,
     try_solve_captcha,
@@ -105,10 +104,8 @@ async def do_google_lens(image_source: str) -> str:
         if not os.path.isfile(file_path):
             return f"File not found: {image_source}\nPlease provide a valid file path or a public image URL."
 
-    async with async_playwright() as pw:
-        context = await launch_browser(pw)
+    async with pooled_browser() as (context, page):
         await load_cookies(context)
-        page = await context.new_page()
 
         try:
             if is_local:
@@ -657,10 +654,7 @@ async def do_google_lens_detect(image_path: str) -> str:
             return await do_google_lens(file_path)
 
         # Run Lens on original + each crop in a single browser session
-        async with async_playwright() as pw:
-            context = await launch_browser(pw)
-            page = await context.new_page()
-
+        async with pooled_browser() as (context, page):
             results = []
 
             try:

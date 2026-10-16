@@ -18,7 +18,6 @@ from typing import Annotated
 from pydantic import AliasChoices, Field
 
 from mcp.server.fastmcp import Context
-from playwright.async_api import async_playwright
 
 from ..config import (
     ARXIV_CATEGORIES,
@@ -27,6 +26,7 @@ from ..config import (
     TRANSCRIBE_CACHE_DIR,
     TRANSCRIPT_CACHE_DIR,
 )
+from ..core.browser import pooled_browser
 from ..server import (
     mcp,
     _download_audio,
@@ -34,7 +34,6 @@ from ..server import (
     _transcribe_audio,
     _transcript_cache_path,
     format_timestamp,
-    launch_browser,
     strip_html,
 )
 from ..utils import ytdlp
@@ -704,9 +703,7 @@ async def _check_source_twitter(handle: str) -> list[dict]:
     handle = handle.lstrip("@")
     url = f"https://x.com/{handle}"
 
-    async with async_playwright() as pw:
-        context = await launch_browser(pw)
-        page = await context.new_page()
+    async with pooled_browser() as (context, page):
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
