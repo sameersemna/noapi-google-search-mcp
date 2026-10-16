@@ -46,10 +46,40 @@ log = logging.getLogger("google_search_mcp.video")
 # ---------------------------------------------------------------------------
 
 
+def _cache_key(material: str) -> str:
+    """Cache key for a piece of cache material (sha256).
+
+    sha256 is used instead of md5 so security scanners do not flag the cache
+    as a weak-hash use. This changes the on-disk file NAMES; the ``_legacy_*``
+    helpers below let us still read caches written by older versions.
+    """
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _legacy_cache_key(material: str) -> str:
+    """The pre-hardening md5 key, kept only to read existing caches."""
+    return hashlib.md5(material.encode(), usedforsecurity=False).hexdigest()
+
+
 def _transcript_cache_path(url: str, model_size: str) -> str:
-    """Get disk cache path for a transcript."""
-    key = hashlib.md5(f"{url}|{model_size}".encode()).hexdigest()
-    return os.path.join(TRANSCRIPT_CACHE_DIR, f"{key}.json")
+    """Get disk cache path for a transcript (sha256-keyed)."""
+    return os.path.join(TRANSCRIPT_CACHE_DIR, f"{_cache_key(f'{url}|{model_size}')}.json")
+
+
+def _transcript_cache_path_legacy(url: str, model_size: str) -> str:
+    """Legacy md5-keyed transcript cache path (read-only fallback)."""
+    return os.path.join(
+        TRANSCRIPT_CACHE_DIR, f"{_legacy_cache_key(f'{url}|{model_size}')}.json"
+    )
+
+
+def _existing_cache_path(primary: str, legacy: str) -> str:
+    """Return *primary* if it exists, else *legacy* if it exists, else *primary*."""
+    if os.path.isfile(primary):
+        return primary
+    if os.path.isfile(legacy):
+        return legacy
+    return primary
 
 
 def _download_audio(url: str, cache_dir: str) -> dict:
@@ -297,9 +327,12 @@ async def transcribe_video(
     if model_size not in valid_sizes:
         model_size = "tiny"
 
-    # Check disk cache first
+    # Check disk cache first (also honour a legacy md5-keyed entry)
     os.makedirs(TRANSCRIPT_CACHE_DIR, exist_ok=True)
-    cache_path = _transcript_cache_path(url, model_size)
+    cache_path = _existing_cache_path(
+        _transcript_cache_path(url, model_size),
+        _transcript_cache_path_legacy(url, model_size),
+    )
     if os.path.isfile(cache_path):
         try:
             with open(cache_path) as f:
@@ -446,7 +479,10 @@ async def search_transcript(
         model_size: Must match the model_size used for transcription (default: tiny).
         context_segments: Number of surrounding segments to include (default: 2).
     """
-    cache_path = _transcript_cache_path(url, model_size)
+    cache_path = _existing_cache_path(
+        _transcript_cache_path(url, model_size),
+        _transcript_cache_path_legacy(url, model_size),
+    )
     if not os.path.isfile(cache_path):
         return (
             f"No cached transcript found for this URL. "
@@ -596,8 +632,15 @@ def _video_cache_path(
     a different range would cut the wrong footage.
     """
     key_material = url if not section else f"{url}|{section[0]:.1f}-{section[1]:.1f}"
-    key = hashlib.md5(key_material.encode()).hexdigest()
-    return os.path.join(VIDEO_CACHE_DIR, f"{key}.mp4")
+    return os.path.join(VIDEO_CACHE_DIR, f"{_cache_key(key_material)}.mp4")
+
+
+def _video_cache_path_legacy(
+    url: str, section: tuple[float, float] | None = None
+) -> str:
+    """Legacy md5-keyed video cache path (read-only fallback)."""
+    key_material = url if not section else f"{url}|{section[0]:.1f}-{section[1]:.1f}"
+    return os.path.join(VIDEO_CACHE_DIR, f"{_legacy_cache_key(key_material)}.mp4")
 
 
 def _download_video(
@@ -620,7 +663,10 @@ def _download_video(
     return ytdlp.download_video(
         url,
         VIDEO_CACHE_DIR,
-        cache_path=_video_cache_path(url, section),
+        cache_path=_existing_cache_path(
+            _video_cache_path(url, section),
+            _video_cache_path_legacy(url, section),
+        ),
         section=section,
     )
 

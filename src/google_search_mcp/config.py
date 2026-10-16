@@ -604,6 +604,11 @@ HTTP_PORT: int = env_int("HTTP_PORT", 11498)
 # Output caps.
 MAX_TEXT_CHARS: int = env_int("MAX_TEXT_CHARS", MAX_PAGE_CHARS)
 
+# Per-document text cap for ``read_document`` (PDF/DOCX/HTML/plain text).
+MAX_DOCUMENT_CHARS: int = env_int("MAX_DOCUMENT_CHARS", 100_000)
+# Per-message body cap for ``fetch_emails``.
+MAX_EMAIL_BODY_CHARS: int = env_int("MAX_EMAIL_BODY_CHARS", 2000)
+
 # ── Feeds subsystem (Phase 8) ──
 # How many subscriptions to refresh in parallel inside check_feeds.
 FEEDS_CONCURRENCY: int = env_int("FEEDS_CONCURRENCY", 8)

@@ -22,7 +22,13 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, Image
 
-from ..config import IMAP_SERVERS, MAX_PAGE_CHARS, TRANSCRIPT_CACHE_DIR
+from ..config import (
+    IMAP_SERVERS,
+    MAX_DOCUMENT_CHARS,
+    MAX_EMAIL_BODY_CHARS,
+    MAX_PAGE_CHARS,
+    TRANSCRIPT_CACHE_DIR,
+)
 from ..core import fsguard, idempotency, netguard
 from ..core.browser import pooled_browser
 from ..core.cache import cached
@@ -36,6 +42,18 @@ from ..server import (
     strip_html,
 )
 from ..utils.text import format_timestamp
+
+
+def _cap_text(text: str, limit: int, label: str = "") -> str:
+    """Truncate *text* to *limit* characters with a clear marker.
+
+    Keeps a runaway document/email from flooding the model context while telling
+    the reader the output was cut (and how long the original was).
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    suffix = f" of {label}" if label else ""
+    return f"{text[:limit]}\n\n... [truncated, showing first {limit} characters{suffix}]"
 
 
 def _normalize_web_url(url: str) -> str:
@@ -458,12 +476,12 @@ async def read_document(
                 "For text PDFs, install poppler-utils: sudo apt install poppler-utils\n"
                 "For scanned PDFs, ensure rapidocr-onnxruntime is installed."
             )
-        return f"Document: {filename} ({size_kb:.0f} KB)\n\n{text}"
+        return f"Document: {filename} ({size_kb:.0f} KB)\n\n{_cap_text(text, MAX_DOCUMENT_CHARS, f'{size_kb:.0f} KB')}"
 
     # --- DOCX ---
     if ext == ".docx":
         text = await asyncio.to_thread(_read_docx_text, file_path)
-        return f"Document: {filename} ({size_kb:.0f} KB)\n\n{text}"
+        return f"Document: {filename} ({size_kb:.0f} KB)\n\n{_cap_text(text, MAX_DOCUMENT_CHARS, f'{size_kb:.0f} KB')}"
 
     # --- HTML ---
     if ext in (".html", ".htm"):
@@ -474,7 +492,7 @@ async def read_document(
                 Path(file_path).read_text, "latin-1",
             )
         text = strip_html(raw)
-        return f"Document: {filename} ({size_kb:.0f} KB)\n\n{text}"
+        return f"Document: {filename} ({size_kb:.0f} KB)\n\n{_cap_text(text, MAX_DOCUMENT_CHARS, f'{size_kb:.0f} KB')}"
 
     # --- Plain text formats ---
     plain_exts = {
@@ -492,9 +510,10 @@ async def read_document(
                 Path(file_path).read_text, "latin-1",
             )
         # Truncate very large files to avoid flooding the LLM context
-        if len(raw) > 100_000:
-            raw = raw[:100_000] + f"\n\n... (truncated at 100 KB, file is {size_kb:.0f} KB)"
-        return f"Document: {filename} ({size_kb:.0f} KB)\n\n{raw}"
+        return (
+            f"Document: {filename} ({size_kb:.0f} KB)\n\n"
+            f"{_cap_text(raw, MAX_DOCUMENT_CHARS, f'{size_kb:.0f} KB')}"
+        )
 
     return f"Unsupported file format: {ext}. Supported: .pdf, .docx, .html, .txt, .md, .csv, .json, .xml, .yaml, and more."
 
@@ -633,7 +652,7 @@ async def fetch_emails(
                     "to": str(msg.get("To", "")),
                     "subject": str(msg.get("Subject", "(no subject)")),
                     "date": str(msg.get("Date", "")),
-                    "body": body.strip()[:2000],
+                    "body": body.strip()[:MAX_EMAIL_BODY_CHARS],
                 })
 
             return emails
