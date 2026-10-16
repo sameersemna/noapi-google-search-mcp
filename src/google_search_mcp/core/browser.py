@@ -97,6 +97,33 @@ class BrowserPool:
                 except Exception:  # noqa: BLE001 - page may already be gone
                     pass
 
+    @asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        """Hold a concurrency slot without taking a page.
+
+        Used by callers (e.g. ``browse_google``) that manage their own page
+        lifecycle but still must respect the global concurrency cap.
+        """
+        async with self._semaphore:
+            yield
+
+    async def context(self) -> Any:
+        """Return the shared persistent context (starting it if needed)."""
+        return await self._ensure()
+
+    async def playwright_instance(self) -> Any:
+        """Return the shared Playwright instance (starting it if needed)."""
+        async with self._lock:
+            if self._pw is None:
+                from playwright.async_api import async_playwright
+
+                self._pw = await async_playwright().start()
+            return self._pw
+
+    def owns(self, context: Any) -> bool:
+        """Whether *context* is the pool's shared context."""
+        return context is not None and context is self._context
+
     async def aclose(self) -> None:
         """Close the context (if any) and stop Playwright."""
         async with self._lock:

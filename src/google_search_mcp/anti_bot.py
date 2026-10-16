@@ -236,14 +236,33 @@ async def browse_google(
     from .core import circuit
     circuit.google_breaker.check()
 
-    async with async_playwright() as pw:
+    # ── Acquire the browser (shared pool, or a per-call launch) ──
+    # The pool reuses one Chromium context across calls (ADR 0002), which both
+    # removes the per-call launch cost and avoids concurrent calls contending
+    # for the Chromium user-data-dir lock. NOAPI_MCP_BROWSER_POOL=0 restores the
+    # old launch-per-call behaviour.
+    from contextlib import AsyncExitStack
+
+    from .core import browser as _bp
+
+    pooled = _bp.enabled()
+    exit_stack = AsyncExitStack()
+    try:
+        if pooled:
+            await exit_stack.enter_async_context(_bp.pool.slot())
+            pw = await _bp.pool.playwright_instance()
+        else:
+            pw = await exit_stack.enter_async_context(async_playwright())
+
         # Mutable holders so the manual-intervention flow can swap in a
         # new context/page mid-function without rebinding nonlocal vars.
         context_holder: list = [None]
         page_holder: list = [None]
 
         try:
-            context_holder[0] = await launch_browser(pw)
+            context_holder[0] = (
+                await _bp.pool.context() if pooled else await launch_browser(pw)
+            )
             await load_cookies(context_holder[0])
             page_holder[0] = await context_holder[0].new_page()
             await setup_page_stealth(page_holder[0])
@@ -486,7 +505,22 @@ async def browse_google(
                     await save_cookies(ctx)
                 except Exception:
                     pass
-                try:
-                    await ctx.close()
-                except Exception:
-                    pass
+                if pooled and _bp.pool.owns(ctx):
+                    # Shared context: close only the page we handed out and
+                    # keep the context alive for the next call (that is the
+                    # whole point of the pool).
+                    pg = page_holder[0]
+                    if pg is not None:
+                        try:
+                            await pg.close()
+                        except Exception:
+                            pass
+                else:
+                    # A per-call context (non-pooled launch, or one created by
+                    # the manual-intervention flow) — close it as before.
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
+    finally:
+        await exit_stack.aclose()
