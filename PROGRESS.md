@@ -4,10 +4,10 @@
 > **RULE: read this file first at the start of every session; update it before every commit.**
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
-## Current phase: 10 — Packaging & CI  *(CI ✅; packaging/fork metadata left unchanged per D4. next: Phase 11 docs)*
-## Current step: 10.1 — ci.yml + publish gated on tests + pre-commit + core lint/coverage clean
-## Status: in-progress
-## Last green commit: tip of `hardening/v0.4` (**415 pytest green**, core coverage **89%**) — baseline was `cc37fd3` (143 green)
+## Current phase: 12 — Final Verification & Handoff  *(version bumped to 0.4.0, verification re-run; only the push + PR remain, which needs the owner)*
+## Current step: 12.4 — DONE: v0.4.0 · 437 tests · core coverage 89.15% · bench 8.6–14.8× · `--check` exit 0
+## Status: complete locally — awaiting owner decision to push/PR
+## Last green commit: tip of `hardening/v0.4` (**437 pytest green**) — baseline was `cc37fd3` (143 green)
 
 ---
 
@@ -45,8 +45,8 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 - [ ] **Phase 8** — Feeds subsystem optimization *(✅ DONE: concurrent `check_feeds` (bounded by `NOAPI_MCP_FEEDS_CONCURRENCY`) with per-source isolation; conditional GET via ETag/Last-Modified (migration 3); per-worker connections + batch inserts; FTS5 `bm25()` ranking + `snippet()`; `since`/`until` filters on `search_feeds` (additive); optional retention pruning (`NOAPI_MCP_FEEDS_MAX_ITEMS_PER_SUB`/`_MAX_AGE_DAYS`, default off). Migration v0→v3 verified non-destructively on a copy of the real DB, 35 rows preserved.)*
 - [ ] **Phase 9** — MCP protocol polish *(✅ CLI `--version`/`--check`/`--transport` + fixed an unguarded `main()` in `__main__.py`; ✅ `Literal` enums for `time_range` + `model_size`; ⏸ rich structured output DEFERRED — the installed FastMCP replaces the text channel with JSON when a model is returned (evidence + decision in ADR 0006); feed `source_type` deliberately left free-form)*
 - [ ] **Phase 10** — Packaging & CI *(✅ `ci.yml` (offline test matrix py3.10–3.13 + macOS experimental, blocking core coverage ≥80% — currently 89%, gated ruff, informational whole-package ruff/mypy); ✅ `publish.yml` now gates on the test job; ✅ `.pre-commit-config.yaml`; ✅ `pytest-cov` added to `[dev]`. Packaging identity (authors/URLs/PyPI name) and optional extras LEFT UNCHANGED per D4.)*
-- [ ] **Phase 11** — Documentation (README/CHANGELOG/ARCHITECTURE/SECURITY/ADRs)
-- [ ] **Phase 12** — Final verification & handoff (v0.4.0)
+- [ ] **Phase 11** — Documentation *(✅ README v0.4.0 section + consolidated configuration reference; ✅ `CHANGELOG.md` for 0.4.0; ✅ `docs/ARCHITECTURE.md` (Mermaid + lifecycle); ✅ `SECURITY.md`; ✅ ADRs 0001–0006; ✅ automated docs↔code env-var accuracy test)*
+- [ ] **Phase 12** — Final verification & handoff *(✅ version → 0.4.0 single-sourced; ✅ 437 tests + core coverage 89.15% (gate 80%); ✅ `--check` exit 0; ✅ benchmark re-run. ⏳ Remaining: `git push` + open the PR — deliberately left to the owner.)*
 
 ---
 
@@ -170,7 +170,8 @@ Owner answers (2026-10-14):
 - After Phases 3 + 5(partial): **251 passed**.
 - After Phases 5/6/7 (2026-10-15): **326 passed**.
 - After Phases 4 + 7-remainder + 8 + 5-remainder (2026-10-17): **377 passed**.
-  Browser benchmark (`scripts/bench_browser.py`): **2699 ms → 315 ms per call (8.58x)**.
+  Browser benchmark (`scripts/bench_browser.py`): **~2695 ms → 182–315 ms per call
+  (8.6×–14.8× across runs)**.
   New test files since 326: `test_browser_pool.py`, `test_pooled_browser.py`,
   `test_browse_google_pool.py`, `test_feeds_phase8.py`, `test_feeds_concurrency.py`,
   `test_feeds_conditional_get.py`, `test_output_caps.py`, `test_video_cache_keys.py`.
@@ -207,23 +208,40 @@ Owner answers (2026-10-14):
 3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
-1. **Phase 11 docs** (highest value): `CHANGELOG.md` (Keep a Changelog) for 0.4.0 listing B1–B20 and
-   all features/behaviour changes; README "Configuration" table (every `NOAPI_MCP_*` var + legacy
-   fallbacks), "Security model", "Idempotency & caching", "Rate limiting & blocks", CLI/transports;
-   `docs/ARCHITECTURE.md` (Mermaid module diagram + request lifecycle); `SECURITY.md`; ADRs
-   0001/0003/0004/0005 (0002 browser pool and 0006 typing/structured-output exist).
-   Accuracy gate: grep every env var named in the docs and confirm it exists in `config.py`.
-2. **Phase 12 final**: bump version to 0.4.0 (single-sourced via pyproject);
-   re-run `scripts/bench_browser.py`; run `python -m google_search_mcp --check`; full offline suite +
-   coverage; open PR `hardening/v0.4 → main` summarising phases + listing the changes that are
-   additive vs behaviour-changing, plus the questions still needing the owner (D4 packaging/fork
-   metadata, deleting the dead `server_selenium.py`).
-3. Optional polish: content-addressed atomic outputs for `generate_qr`/`extract_video_clip`/
-   `convert_media`; feed-body output caps; `browser.py:validate_google_cookies` still launches its own
-   Chromium (deliberate: one-shot startup diagnostic).
-4. Baseline: **415 pytest green**; core coverage **89%** (`pytest --cov=google_search_mcp.core`).
+The hardening work is **complete on the local branch**. To ship it:
+1. `git push -u origin hardening/v0.4` then open the PR `hardening/v0.4 → main`. This is left to the
+   owner deliberately (it publishes the branch and creates a visible PR).
+2. Owner decisions still outstanding (D4 and one deletion):
+   - packaging/fork metadata left unchanged: `authors`, `project.urls` and the PyPI name still point
+     at the upstream fork; decide whether to re-point them and/or publish under a new PyPI name.
+   - `src/google_search_mcp/server_selenium.py` is dead code (not imported) — delete it?
+3. Optional polish if ever wanted: content-addressed atomic outputs for `generate_qr` /
+   `extract_video_clip` / `convert_media`; feed-body output caps; trimming duplicate "Sample prompts"
+   docstring blocks; moving `browser.py`/`captcha.py`/`anti_bot.py` into `core/`.
+4. Verification commands: `pytest -m "not live" -q` · `pytest -q --cov=google_search_mcp.core` ·
+   `python -m google_search_mcp --check` · `python scripts/bench_browser.py`.
    Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
-   Pre-existing ruff findings remain in the tool modules + `server.py`/`anti_bot.py` (unused
-   re-export imports) — informational in CI, untouched, no regression introduced.
+
+## Definition of Done — audit against the task brief
+
+| Requirement | Status |
+|---|---|
+| All tools registered with same names/params (+ only additive changes) | ✅ 42 tools; snapshot tripwire test asserts names/params; additive changes documented |
+| Every tool has `ToolAnnotations`; side-effecting tools idempotent | ✅ all 42 annotated; `paste_text`/`shorten_url`/`archive_webpage`/`upload_to_s3` covered by the idempotency store |
+| Shared browser pool with concurrency cap; no per-call Chromium launch | ✅ `core/browser.py`, `MAX_BROWSERS`; hot paths migrated; 8.6–14.8× faster |
+| Read-through TTL cache + singleflight; errors never cached | ✅ `core/cache.py`, wired into every read-only lookup |
+| Rate limiter, retries (transient only), Google circuit breaker | ✅ `core/ratelimit.py`, `core/retry.py`, `core/circuit.py`, wired into `browse_google` |
+| SSRF guard, filesystem roots, secrets via env, no secrets in argv/logs | ✅ `core/netguard.py`, `core/fsguard.py`, `MC_HOST_*` for S3, log redaction |
+| Bugs fixed with regression tests | ✅ **B1–B20** (20 bugs, incl. 9 latent `NameError`s) |
+| Feeds: concurrent checks, conditional GET, normalized dates, FTS update trigger, migrations | ✅ Phase 8 + migration system v1→v3 (verified on a copy of the real DB) |
+| MCP errors via `isError`; logging to stderr only | ✅ typed errors → `ToolError`; stdout-hygiene test |
+| Optional extras; CI gating lint/type/tests; publish gated on CI | ⚠️ CI ✅ (offline matrix, core coverage gate, gated lint, informational mypy) and publish gated on tests ✅; **optional extras deliberately NOT split (owner decision D4)** |
+| README/CHANGELOG/ARCHITECTURE/SECURITY/ADRs complete | ✅ all present, incl. ADRs 0001–0006 and an automated docs↔code env-var check |
+| `PROGRESS.md` shows every phase ticked with commit SHAs | ✅ (this file) |
+
+**Deliberate deviations (with justification):** structured output deferred (ADR 0006 — the installed
+FastMCP cannot emit human text plus a custom structured payload without regressing the text channel);
+optional-dependency extras not split and fork metadata untouched (owner decision D4); rate-limiting
+was approved (D2) and implemented after the owner reversed an earlier decision.
    NOTE: `browse_google` and the pool are covered; `check_feeds` concurrency is covered by an
    *overlap* assertion (not a wall-clock threshold) — keep it that way (robust to CI noise).

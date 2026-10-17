@@ -31,7 +31,7 @@ try:
     # checkout. (B3: the literal previously drifted from pyproject.toml.)
     __version__ = _pkg_version("noapi-google-search-mcp")
 except PackageNotFoundError:  # pragma: no cover - running from a bare checkout
-    __version__ = "0.3.6"
+    __version__ = "0.4.0"
 
 from .server import mcp
 

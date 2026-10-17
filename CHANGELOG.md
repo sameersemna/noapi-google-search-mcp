@@ -39,8 +39,8 @@ _Changed_ below.
 - **CLI**: `--version`, `--check` (dependency doctor with install hints),
   `--transport {stdio,sse,streamable-http}`, `--host`, `--port`.
 - **Shared Chromium browser pool** with a concurrency cap (`MAX_BROWSERS`,
-  default 3) and automatic relaunch on disconnect. Measured **8.6× faster per
-  call** (2699 ms → 315 ms) in `scripts/bench_browser.py`.
+  default 3) and automatic relaunch on disconnect. Measured **8.6×–14.8× faster per
+  call** (≈2695 ms → 182–315 ms) in `scripts/bench_browser.py`.
 - **Resilience**: per-upstream token-bucket rate limiting (all `google.*` hosts
   share one bucket), a Google **circuit breaker** with exponential cooldown, and
   **transient-only retries** with exponential back-off + full jitter

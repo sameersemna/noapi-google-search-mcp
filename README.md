@@ -19,7 +19,8 @@ Highlights:
 
 - **Shared browser pool** with a concurrency cap (`MAX_BROWSERS`, default 3) and
   a fresh context per call. Launches Chromium **once** instead of per call:
-  measured **8.6× faster per call** (2699 ms → 315 ms). It also removes a real
+  measured **8.6×–14.8× faster per call** (≈2695 ms → 182–315 ms across runs).
+  It also removes a real
   cause of Google blocks — several parallel searches contending for the same
   Chromium user-data-dir lock.
 - **Read-through cache + singleflight** for every read-only lookup, with

@@ -62,15 +62,18 @@ Rejected alternatives:
   relaunch cost (acceptable, and handled).
 * `server_selenium.py` is untouched (dead code).
 
-## Measured result (2026-10-16)
+## Measured result
 
-`scripts/bench_browser.py` (offline, `page.set_content` fixture, Chromium 148, 3 iterations):
+`scripts/bench_browser.py` (offline, `page.set_content` fixture, Chromium, 3 iterations
+per mode). Pooled reuse removes the per-call Chromium launch and the context setup;
+the absolute numbers vary between runs with machine load and page-cache warmth, so the
+range across runs is given:
 
 | mode | ms per call |
 |---|---|
-| per-call launch (baseline) | 2699.3 |
-| pooled (reuse) | 314.7 |
-| **speedup** | **8.58x** (~2384.7 ms saved per call) |
+| per-call launch (baseline) | 2694 – 2699 |
+| pooled (reuse) | 182 – 315 |
+| **speedup** | **8.6× – 14.8×** (~2.4–2.5 s saved per call) |
 
 ## Adoption
 
