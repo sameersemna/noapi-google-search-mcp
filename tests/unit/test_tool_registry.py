@@ -105,7 +105,16 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "unsubscribe": (("identifier", "source_type"), ("identifier", "source_type")),
     "upload_to_s3": (
-        ("access_key", "bucket", "endpoint", "file_path", "key", "secret_key"),
+        (
+            "access_key",
+            "bucket",
+            "endpoint",
+            "file_path",
+            "idempotency_key",
+            "key",
+            "overwrite",
+            "secret_key",
+        ),
         ("bucket", "file_path"),
     ),
     "visit_page": (("url",), ("url",)),

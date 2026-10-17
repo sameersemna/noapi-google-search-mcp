@@ -5,6 +5,7 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 """
 
 import asyncio
+import hashlib
 import imaplib
 import json
 import os
@@ -1165,6 +1166,19 @@ async def wikipedia(
 # ---------------------------------------------------------------------------
 
 
+class _S3ObjectExists(Exception):
+    """Raised when the target object already exists and overwrite is False."""
+
+
+def _file_sha256(path: str, chunk_size: int = 1 << 20) -> str:
+    """Return the sha256 of a file (streamed, so large files are fine)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @mcp.tool()
 async def upload_to_s3(
     file_path: str,
@@ -1173,6 +1187,8 @@ async def upload_to_s3(
     endpoint: str = "",
     access_key: str = "",
     secret_key: str = "",
+    overwrite: bool = True,
+    idempotency_key: str = "",
     ctx: Context = None,
 ) -> str:
     """Upload a file to MinIO, AWS S3, or any S3-compatible storage.
@@ -1182,6 +1198,10 @@ async def upload_to_s3(
 
     Credentials can be passed directly or read from environment variables:
         AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+
+    Idempotent: repeating the same (file, bucket, key) within 24h returns the
+    existing result instead of re-uploading. Set overwrite=False to refuse
+    replacing an object that already exists.
 
     Sample prompts that trigger this tool:
         - "Upload report.pdf to my MinIO bucket"
@@ -1197,7 +1217,11 @@ async def upload_to_s3(
             Falls back to AWS_ENDPOINT_URL env var, then AWS S3 default.
         access_key: Access key. Falls back to AWS_ACCESS_KEY_ID env var.
         secret_key: Secret key. Falls back to AWS_SECRET_ACCESS_KEY env var.
+        overwrite: Replace an existing object. Default: true (preserves old behaviour).
+        idempotency_key: Optional key to dedupe retries. Default: derived from
+            the file contents, bucket and key.
     """
+    fsguard.assert_path_allowed(file_path)
     file_path = os.path.expanduser(file_path)
     if not os.path.isfile(file_path):
         return f"File not found: {file_path}"
@@ -1216,6 +1240,15 @@ async def upload_to_s3(
             "  export AWS_SECRET_ACCESS_KEY=your-secret\n"
             "  export AWS_ENDPOINT_URL=http://localhost:9000  (for MinIO)"
         )
+
+    # Idempotency: dedupe identical (content, bucket, key) uploads.
+    digest = await asyncio.to_thread(_file_sha256, file_path)
+    idem_key = idempotency_key or idempotency.derived_key(
+        "upload_to_s3", digest, bucket, key
+    )
+    prior = await idempotency.lookup(idem_key)
+    if prior is not None:
+        return f"{prior}\n{idempotency.CACHED_NOTE}"
 
     # Use AWS CLI or mc (MinIO Client) — check what's available
     def _upload() -> str:
@@ -1250,6 +1283,18 @@ async def upload_to_s3(
             )
             env = os.environ.copy()
             env[f"MC_HOST_{alias}"] = f"{scheme}://{userinfo}@{rest}"
+
+            # overwrite=False must refuse to replace an existing object.
+            if not overwrite:
+                stat = subprocess.run(
+                    [mc_path, "stat", f"{alias}/{bucket}/{key}"],
+                    capture_output=True, text=True, timeout=30, env=env,
+                )
+                if stat.returncode == 0:
+                    raise _S3ObjectExists(
+                        f"s3://{bucket}/{key} already exists (overwrite=False)."
+                    )
+
             r = subprocess.run(
                 [mc_path, "cp", file_path, f"{alias}/{bucket}/{key}"],
                 capture_output=True, text=True, timeout=300, env=env,
@@ -1266,6 +1311,23 @@ async def upload_to_s3(
             env["AWS_SECRET_ACCESS_KEY"] = secret_key
             if endpoint:
                 cmd.extend(["--endpoint-url", endpoint])
+
+            # overwrite=False must refuse to replace an existing object.
+            if not overwrite:
+                head_cmd = [
+                    "aws", "s3api", "head-object",
+                    "--bucket", bucket, "--key", key,
+                ]
+                if endpoint:
+                    head_cmd.extend(["--endpoint-url", endpoint])
+                head = subprocess.run(
+                    head_cmd, capture_output=True, text=True, timeout=30, env=env,
+                )
+                if head.returncode == 0:
+                    raise _S3ObjectExists(
+                        f"s3://{bucket}/{key} already exists (overwrite=False)."
+                    )
+
             r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300, env=env,
             )
@@ -1282,6 +1344,11 @@ async def upload_to_s3(
 
     try:
         result = await asyncio.to_thread(_upload)
+    except _S3ObjectExists as e:
+        return (
+            f"{e}\nPass overwrite=True (the default) to replace it, "
+            f"or choose a different key."
+        )
     except Exception as e:
         return format_error("S3 upload", e)
 
@@ -1297,8 +1364,12 @@ async def upload_to_s3(
     if ctx:
         await ctx.report_progress(progress=100, total=100, message="Done!")
 
-    return (
+    outcome = (
         f"Uploaded successfully.\n"
         f"Location: {result}\n"
         f"Size: {size_mb:.1f} MB"
     )
+    # Record so a retried identical upload returns this result instead of
+    # re-uploading (the digest pins the file contents).
+    await idempotency.complete(idem_key, "upload_to_s3", outcome)
+    return outcome
