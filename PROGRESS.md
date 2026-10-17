@@ -4,10 +4,10 @@
 > **RULE: read this file first at the start of every session; update it before every commit.**
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
-## Current phase: 8 — Feeds Subsystem Optimization  ✅ COMPLETE  *(next: Phase 9 protocol polish / Phase 7+5 remainders)*
-## Current step: 8.x — concurrent check_feeds, conditional GET (migration 3), batch inserts, bm25+snippet, since/until, retention
+## Current phase: 9 — MCP Protocol Polish  *(next; Phases 4/6/7/8 + Phase 5 remainder are done)*
+## Current step: 9.0 — starting: typed params (Literal), structured output, transports, `--check`
 ## Status: in-progress
-## Last green commit: tip of `hardening/v0.4` (**358 pytest green**) — baseline was `cc37fd3` (143 green)
+## Last green commit: tip of `hardening/v0.4` (**377 pytest green**) — baseline was `cc37fd3` (143 green)
 
 ---
 
@@ -39,9 +39,9 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 - [x] ~~Phase 2 — Modularize~~ → **mostly done already**; remaining: remove/deprecate `server_selenium.py`, tidy `__init__` exports
 - [ ] **Phase 3** — Config/logging/error model *(✅ errors + namespaced config + stdout-hygiene test + central ToolError conversion done; logging already to stderr)*
 - [ ] **Phase 4** — Browser pool & concurrency *(✅ DONE: shared Chromium pool + `MAX_BROWSERS` cap + lifespan shutdown (ADR 0002, `01bff0b`); `browse_google` adopts it (`a6e1a0f`); all hot tool paths migrated via `pooled_browser` (`7799ecf`, `23d2bc4`). Measured **8.58x** faster per call — 2699 ms → 315 ms.)*
-- [ ] **Phase 5** — Idempotency, ToolAnnotations, caching *(✅ annotations (42); ✅ TTL cache + singleflight wired into all read-only lookups; ✅ idempotency store wired into paste_text/shorten_url/archive_webpage + atomic writes. TODO: upload_to_s3, content-addressed local outputs)*
+- [ ] **Phase 5** — Idempotency, ToolAnnotations, caching *(✅ annotations (42); ✅ TTL cache + singleflight wired into all read-only lookups; ✅ idempotency store wired into paste_text/shorten_url/archive_webpage/upload_to_s3 + atomic writes; ✅ upload_to_s3 `overwrite` flag + path guard (`fcbcc46`). TODO: content-addressed local outputs for generate_qr/extract_video_clip/convert_media)*
 - [ ] **Phase 6** — Rate limiting, retries, circuit breaker *(✅ token bucket + breaker + transient-only retries, wired into browse_google; retry helper available but not yet applied to non-Google fetches)*
-- [ ] **Phase 7** — Security hardening *(✅ netguard (SSRF) + fsguard; ✅ secrets via env for fetch_emails; ✅ email now PEEK (read-only); TODO: output caps for email/feed/doc text; sha256 over md5 in video cache)*
+- [ ] **Phase 7** — Security hardening *(✅ netguard (SSRF) + fsguard; ✅ secrets via env for fetch_emails; ✅ email now PEEK (read-only); ✅ document output caps (`MAX_DOCUMENT_CHARS`, `MAX_EMAIL_BODY_CHARS`) + sha256 over md5 in the video transcript cache with md5-read fallback (`15a336c`))*
 - [ ] **Phase 8** — Feeds subsystem optimization *(✅ DONE: concurrent `check_feeds` (bounded by `NOAPI_MCP_FEEDS_CONCURRENCY`) with per-source isolation; conditional GET via ETag/Last-Modified (migration 3); per-worker connections + batch inserts; FTS5 `bm25()` ranking + `snippet()`; `since`/`until` filters on `search_feeds` (additive); optional retention pruning (`NOAPI_MCP_FEEDS_MAX_ITEMS_PER_SUB`/`_MAX_AGE_DAYS`, default off). Migration v0→v3 verified non-destructively on a copy of the real DB, 35 rows preserved.)*
 - [ ] **Phase 9** — MCP protocol polish (typed params, structured output, transports)
 - [ ] **Phase 10** — Packaging & CI (optional extras, fork metadata)
@@ -158,7 +158,12 @@ Owner answers (2026-10-14):
 - After Phase 0.4/0.5: **147 passed** (added `tests/unit/test_tool_registry.py` — 4 tests)
 - After Phase 1: **190 passed**.
 - After Phases 3 + 5(partial): **251 passed**.
-- After Phases 5/6/7 (2026-10-15): **326 passed**. New test files this session:
+- After Phases 5/6/7 (2026-10-15): **326 passed**.
+- After Phases 4 + 7-remainder + 8 + 5-remainder (2026-10-17): **377 passed**.
+  Browser benchmark (`scripts/bench_browser.py`): **2699 ms → 315 ms per call (8.58x)**.
+  New test files since 326: `test_browser_pool.py`, `test_pooled_browser.py`,
+  `test_browse_google_pool.py`, `test_feeds_phase8.py`, `test_feeds_concurrency.py`,
+  `test_feeds_conditional_get.py`, `test_output_caps.py`, `test_video_cache_keys.py`. New test files this session:
   `test_ratelimit.py`, `test_circuit_retry.py`, `test_resilience_integration.py`,
   `test_netguard.py`, `test_fsguard.py`, `test_guard_wiring.py`, `test_email_secrets.py`,
   `test_idempotent_writes.py`.
@@ -186,27 +191,21 @@ Owner answers (2026-10-14):
 3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
-1. **Phase 7 remainder** (small, high value):
-   - Output caps for email bodies / feed content / document text (`config.MAX_TEXT_CHARS`) with a
-     `[truncated …]` marker.
-   - Replace `md5` cache keys with `sha256` in `tools/video.py` (keep reading old md5-keyed
-     transcript caches as a fallback so existing caches aren't lost).
-2. **Phase 5 remainder**:
-   - `upload_to_s3` idempotency: `HEAD` the object before upload, skip when size/ETag match, add
-     `overwrite: bool = True`.
-   - Content-addressed atomic outputs for `generate_qr` / `extract_video_clip` / `convert_media`
-     (never silently clobber a user path; append `-1`, `-2`… unless `overwrite=True`).
-3. **Phase 9**: `Literal` enum params (must keep every previously-valid value valid), structured
-   output for the high-value read tools (keep the existing text rendering too — verify with
-   context7 how FastMCP emits both `structuredContent` and text), `--transport streamable-http`
+1. **Phase 9** (current): `Literal` enum params (must keep every previously-valid value valid),
+   structured output for the high-value read tools (keep the existing text rendering too — verify
+   with context7 how FastMCP emits both `structuredContent` and text), `--transport streamable-http`
    (bind 127.0.0.1), `--version`/`--check` CLI.
-4. **Phases 10–12**: optional extras (D4 = unchanged for now), CI gate, docs/CHANGELOG/ARCHITECTURE/
+2. **Phase 5 remainder** (optional polish): content-addressed atomic outputs for `generate_qr` /
+   `extract_video_clip` / `convert_media` (never silently clobber a user path; append `-1`, `-2`…
+   unless `overwrite=True`).
+3. **Phases 10–12**: optional extras (D4 = unchanged for now), CI gate, docs/CHANGELOG/ARCHITECTURE/
    SECURITY/ADRs, v0.4.0 bump + PR.
-5. Deferred/low-priority: `browser.py:validate_google_cookies` still launches its own Chromium
-   (one-shot startup diagnostic); `server_selenium.py` is dead code (needs owner OK to delete).
-6. Baseline: **358 pytest green**. Bench: `python scripts/bench_browser.py`.
+4. Deferred/low-priority: `server_selenium.py` is dead code (needs owner OK to delete);
+   `browser.py:validate_google_cookies` still launches its own Chromium (one-shot startup diagnostic,
+   deliberately outside the pool).
+5. Baseline: **377 pytest green**. Bench: `python scripts/bench_browser.py`.
    Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
-   Pre-existing ruff findings remain in `web_utils.py`/`maps.py`/`travel.py`/`vision.py`/`feeds.py`/
-   `search.py` (unused imports) and `server.py`/`anti_bot.py` — untouched, documented.
+   Pre-existing ruff findings remain in `web_utils.py` (7 F/E9) and other tool modules + `server.py`
+   /`anti_bot.py` (unused re-export imports) — untouched, no regression introduced.
    NOTE: `browse_google` and the pool are covered; `check_feeds` concurrency is covered by an
    *overlap* assertion (not a wall-clock threshold) — keep it that way (robust to CI noise).
