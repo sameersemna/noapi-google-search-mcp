@@ -1,24 +1,14 @@
-"""Allow running as `python -m google_search_mcp`.
+"""Allow running as ``python -m google_search_mcp``.
 
-This module provides the entry point for the MCP server when invoked
-via `python -m google_search_mcp`. It runs the FastMCP server using
-the stdio transport (the default for MCP servers behind mcp-proxy).
+Delegates to :func:`google_search_mcp.main` so the CLI behaves identically
+whether invoked via the console script or the module.
+
+NOTE: this module previously called ``main()`` at import time (outside the
+``__name__`` guard), which started the server whenever the module was imported.
+The call is now correctly guarded.
 """
 
-import sys
-
-from .server import mcp
-
-
-def main() -> None:
-    """Run the MCP server with stdio transport."""
-    print("Starting Google Search MCP server...", file=sys.stderr, flush=True)
-    mcp.run(transport="stdio")
-
+from . import main
 
 if __name__ == "__main__":
     main()
-
-from google_search_mcp import main
-
-main()
