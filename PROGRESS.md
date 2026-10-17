@@ -218,7 +218,11 @@ The hardening work is **complete on the local branch**. To ship it:
 3. Optional polish if ever wanted: content-addressed atomic outputs for `generate_qr` /
    `extract_video_clip` / `convert_media`; feed-body output caps; trimming duplicate "Sample prompts"
    docstring blocks; moving `browser.py`/`captcha.py`/`anti_bot.py` into `core/`.
-4. Verification commands: `pytest -m "not live" -q` · `pytest -q --cov=google_search_mcp.core` ·
+4. **Testing the deployment:** run `docs/TEST_PROMPT_v0.4.0.md` against the running service — a
+   copy‑paste prompt covering all 42 tools (new v0.4.0 parameters, cache/idempotency/guard
+   behaviour, and every old tool with default arguments), with expected results and `/health` +
+   `service.log` evidence checks.
+5. Verification commands: `pytest -m "not live" -q` · `pytest -q --cov=google_search_mcp.core` ·
    `python -m google_search_mcp --check` · `python scripts/bench_browser.py`.
    Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
 
