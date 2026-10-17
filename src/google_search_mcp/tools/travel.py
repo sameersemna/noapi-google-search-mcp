@@ -5,10 +5,18 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 """
 
 import asyncio
+import json
+import re
+import urllib.request
 from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, Image
 
+from ..config import (
+    LANG_DETECTION_CONFIDENCE_THRESHOLD,
+    LANGUAGE_CODES,
+    USER_AGENT,
+)
 from ..core.browser import pooled_browser
 from ..core.cache import cached
 from ..server import (
@@ -22,6 +30,8 @@ from ..server import (
     save_cookies,
     try_solve_captcha,
 )
+from ..utils.language import detect_source_language
+from ..utils.text import split_translation_chunks
 
 
 # google_translate

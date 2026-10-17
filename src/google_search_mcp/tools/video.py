@@ -11,6 +11,8 @@ import logging
 import os
 import re
 import subprocess
+from pathlib import Path
+from typing import Literal
 from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, Image
@@ -283,7 +285,7 @@ def _transcribe_audio(audio_path: str, model_size: str, language: str) -> dict:
 @mcp.tool()
 async def transcribe_video(
     url: str,
-    model_size: str = "tiny",
+    model_size: Literal["tiny", "base", "small", "medium", "large"] = "tiny",
     language: str = "",
     prefer_subtitles: bool = True,
     ctx: Context = None,
@@ -454,7 +456,7 @@ async def transcribe_video(
 async def search_transcript(
     url: str,
     query: str,
-    model_size: str = "tiny",
+    model_size: Literal["tiny", "base", "small", "medium", "large"] = "tiny",
     context_segments: int = 2,
 ) -> str:
     """Search inside an already-transcribed video for segments matching a keyword.

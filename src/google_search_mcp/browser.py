@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from playwright.async_api import BrowserContext, Page
 
+from . import config
 from .config import (
     BROWSER_DATA_DIR,
     COOKIE_JSON_PATH,

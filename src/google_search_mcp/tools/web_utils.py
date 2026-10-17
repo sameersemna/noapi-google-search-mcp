@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from email import policy as email_policy
 from email.parser import BytesParser as EmailParser
 from pathlib import Path
+from typing import Literal
 
 from mcp.server.fastmcp import Context, Image
 
@@ -146,7 +147,7 @@ async def visit_page(url: str) -> str:
 @mcp.tool()
 async def transcribe_local(
     file_path: str,
-    model_size: str = "tiny",
+    model_size: Literal["tiny", "base", "small", "medium", "large"] = "tiny",
     language: str = "",
     ctx: Context = None,
 ) -> str:

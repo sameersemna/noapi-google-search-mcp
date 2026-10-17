@@ -132,6 +132,26 @@ TIME_RANGE_MAP: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
+# Canonical closed value sets (single source of truth for tool enums)
+# ---------------------------------------------------------------------------
+# These back the ``Literal`` annotations on the tool parameters so the JSON
+# schema advertises valid values. Tests assert the ``Literal`` args match these
+# tuples exactly, so the two can never drift.
+
+#: Valid ``google_search(time_range=...)`` values (``""`` = no time filter).
+SEARCH_TIME_RANGES: tuple[str, ...] = ("", *TIME_RANGE_MAP.keys())
+
+#: Valid feed ``source_type`` values (``""`` = all, for the filter tools).
+FEED_SOURCE_TYPES: tuple[str, ...] = (
+    "news", "reddit", "hackernews", "github",
+    "arxiv", "youtube", "podcast", "twitter",
+)
+FEED_SOURCE_TYPES_OR_ALL: tuple[str, ...] = ("", *FEED_SOURCE_TYPES)
+
+#: Valid Whisper model sizes.
+MODEL_SIZES: tuple[str, ...] = ("tiny", "base", "small", "medium", "large")
+
+# ---------------------------------------------------------------------------
 # Language codes for translation
 # ---------------------------------------------------------------------------
 

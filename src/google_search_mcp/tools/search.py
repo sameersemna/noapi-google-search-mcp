@@ -6,6 +6,8 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 
 import asyncio
 import os
+import re
+from typing import Literal
 from urllib.parse import quote_plus
 
 from mcp.server.fastmcp import Context, Image
@@ -26,6 +28,7 @@ from ..server import (
     wait_for_google_results_ready,
 )
 from ..utils.network import (
+    fallback_duckduckgo_images,
     fallback_duckduckgo_news,
     fallback_web_search,
     format_fallback_results,
@@ -266,7 +269,14 @@ async def do_google_search(
 async def google_search(
     query: str,
     num_results: int = 5,
-    time_range: str = "",
+    time_range: Literal[
+        "",
+        "past_hour",
+        "past_day",
+        "past_week",
+        "past_month",
+        "past_year",
+    ] = "",
     site: str = "",
     page: int = 1,
     language: str = "",
