@@ -4,10 +4,10 @@
 > **RULE: read this file first at the start of every session; update it before every commit.**
 > Branch: `hardening/v0.4` · Conventional Commits · never commit to `main`.
 
-## Current phase: 9 — MCP Protocol Polish  *(next; Phases 4/6/7/8 + Phase 5 remainder are done)*
-## Current step: 9.0 — starting: typed params (Literal), structured output, transports, `--check`
+## Current phase: 9 — MCP Protocol Polish  *(CLI ✅, Literal typing ✅, structured output DEFERRED w/ ADR 0006; next: Phase 10 CI / Phase 11 docs)*
+## Current step: 9.2 — CLI + typed params done; structured output deferred (evidence in ADR 0006)
 ## Status: in-progress
-## Last green commit: tip of `hardening/v0.4` (**377 pytest green**) — baseline was `cc37fd3` (143 green)
+## Last green commit: tip of `hardening/v0.4` (**415 pytest green**) — baseline was `cc37fd3` (143 green)
 
 ---
 
@@ -43,7 +43,7 @@ single **6,441-line `server.py` with 38 tools**. The repository has since advanc
 - [ ] **Phase 6** — Rate limiting, retries, circuit breaker *(✅ token bucket + breaker + transient-only retries, wired into browse_google; retry helper available but not yet applied to non-Google fetches)*
 - [ ] **Phase 7** — Security hardening *(✅ netguard (SSRF) + fsguard; ✅ secrets via env for fetch_emails; ✅ email now PEEK (read-only); ✅ document output caps (`MAX_DOCUMENT_CHARS`, `MAX_EMAIL_BODY_CHARS`) + sha256 over md5 in the video transcript cache with md5-read fallback (`15a336c`))*
 - [ ] **Phase 8** — Feeds subsystem optimization *(✅ DONE: concurrent `check_feeds` (bounded by `NOAPI_MCP_FEEDS_CONCURRENCY`) with per-source isolation; conditional GET via ETag/Last-Modified (migration 3); per-worker connections + batch inserts; FTS5 `bm25()` ranking + `snippet()`; `since`/`until` filters on `search_feeds` (additive); optional retention pruning (`NOAPI_MCP_FEEDS_MAX_ITEMS_PER_SUB`/`_MAX_AGE_DAYS`, default off). Migration v0→v3 verified non-destructively on a copy of the real DB, 35 rows preserved.)*
-- [ ] **Phase 9** — MCP protocol polish (typed params, structured output, transports)
+- [ ] **Phase 9** — MCP protocol polish *(✅ CLI `--version`/`--check`/`--transport` + fixed an unguarded `main()` in `__main__.py`; ✅ `Literal` enums for `time_range` + `model_size`; ⏸ rich structured output DEFERRED — the installed FastMCP replaces the text channel with JSON when a model is returned (evidence + decision in ADR 0006); feed `source_type` deliberately left free-form)*
 - [ ] **Phase 10** — Packaging & CI (optional extras, fork metadata)
 - [ ] **Phase 11** — Documentation (README/CHANGELOG/ARCHITECTURE/SECURITY/ADRs)
 - [ ] **Phase 12** — Final verification & handoff (v0.4.0)
@@ -119,6 +119,16 @@ Side-effect legend: **R**=read-only · **LW**=local write/cache · **RW**=remote
 | B12 `transcribe_local` missing `TRANSCRIPT_CACHE_DIR`/`_transcript_cache_path`/`_transcribe_audio` | ✅ **FIXED** `175bc2f` | NameError confirmed at runtime; added imports in `tools/web_utils.py`; test `tests/unit/test_web_utils_regressions.py` |
 | B13 `_read_docx_text` missing `ET` import | ✅ **FIXED** `175bc2f` | every `.docx` read raised NameError; added `import xml.etree.ElementTree as ET`; same test file |
 | B14 `fetch_emails` used `(RFC822)` → marked mail as **seen** | ✅ **FIXED** `72eb3f5` | switched to `BODY.PEEK[]` so the tool is genuinely read-only; test `tests/unit/test_email_secrets.py` |
+| B15 `extract_video_clip` used `Path()` unimported | ✅ **FIXED** `8621882` | every local-file clip extraction raised NameError (confirmed at runtime); added `from pathlib import Path` |
+| B16 `travel.py` HTTP translate helpers / browser path: `urllib`, `json`, `re`, `USER_AGENT`, `split_translation_chunks`, `LANGUAGE_CODES`, `detect_source_language`, `LANG_DETECTION_CONFIDENCE_THRESHOLD` unimported | ✅ **FIXED** `8621882` | `google_translate` raised NameError on its first line; added the imports |
+| B17 `search.py`: `fallback_duckduckgo_images` + `re` unimported | ✅ **FIXED** `8621882` | google_images' DDG fallback + google_trends broke; added imports |
+| B18 `vision.py`: `Path` + `datetime` unimported | ✅ **FIXED** `8621882` | google_lens / lens_detect / list_images local paths raised NameError; added imports |
+| B19 `browser.py`: `config` module unimported | ✅ **FIXED** `8621882` | `simulate_human_behavior` jitter path failed at the default level; added `from . import config` |
+| B20 `__main__.py` called `main()` at import time (outside the `__name__` guard) | ✅ **FIXED** `71147f1` | importing the module started the server; removed the unguarded/duplicate calls; regression test in `tests/unit/test_cli.py` |
+
+**Undefined-name guard (`8621882`):** `tests/unit/test_undefined_names.py` runs `ruff --select F821,F823`
+over the whole package (skips if ruff is absent), so this entire bug class cannot recur. Package-wide
+F/E9 findings dropped **193 → 164**.
 
 **Migration system** (`703ad3c`): `PRAGMA user_version` + `_MIGRATIONS` (v1 base schema at v2 shape,
 v2 in-place upgrade of pre-hardening DBs). Verified non-destructively on a copy of the real DB
@@ -163,7 +173,10 @@ Owner answers (2026-10-14):
   Browser benchmark (`scripts/bench_browser.py`): **2699 ms → 315 ms per call (8.58x)**.
   New test files since 326: `test_browser_pool.py`, `test_pooled_browser.py`,
   `test_browse_google_pool.py`, `test_feeds_phase8.py`, `test_feeds_concurrency.py`,
-  `test_feeds_conditional_get.py`, `test_output_caps.py`, `test_video_cache_keys.py`. New test files this session:
+  `test_feeds_conditional_get.py`, `test_output_caps.py`, `test_video_cache_keys.py`.
+- After Phase 9 + B15–B20 (2026-10-17): **415 passed**. New test files:
+  `test_cli.py` (11), `test_param_typing.py` (18), `test_undefined_names.py` (9).
+  ADR added: `docs/adr/0006-phase9-typing-and-structured-output.md`. New test files this session:
   `test_ratelimit.py`, `test_circuit_retry.py`, `test_resilience_integration.py`,
   `test_netguard.py`, `test_fsguard.py`, `test_guard_wiring.py`, `test_email_secrets.py`,
   `test_idempotent_writes.py`.
@@ -191,21 +204,24 @@ Owner answers (2026-10-14):
 3. Generated test logs/reports untracked and gitignored (D3) — files still on disk.
 
 ## Next action (exact, for a fresh session)
-1. **Phase 9** (current): `Literal` enum params (must keep every previously-valid value valid),
-   structured output for the high-value read tools (keep the existing text rendering too — verify
-   with context7 how FastMCP emits both `structuredContent` and text), `--transport streamable-http`
-   (bind 127.0.0.1), `--version`/`--check` CLI.
-2. **Phase 5 remainder** (optional polish): content-addressed atomic outputs for `generate_qr` /
-   `extract_video_clip` / `convert_media` (never silently clobber a user path; append `-1`, `-2`…
-   unless `overwrite=True`).
-3. **Phases 10–12**: optional extras (D4 = unchanged for now), CI gate, docs/CHANGELOG/ARCHITECTURE/
-   SECURITY/ADRs, v0.4.0 bump + PR.
-4. Deferred/low-priority: `server_selenium.py` is dead code (needs owner OK to delete);
-   `browser.py:validate_google_cookies` still launches its own Chromium (one-shot startup diagnostic,
-   deliberately outside the pool).
-5. Baseline: **377 pytest green**. Bench: `python scripts/bench_browser.py`.
-   Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
-   Pre-existing ruff findings remain in `web_utils.py` (7 F/E9) and other tool modules + `server.py`
-   /`anti_bot.py` (unused re-export imports) — untouched, no regression introduced.
+1. **Phase 9 finish (optional)**: trim duplicate "Sample prompts" blocks from docstrings (cosmetic;
+   keep the helpful ones). Structured output stays deferred (ADR 0006) unless a client needs it.
+2. **Phase 10 CI** (allowed under D4 — "leave packaging/fork metadata unchanged" refers to
+   authors/URLs/PyPI name and the optional-extras split, NOT to CI): add
+   `.github/workflows/ci.yml` gating `ruff check` + `pytest -m "not live"` on push/PR, and make the
+   existing publish workflow depend on CI success.
+3. **Phase 11 docs**: README "Configuration" table (every `NOAPI_MCP_*` var + legacy fallbacks),
+   "Security model", "Idempotency & caching", "Rate limiting & blocks", transports/CLI; then
+   `CHANGELOG.md` (Keep a Changelog) for 0.4.0 listing B1–B20 + features; `docs/ARCHITECTURE.md`
+   (Mermaid) + request lifecycle; `SECURITY.md`; ADRs 0001/0003/0004/0005 (0002 and 0006 exist).
+4. **Phase 12 final**: full offline suite + coverage on `core/`; bump version to 0.4.0
+   (single-sourced); re-run `scripts/bench_browser.py`; run `--check`; open PR `hardening/v0.4 → main`.
+5. Deferred/low-priority: `server_selenium.py` is dead code (needs owner OK to delete);
+   `browser.py:validate_google_cookies` launches its own Chromium (one-shot startup diagnostic).
+   Output caps exist for docs/email; feed-body caps and content-addressed local outputs
+   (`generate_qr`/`extract_video_clip`/`convert_media`) remain optional polish.
+6. Baseline: **415 pytest green**. Env python: `/home/sameer/anaconda3/envs/mcp-google/bin/python`.
+   Pre-existing ruff findings remain in the tool modules + `server.py`/`anti_bot.py` (unused
+   re-export imports) — untouched, no regression introduced.
    NOTE: `browse_google` and the pool are covered; `check_feeds` concurrency is covered by an
    *overlap* assertion (not a wall-clock threshold) — keep it that way (robust to CI noise).
