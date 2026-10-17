@@ -83,14 +83,12 @@ async def with_retries(
 ) -> T:
     """Call *fn*, retrying transient failures with back-off + full jitter."""
     attempts = max(1, attempts)
-    last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
             return await fn()
         except BaseException as exc:  # noqa: BLE001 - classify then re-raise
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            last_exc = exc
             if not is_transient(exc) or attempt >= attempts:
                 raise
             ceiling = min(max_delay, base_delay * (2 ** (attempt - 1)))
@@ -105,5 +103,6 @@ async def with_retries(
                 attempt, attempts, delay, exc,
             )
             await sleep(delay)
-    assert last_exc is not None
-    raise last_exc
+    # Unreachable unless attempts < 1; explicit raise instead of `assert`
+    # (asserts are stripped under python -O).
+    raise RuntimeError("retry loop exited without a result")

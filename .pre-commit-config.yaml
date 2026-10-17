@@ -1,0 +1,24 @@
+# Pre-commit hooks. Install once with:  pre-commit install
+# Run against everything with:          pre-commit run --all-files
+#
+# NOTE: ruff-format is enabled but the legacy modules are not yet formatted, so
+# running it on a whole file will produce a large diff. It only touches files
+# you actually change, which is the intended ratchet.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format

@@ -22,9 +22,10 @@ Verified APIs: ``playwright.async_api.async_playwright`` (``.start()``/``.stop()
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from .. import config
@@ -67,13 +68,11 @@ class BrowserPool:
         def _mark_dead(*_args: Any) -> None:
             self._dead = True
 
-        try:
+        with contextlib.suppress(Exception):  # event wiring is best-effort
             context.on("close", _mark_dead)
             browser = getattr(context, "browser", None)
             if browser is not None:
                 browser.on("disconnected", _mark_dead)
-        except Exception:  # noqa: BLE001 - event wiring is best-effort
-            pass
         log.info("browser pool started (max_concurrent=%d)", self._max)
         return context
 
@@ -92,10 +91,9 @@ class BrowserPool:
             try:
                 yield page
             finally:
-                try:
+                # page may already be gone; closing is best-effort
+                with contextlib.suppress(Exception):
                     await page.close()
-                except Exception:  # noqa: BLE001 - page may already be gone
-                    pass
 
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
@@ -132,15 +130,11 @@ class BrowserPool:
             self._pw = None
             self._dead = True
         if context is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await context.close()
-            except Exception:  # noqa: BLE001
-                pass
         if pw is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await pw.stop()
-            except Exception:  # noqa: BLE001
-                pass
 
     @property
     def is_started(self) -> bool:
@@ -209,10 +203,9 @@ async def pooled_browser(
         try:
             yield context, page
         finally:
-            try:
+            # close is best effort
+            with contextlib.suppress(Exception):
                 await context.close()
-            except Exception:  # noqa: BLE001 - close is best effort
-                pass
 
 
 async def aclose() -> None:

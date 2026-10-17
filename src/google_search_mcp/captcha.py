@@ -9,10 +9,6 @@ import os
 import random
 import urllib.request
 
-import cv2
-import numpy as np
-import onnxruntime as ort
-
 from .config import (
     CAPTCHA_CLASS_MAP,
     CAPTCHA_MODEL_DIR,
@@ -125,8 +121,29 @@ def _ensure_captcha_model() -> bool:
         return False
 
 
+def _load_vision_deps():
+    """Import the heavy vision deps lazily.
+
+    ``cv2`` / ``numpy`` / ``onnxruntime`` are only needed when actually solving
+    a CAPTCHA, so importing them here (instead of at module import time) keeps
+    server startup fast and avoids loading ~100 MB of native libraries for the
+    common case where no CAPTCHA is ever seen. Returns ``(cv2, np, ort)``.
+    """
+    import cv2
+    import numpy as np
+    import onnxruntime as ort
+
+    return cv2, np, ort
+
+
 def _classify_cells(cells: list[bytes], prompt_keywords: list[str]) -> list[bool]:
     """Classify image cells against CAPTCHA prompt keywords using MobileNetV2."""
+    try:
+        cv2, np, ort = _load_vision_deps()
+    except ImportError:
+        # Vision deps unavailable (e.g. minimal install) — cannot classify.
+        return [False] * len(cells)
+
     if not _ensure_captcha_model():
         return [False] * len(cells)
 
@@ -178,6 +195,10 @@ def _classify_cells(cells: list[bytes], prompt_keywords: list[str]) -> list[bool
 
 async def _solve_image_challenge(page) -> bool:
     """Attempt to solve a reCAPTCHA image challenge using MobileNetV2."""
+    try:
+        cv2, np, _ort = _load_vision_deps()
+    except ImportError:
+        return False
     try:
         challenge_frame = None
         for frame in page.frames:

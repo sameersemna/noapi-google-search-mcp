@@ -6,9 +6,32 @@ on:
 
 permissions:
   id-token: write
+  contents: read
 
 jobs:
+  # Gate the release on the offline test suite: never publish a build whose
+  # tests fail.
+  test:
+    name: tests before publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + dev tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run offline tests
+        run: pytest -m "not live" -q
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     environment: pypi
     steps:
