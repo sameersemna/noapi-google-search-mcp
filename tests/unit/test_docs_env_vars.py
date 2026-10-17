@@ -21,6 +21,7 @@ _SRC = _REPO / "src" / "google_search_mcp"
 _DOC_FILES = [
     _REPO / "README.md",
     _REPO / "CHANGELOG.md",
+    _REPO / "SECURITY.md",
 ]
 _DOC_GLOBS = ["docs/**/*.md"]
 

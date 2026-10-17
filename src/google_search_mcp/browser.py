@@ -5,6 +5,7 @@ Playwright browser context with stealth patches, cookie persistence, and
 human-like interaction delays.
 """
 
+import asyncio
 import json
 import os
 import random
@@ -268,11 +269,17 @@ async def take_debug_screenshot(page: Page, label: str) -> str | None:
 
 
 async def save_cookies(context: BrowserContext) -> None:
-    """Persist browser cookies to disk so Google sees a returning user."""
+    """Persist browser cookies to disk so Google sees a returning user.
+
+    Written atomically (temp file + ``os.replace``) with mode ``0600``: a crash
+    mid-write used to leave a truncated JSON file that poisoned every later
+    cookie load, and the jar holds session credentials.
+    """
     try:
         cookies = await context.cookies()
-        with open(COOKIE_JSON_PATH, "w") as f:
-            json.dump(cookies, f)
+        from .core.atomic import atomic_write_json
+
+        await asyncio.to_thread(atomic_write_json, COOKIE_JSON_PATH, cookies, mode=0o600)
     except Exception:
         pass
 
