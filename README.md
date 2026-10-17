@@ -9,6 +9,138 @@ If you want to support noapi-google-mcp or gpt-oss-20B/120B-Vision and other ope
 
 **42 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
 
+## What's New in v0.4.0 — Hardening (Caching, Resilience, Security, CI)
+
+v0.4.0 is a hardening release. **All 42 tool names, parameters and defaults stay
+backward compatible** — the changes are additive (new optional parameters, new
+env flags) except where noted in the [CHANGELOG](CHANGELOG.md).
+
+Highlights:
+
+- **Shared browser pool** with a concurrency cap (`MAX_BROWSERS`, default 3) and
+  a fresh context per call. Launches Chromium **once** instead of per call:
+  measured **8.6× faster per call** (2699 ms → 315 ms). It also removes a real
+  cause of Google blocks — several parallel searches contending for the same
+  Chromium user-data-dir lock.
+- **Read-through cache + singleflight** for every read-only lookup, with
+  per-tool TTLs. Repeat queries are instant *and* send fewer requests upstream
+  (the most effective anti-block measure). Errors and blocked results are never
+  cached. Bypass with `fresh=true` or `NOAPI_MCP_ENABLE_CACHE=0`.
+- **Idempotent side effects.** `paste_text`, `shorten_url`, `archive_webpage` and
+  `upload_to_s3` no longer create duplicates when a client retries: an identical
+  call within 24 h returns the original result. `upload_to_s3` also gained
+  `overwrite=False` to refuse replacing an existing object.
+- **Resilience.** Per-host token-bucket rate limiting, a Google **circuit
+  breaker** that fails fast (and cheaply) during a block instead of deepening it,
+  and transient-only retries with jitter.
+- **Security.** An SSRF guard (`file://`, `data:` and cloud-metadata addresses are
+  always rejected; every resolved address is checked), a filesystem
+  allowed-roots guard, credentials via environment variables, secrets kept out of
+  subprocess command lines and redacted in logs, and cookie-jar writes are now
+  atomic with mode `0600`.
+- **MCP protocol.** Every tool now advertises `ToolAnnotations` (read-only /
+  idempotent / destructive / open-world). Failures are returned as real MCP
+  errors (`isError: true`) with the same human-readable wording as before.
+- **Feeds.** Concurrent checks with per-source isolation, conditional GET
+  (ETag/Last-Modified), correct date ordering, FTS `bm25()` ranking, and a
+  `PRAGMA user_version` migration system.
+- **CLI**: `--version`, `--check` (dependency doctor), and
+  `--transport streamable-http` (binds `127.0.0.1` by default).
+- **20 latent bugs fixed** (B1–B20) — including several tools that were
+  completely broken by a missing import, e.g. `google_translate` and local-file
+  clip extraction.
+- **CI** on every push/PR with an offline test matrix and a coverage gate on the
+  new `core/` package; releases now run the tests before publishing.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list, and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the request lifecycle.
+
+## Configuration
+
+Every setting can be given with a `NOAPI_MCP_` prefix. For backward
+compatibility the legacy bare name is also honoured (e.g. both
+`NOAPI_MCP_MAX_BROWSERS` and `MAX_BROWSERS` work), and every documented variable
+is verified against the code by a test.
+
+### Concurrency & browser
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_MAX_BROWSERS` | `3` | Max concurrent Chromium contexts. |
+| `NOAPI_MCP_BROWSER_POOL` | `1` | `0` restores launch-per-call behaviour. |
+| `GOOGLE_REQUEST_MIN_GAP` | `3.0` | Legacy pacing; sets the default Google rate. |
+
+### Caching
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_ENABLE_CACHE` | `1` | `0` disables the read-through cache. |
+| `NOAPI_MCP_CACHE_TTL_SECONDS` | `3600` | Fallback TTL for tools without a specific one. |
+| `NOAPI_MCP_CACHE_MAX_ENTRIES` | `512` | In-memory LRU bound. |
+| `NOAPI_MCP_CACHE_DB_PATH` | `<cache>/cache.db` | Optional on-disk tier. |
+
+### Idempotency
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_IDEMPOTENCY_WINDOW_SECONDS` | `86400` | How long a recorded result stays reusable. |
+| `NOAPI_MCP_IDEMPOTENCY_DB_PATH` | `<cache>/idempotency.db` | Store location. |
+
+### Rate limiting, retries & circuit breaker
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_GOOGLE_RPS` | `0.5` | Google token-bucket refill rate (requests/second). |
+| `NOAPI_MCP_GOOGLE_BURST` | `2` | Burst size for the Google bucket. |
+| `NOAPI_MCP_CIRCUIT_COOLDOWN_SECONDS` | `600` | Initial cooldown after a detected block. |
+| `NOAPI_MCP_CIRCUIT_MAX_COOLDOWN_SECONDS` | `3600` | Cap for the escalating cooldown. |
+
+### Security
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_ALLOW_PRIVATE_URLS` | `1` | `0` rejects loopback/private/reserved URLs (link-local and cloud-metadata are always rejected). |
+| `NOAPI_MCP_ALLOWED_ROOTS` | `$HOME` + temp dir | `os.pathsep`-separated roots that path tools may touch. |
+| `NOAPI_MCP_IMAP_USER` / `NOAPI_MCP_IMAP_PASSWORD` | — | Preferred over passing credentials as tool arguments. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_ENDPOINT_URL` | — | S3/MinIO credentials (never put on the command line). |
+
+### Output caps
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_MAX_DOCUMENT_CHARS` | see `config.py` | Truncation limit for `read_document`. |
+| `NOAPI_MCP_MAX_EMAIL_BODY_CHARS` | see `config.py` | Truncation limit per email body. |
+| `NOAPI_MCP_MAX_TEXT_CHARS` | see `config.py` | Generic text cap. |
+
+### Feeds
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_FEEDS_CONCURRENCY` | `8` | Max sources fetched concurrently by `check_feeds`. |
+| `NOAPI_MCP_FEEDS_MAX_ITEMS_PER_SUB` | `0` (unlimited) | Prune to N newest items per subscription. |
+| `NOAPI_MCP_FEEDS_MAX_AGE_DAYS` | `0` (unlimited) | Prune items older than N days. |
+
+### Server & transport
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOAPI_MCP_TRANSPORT` | `stdio` | `stdio`, `sse` or `streamable-http`. |
+| `NOAPI_MCP_HTTP_HOST` / `NOAPI_MCP_HTTP_PORT` | `127.0.0.1` / `11498` | Bind address for HTTP transports. |
+| `NOAPI_MCP_SEARCH_PAGE_SIZE` | `0` (off) | Fixed page stride for `google_search` pagination. |
+| `LOG_LEVEL` | `INFO` | Log level (logs always go to **stderr**). |
+
+### CLI
+
+```bash
+noapi-google-search-mcp --version          # print version
+noapi-google-search-mcp --check            # dependency doctor (exit != 0 if a required dep is missing)
+noapi-google-search-mcp                    # run over stdio (default)
+noapi-google-search-mcp --transport streamable-http --host 127.0.0.1 --port 11498
+```
+
+See also [SECURITY.md](SECURITY.md) for the threat model and an operator
+hardening checklist.
+
 ## What's New in v0.3.6 — Remote Whisper Delegation (Delegate Heavy Transcription to a GPU Host)
 
 The local `faster-whisper` path runs on CPU + int8 and is fast enough for
