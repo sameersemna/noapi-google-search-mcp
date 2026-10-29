@@ -103,6 +103,28 @@ def test_health_payload_has_metrics():
     assert "per_tool" in payload["metrics"]
 
 
+def test_health_checks_rapidocr_onnxruntime_import(monkeypatch):
+    from google_search_mcp import health_server
+
+    imported_modules = []
+
+    def safe_import(module):
+        imported_modules.append(module)
+        return True, "test-version"
+
+    monkeypatch.setattr(health_server, "_safe_import", safe_import)
+    monkeypatch.setattr(health_server, "_check_playwright", lambda: {"ok": True})
+    monkeypatch.setattr(health_server, "_check_ytdlp_ejs", lambda: {"ok": True})
+    monkeypatch.setattr(health_server, "_check_js_runtime", lambda: {"ok": True})
+    monkeypatch.setattr(health_server, "_check_whisper_remote", lambda: {"ok": True})
+
+    dependencies = health_server._check_dependencies()
+
+    assert "rapidocr_onnxruntime" in imported_modules
+    assert "rapidocr" not in imported_modules
+    assert dependencies["rapidocr"]["ok"] is True
+
+
 def test_metrics_wrapper_records_tool_call():
     from google_search_mcp.server import mcp
 

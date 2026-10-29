@@ -29,6 +29,34 @@ from ..server import (
 # google_finance
 # ---------------------------------------------------------------------------
 
+def _clean_display_price(value: str) -> str:
+    """Reject chart-axis text accidentally matched as a display price."""
+    value = value.strip()
+    if not re.fullmatch(r"(?:[$€£]\s*)?\d[\d,]*(?:\.\d+)?(?:\s+[A-Z]{3})?", value):
+        return ""
+    return value
+
+
+def _extract_contextual_price(query: str, page_text: str) -> str:
+    """Find a price immediately following the requested ticker/company name."""
+    anchor = query.split(":", 1)[0].strip().casefold()
+    lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+
+    for index, line in enumerate(lines):
+        normalized = line.casefold()
+        if normalized.split(":", 1)[0] != anchor and not normalized.startswith(f"{anchor} "):
+            continue
+        for candidate in lines[index + 1 : index + 6]:
+            price = _clean_display_price(candidate)
+            if price:
+                return price
+    return ""
+
+
+def _has_financial_data(data) -> bool:
+    return any(data.get(key) for key in ("price", "display_price", "panel_text"))
+
+
 @cached("google_finance")
 async def do_google_finance(query: str) -> str:
     """Search Google Finance for stock/market data."""
@@ -45,11 +73,8 @@ async def do_google_finance(query: str) -> str:
             """
             () => {
                 const data = {};
-                const priceEl = document.querySelector(
-                    '[data-attrid*="Price"], .YMlKec, .kCrYT .IsqQVc, ' +
-                    '[data-last-price], .fxKbKc, .kf1m0'
-                );
-                data.price = priceEl ? priceEl.innerText.trim() : '';
+                const priceEl = document.querySelector('[data-last-price]');
+                data.price = priceEl ? priceEl.getAttribute('data-last-price') : '';
 
                 const nameEl = document.querySelector(
                     '.oPhL2e .PZPZlf, [data-attrid*="title"], .zzDege'
@@ -91,7 +116,7 @@ async def do_google_finance(query: str) -> str:
             """
         )
 
-        if not data.get("price") and not data.get("name"):
+        if not data.get("price") or not data.get("name"):
             # Fallback: try direct finance URL
             direct_url = f"https://www.google.com/finance/quote/{encoded_query}"
             await page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
@@ -144,21 +169,29 @@ async def do_google_finance(query: str) -> str:
 
                     const aboutEl = document.querySelector('.bLLb2d, .Yfwt5');
                     data.about = aboutEl ? aboutEl.innerText.trim().substring(0, 500) : '';
+                    data.page_text = document.body ? document.body.innerText : '';
 
                     return data;
                 }
                 """
             )
+            data["display_price"] = _clean_display_price(
+                data.get("display_price", "")
+            )
+            if not data["display_price"]:
+                data["display_price"] = _extract_contextual_price(
+                    query, data.get("page_text", "")
+                )
 
         lines = [f"Google Finance: {query}\n"]
 
         if data.get("name"):
             lines.append(f"Company: {data['name']}")
-        if data.get("display_price"):
-            lines.append(f"Price: {data['display_price']}")
-        elif data.get("price"):
+        if data.get("price"):
             currency = data.get("currency", "USD")
             lines.append(f"Price: {data['price']} {currency}")
+        elif data.get("display_price"):
+            lines.append(f"Price: {data['display_price']}")
         if data.get("exchange"):
             lines.append(f"Exchange: {data['exchange']}")
         if data.get("change_pct") or data.get("change_abs"):
@@ -179,7 +212,7 @@ async def do_google_finance(query: str) -> str:
         if data.get("panel_text") and not data.get("price"):
             lines.append(f"\n{data['panel_text']}")
 
-        if not data.get("price") and not data.get("panel_text"):
+        if not _has_financial_data(data):
             lines.append("Could not find financial data. Try a stock ticker like 'AAPL:NASDAQ' or 'TSLA:NASDAQ'.")
 
         return "\n".join(lines)

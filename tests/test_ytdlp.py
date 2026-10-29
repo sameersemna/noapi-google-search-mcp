@@ -306,9 +306,18 @@ def test_build_ydl_opts_no_js_runtime_for_non_youtube():
     assert "extractor_args" not in opts
 
 
-def test_binary_version_parsing():
-    """Version parsing must handle the formats node/deno actually print."""
-    assert ytdlp._binary_version("/bin/echo") is None  # no version in output
+def test_binary_version_parsing(monkeypatch):
+    """Unparseable version output must not produce a version tuple."""
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="no version here", stderr=""
+        ),
+    )
+    assert ytdlp._binary_version("/fake/binary") is None
 
 
 def test_detect_js_runtime_rejects_old_version(monkeypatch):

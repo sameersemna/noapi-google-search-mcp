@@ -438,6 +438,11 @@ async def google_flights(
 # google_hotels
 # ---------------------------------------------------------------------------
 
+def _is_hotel_listing_name(name: str) -> bool:
+    """Reject generic Google navigation cards parsed as hotel listings."""
+    return name.strip().casefold() not in {"sign in", "ai mode", "view all hotels"}
+
+
 @cached("google_hotels")
 async def do_google_hotels(query: str, num_results: int = 5) -> list:
     """Search Google for hotel information."""
@@ -607,6 +612,12 @@ async def do_google_hotels(query: str, num_results: int = 5) -> list:
                 num_results,
             )
 
+            data["hotels"] = [
+                hotel
+                for hotel in data.get("hotels", [])
+                if _is_hotel_listing_name(hotel.get("name", ""))
+            ]
+
             # Download thumbnail images for inline display
             import base64 as b64mod
             if data.get("hotels"):
@@ -690,6 +701,8 @@ async def do_google_hotels(query: str, num_results: int = 5) -> list:
             if not has_data and not data.get("hotels_url"):
                 content.append("No hotel data found. Try searching directly:")
                 content.append("https://www.google.com/travel/hotels")
+            elif not has_data:
+                content.append("No hotel listings could be extracted from Google results.")
 
             return content
 

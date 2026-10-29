@@ -584,7 +584,7 @@ def _check_dependencies() -> dict[str, Any]:
     deps["yt_dlp_ejs"] = _check_ytdlp_ejs()
     deps["js_runtime"] = _check_js_runtime()
     deps["whisper_remote"] = _check_whisper_remote()
-    ok, ver = _safe_import("rapidocr")
+    ok, ver = _safe_import("rapidocr_onnxruntime")
     deps["rapidocr"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     ok, ver = _safe_import("lingua")
     deps["lingua"] = {"ok": ok, "version": ver, "error": None if ok else ver}
