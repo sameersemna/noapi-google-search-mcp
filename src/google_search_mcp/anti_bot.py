@@ -289,6 +289,17 @@ async def browse_google(
             # /search?q=... directly).
             from . import anti_detect
             used_typing_flow = False
+
+            # The typing flow rebuilds the query from scratch, so a ``tbm=``
+            # vertical in the URL (books/news/shopping/images) would be silently
+            # dropped and the scraper would end up parsing a plain web SERP.
+            # Derive it from the URL unless the caller passed one explicitly.
+            effective_vertical = vertical or (
+                anti_detect.parse_vertical_from_url(url)
+                if anti_detect.is_google_search_url(url)
+                else None
+            )
+
             if (
                 anti_detect.is_google_search_url(url)
                 and anti_detect.config.ANTIDETECT_SEARCH_VIA_TYPING
@@ -300,7 +311,7 @@ async def browse_google(
                         file=sys.stderr, flush=True,
                     )
                     typed_ok = await anti_detect.search_via_typing(
-                        page, query, vertical=vertical
+                        page, query, vertical=effective_vertical
                     )
                     used_typing_flow = typed_ok
                     if not typed_ok:
@@ -399,7 +410,7 @@ async def browse_google(
                         retry_query = anti_detect.parse_query_from_url(url)
                         if retry_query:
                             await anti_detect.search_via_typing(
-                                page, retry_query, vertical=vertical
+                                page, retry_query, vertical=effective_vertical
                             )
                         else:
                             await page.goto(url, wait_until="domcontentloaded", timeout=30000)

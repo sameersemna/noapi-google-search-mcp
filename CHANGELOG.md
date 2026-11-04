@@ -35,6 +35,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`google_books` returned plain web results instead of book results.** The
+  search-via-typing anti-detect flow rebuilds the query from scratch, so the
+  `tbm=` vertical in the request URL was dropped and the scraper parsed a normal
+  SERP. `browse_google` now derives the vertical from the URL itself
+  (`parse_vertical_from_url`), which also restores `google_news` (`nws`) and
+  `google_shopping` (`shop`); both of those tools already carried vertical-specific
+  selectors that could never match. `google_images` keeps its explicit `isch`.
+- **Queries were prepended with the warm-up query.** `search_via_typing` typed
+  into the Google search box without clearing it, and the anti-detect warmup
+  leaves its benign query there. The search actually sent was
+  `news today<taymiyyah>` — it still returned a plausible SERP, so nothing failed
+  visibly. The flow now always starts from the homepage, clears the box
+  (select-all/delete, with a `fill("")` fallback), verifies the box holds the
+  query before submitting, and verifies the `q=` Google actually received. If any
+  check fails it returns `False`, so `browse_google` navigates straight to the
+  requested URL rather than scraping a SERP for the wrong search.
+- **`google_news` fell back to raw page text.** Its result-container selectors
+  (`div.SoaBEf`, `div.g`, …) no longer exist. It now targets the current cards
+  (`a.aJWbwf` / `div.WCv1we` inside `#rso`, headline `.n0jPhd`, snippet
+  `.UqSP2b`, date `.OSrXXb`) with the old selectors kept as fallbacks, and
+  de-duplicates repeated articles.
+- **`google_books` parsing.** The extractor now anchors on
+  `books.google.com/books?id=…` links rather than every `<h3>`, so an unrelated
+  SERP can no longer be mistaken for books; results are de-duplicated by book id
+  (one book is linked several times); the author comes from the `inauthor:` link
+  instead of any nearby span containing a comma or a digit; the publication year
+  is captured; and URLs are canonicalised to
+  `https://books.google.com/books?id=…`.
 - Requests addressed to a LAN hostname (e.g. `latitude:11403`) are no longer
   rejected with `421 Invalid Host header`. `FastMCP` freezes its
   `transport_security` allow-list from the construction-time loopback host, so

@@ -603,6 +603,27 @@ def is_google_search_url(url: str) -> bool:
     return bool(_GOOGLE_SEARCH_URL_RE.match(url))
 
 
+def parse_vertical_from_url(url: str) -> str | None:
+    """Extract the ``tbm=`` search vertical from a Google search URL.
+
+    Google's ``tbm`` parameter selects the result vertical: ``bks`` (Books),
+    ``nws`` (News), ``shop`` (Shopping), ``isch`` (Images), ``vid`` (Videos),
+    ``lcl`` (Maps/Local). Passing the query through the search-via-typing flow
+    drops every URL parameter, so the vertical has to be re-applied afterwards —
+    see :func:`search_via_typing`. Callers that build a ``tbm=`` URL should not
+    also have to remember to pass ``vertical=``; derive it here instead.
+
+    Returns ``None`` when the URL carries no vertical (a plain web search).
+    """
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query, keep_blank_values=False)
+        value = (qs.get("tbm") or [""])[0].strip()
+        return value or None
+    except Exception:  # pragma: no cover - malformed URL
+        return None
+
+
 def parse_query_from_url(url: str) -> str:
     """Extract the ``q=`` query from a Google search URL.
 
@@ -616,6 +637,11 @@ def parse_query_from_url(url: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def _normalise_query(text: str) -> str:
+    """Normalise a query for comparison (case, whitespace, ``+`` vs space)."""
+    return " ".join((text or "").replace("+", " ").split()).casefold()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -884,9 +910,20 @@ async def search_via_typing(
     log.info("Search via typing: %r", query)
 
     try:
-        # Step 1: Navigate to the homepage if we're not on a Google page
-        current_url = page.url
-        if "google.com" not in current_url.lower():
+        # Step 1: Start from a clean Google homepage.
+        #
+        # Typing into the search box of a *results* page is fragile: that box is
+        # a different DOM node, arrives pre-filled with the previous query, and
+        # a failed focus silently submits the stale value. Always coming from the
+        # homepage gives a fresh, empty box and is what a returning user does
+        # anyway.
+        current_url = page.url or ""
+        parsed_current = urlparse(current_url)
+        on_homepage = (
+            "google." in parsed_current.netloc.lower()
+            and parsed_current.path in ("", "/", "/ncr")
+        )
+        if not on_homepage:
             log.debug("Navigating to google.com for search-via-typing")
             await page.goto(
                 "https://www.google.com/ncr",
@@ -923,6 +960,34 @@ async def search_via_typing(
 
         # Small wait after focusing
         await page.wait_for_timeout(random.randint(200, 500))
+
+        # Step 4b: Clear whatever is already in the box.
+        #
+        # This is not cosmetic. Google keeps the submitted query in the search
+        # box on the results page, and the anti-detect warmup leaves a benign
+        # query there (``news today``) before the real one is typed. Typing
+        # without clearing inserts *before* the existing text, so the search
+        # actually sent was ``news today<taymiyyah>`` — a garbage query that
+        # still returns a plausible-looking SERP, which is why it went
+        # unnoticed. ``keyboard.type`` (strategy 1 below) does exactly this, so
+        # the clear has to happen here rather than in the type strategy.
+        try:
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Delete")
+        except Exception as e:
+            log.debug("Select-all/delete failed: %s", e)
+
+        # Verify the box is really empty; fall back to fill() if not.
+        try:
+            leftover = await search_input.input_value()
+        except Exception:
+            leftover = ""
+        if leftover:
+            log.debug("Search box still contained %r after clear attempt", leftover)
+            try:
+                await search_input.fill("")
+            except Exception as e:  # pragma: no cover - last resort
+                log.debug("Clearing search box via fill failed: %s", e)
 
         # Step 5: Type the query. Try multiple strategies in order
         # of preference — from most human-like to most reliable.
@@ -978,6 +1043,29 @@ async def search_via_typing(
             log.warning("Failed to type into search box (all strategies failed)")
             return False
 
+        # Step 5b: Verify the box actually holds the query.
+        #
+        # Every strategy above can fail silently: a detached locator, a lost
+        # focus, or a keystroke that lands on the page instead of the input. In
+        # that case Enter submits whatever was already in the box (typically the
+        # anti-detect warmup's query), and the caller parses a SERP for the wrong
+        # search. Force the value and let the post-submit check below confirm it.
+        try:
+            typed_value = await search_input.input_value()
+        except Exception:
+            typed_value = None
+        if typed_value is not None and _normalise_query(typed_value) != _normalise_query(query):
+            log.warning(
+                "Search box holds %r instead of %r — forcing the value",
+                typed_value,
+                query,
+            )
+            try:
+                await search_input.fill(query)
+            except Exception as e:  # pragma: no cover - last resort
+                log.warning("Could not force the search box value: %s", e)
+                return False
+
         # Step 6: Let the autocomplete suggestions appear
         # (a real user pauses here to look at suggestions)
         await page.wait_for_timeout(random.randint(300, 900))
@@ -1010,6 +1098,25 @@ async def search_via_typing(
             await page.wait_for_url(re.compile(r"/search\?"), timeout=15000)
         except Exception:
             log.debug("Search did not navigate via /search URL")
+
+        # Step 8b: Confirm the query Google actually received.
+        #
+        # This is the backstop for the whole flow: if the submitted ``q`` is not
+        # what the caller asked for, the caller would silently scrape the wrong
+        # SERP. Returning False makes ``browse_google`` fall back to navigating
+        # straight to the requested URL, which is correct even if less stealthy.
+        submitted_query = ""
+        try:
+            submitted_query = parse_qs(urlparse(page.url).query).get("q", [""])[0]
+        except Exception:
+            submitted_query = ""
+        if _normalise_query(submitted_query) != _normalise_query(query):
+            log.warning(
+                "Typing flow submitted %r instead of %r — falling back to direct navigation",
+                submitted_query or "(nothing)",
+                query,
+            )
+            return False
 
         # Wait for results to render
         try:

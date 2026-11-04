@@ -349,19 +349,38 @@ async def do_google_news(query: str, num_results: int = 5) -> list:
             """
             (numResults) => {
                 const results = [];
-                // Primary: modern Google News containers
+                const seen = new Set();
+                // Primary: current Google News result cards.
+                //
+                // Observed DOM (2026-11): each card is <a class="aJWbwf"> inside
+                // <div class="WCv1we">, with the site name in .MgUUmf/.NUnG9d,
+                // the headline in .n0jPhd, the snippet in .UqSP2b/.HSSq5c and the
+                // relative date in .OSrXXb. The older .SoaBEf/.g containers no
+                // longer exist, which made this fall back to raw page text.
                 const containers = document.querySelectorAll(
-                    'div#search div.SoaBEf, div#search div.g, #rso div.SoaBEf, #rso div.g, div.SoaBEf, div.g, ' +
-                    'div[data-sokoban-container], div.Ww4FFb, div.vY6njf, div.dURjMd'
+                    'div#search a.aJWbwf, #rso a.aJWbwf, a.aJWbwf, ' +
+                    'div#search div.WCv1we, #rso div.WCv1we, div.WCv1we, ' +
+                    'div.SoaBEf, div.g, div.Ww4FFb, div.vY6njf, div.dURjMd, ' +
+                    'div[data-sokoban-container]'
                 );
                 for (const el of containers) {
                     if (results.length >= numResults) break;
-                    const linkEl = el.querySelector('a[href^="http"]');
-                    const titleEl = el.querySelector('div[role="heading"], h3, a.Ww4FFb, a.JheGif');
-                    const sourceEl = el.querySelector('.NUnG9d, .CEMjEf, .UPmit, .Y3v8qd, .gH_JQd');
+                    const linkEl = el.matches('a[href^="http"]')
+                        ? el
+                        : el.querySelector('a[href^="http"]');
+                    const titleEl = el.querySelector(
+                        '.n0jPhd, div[role="heading"], h3, h4, a.Ww4FFb, a.JheGif'
+                    );
+                    const sourceEl = el.querySelector('.MgUUmf .NUnG9d, .NUnG9d, .CEMjEf, .UPmit, .Y3v8qd, .gH_JQd');
                     const timeEl = el.querySelector('.OSrXXb, .WG9SHc, .ZE0LJd span, time, [datetime], .LfYrUe');
-                    const snippetEl = el.querySelector('.GI74Re, .Y3v8qd, div.VwiC3b, .f5cPye');
+                    const snippetEl = el.querySelector('.UqSP2b, .HSSq5c, .GI74Re, .Y3v8qd, div.VwiC3b, .f5cPye');
                     if (linkEl && titleEl) {
+                        const title = titleEl.innerText.trim();
+                        // The same article can appear twice (headline + related);
+                        // de-duplicate so a request for N does not return N copies.
+                        const key = (linkEl.href.split('#')[0] || title).toLowerCase();
+                        if (!title || seen.has(key)) continue;
+                        seen.add(key);
                         let thumbnail = '';
                         const imgs = el.querySelectorAll('img');
                         for (const img of imgs) {
@@ -372,7 +391,7 @@ async def do_google_news(query: str, num_results: int = 5) -> list:
                             if (s.startsWith('//')) { thumbnail = 'https:' + s; break; }
                         }
                         results.push({
-                            title: titleEl.innerText.trim(),
+                            title: title,
                             url: linkEl.href,
                             source: sourceEl ? sourceEl.innerText.trim() : '',
                             time: timeEl ? timeEl.innerText.trim() : '',

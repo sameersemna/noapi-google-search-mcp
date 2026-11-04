@@ -634,73 +634,113 @@ async def do_google_books(query: str, num_results: int = 5) -> str:
             r"""
             (numResults) => {
                 const results = [];
+                const seen = new Set();
 
-                // Find all h3 elements that are book results
-                const allH3 = document.querySelectorAll('h3');
-                for (const h3 of allH3) {
+                // Anchor on book result links rather than on every <h3>.
+                //
+                // On the books vertical each result is
+                //   <a href="…/books?id=XXX"><h3>Title</h3><cite>books.google.com</cite></a>
+                //   <div><a href="…&q=inauthor:%22Author%22"><span>Author</span></a> · 2019</div>
+                //   <div><span><span>Snippet…</span></span></div>
+                // A single book is often linked several times (cover, title,
+                // "Preview"), so results must be de-duplicated by book id.
+                const anchors = document.querySelectorAll(
+                    'a[href*="books.google.com/books"], a[href*="/books?id="]'
+                );
+
+                const bookRow = (container, title, author) => {
+                    if (!container) return '';
+                    const drop = new Set([
+                        title.toLowerCase(),
+                        'preview', 'more', 'save', 'add to my library',
+                        'books.google.com', 'books.google.com › books',
+                    ]);
+                    const lines = (container.innerText || '')
+                        .split('\n')
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                    const kept = [];
+                    for (const line of lines) {
+                        const low = line.toLowerCase();
+                        if (drop.has(low)) continue;
+                        if (author && low === author.toLowerCase()) continue;
+                        if (/^books\.google\.com/.test(low)) continue;
+                        if (/^\d{4}$/.test(line)) continue;
+                        if (kept.length && kept[kept.length - 1] === line) continue;
+                        kept.push(line);
+                    }
+                    // The snippet is the remaining long prose line.
+                    kept.sort((a, b) => b.length - a.length);
+                    return (kept[0] || '').replace(/\s+/g, ' ').slice(0, 400);
+                };
+
+                for (const a of anchors) {
                     if (results.length >= numResults) break;
 
-                    const title = h3.innerText.trim();
-                    if (!title || title.length < 3) continue;
-                    // Skip navigation/header h3s
-                    if (title === 'Search Results' || title === 'Filters and topics') continue;
+                    const h3 = a.querySelector('h3');
+                    if (!h3) continue;
+                    const title = (h3.innerText || '').trim();
+                    if (title.length < 2) continue;
 
-                    // Walk up to find the result container
-                    let container = h3.closest('.g, .MjjYud, .byrV5b, div[data-ved]') || h3.parentElement?.parentElement?.parentElement;
-                    if (!container) continue;
+                    // Book id → canonical URL + de-duplication key.
+                    // Parse the href defensively: `new URL(href, location.origin)`
+                    // throws when the base is unusable, which silently loses the
+                    // id and leaves the long tracking URL in the output.
+                    let bookId = '';
+                    const rawHref = a.getAttribute('href') || a.href || '';
+                    try {
+                        bookId = new URL(rawHref, location.href).searchParams.get('id') || '';
+                    } catch (e) {
+                        const idMatch = rawHref.match(/[?&]id=([A-Za-z0-9_-]{6,})/);
+                        if (idMatch) bookId = idMatch[1];
+                    }
+                    const key = bookId || title.toLowerCase();
+                    if (seen.has(key)) continue;
+                    seen.add(key);
 
-                    // Get the link
-                    const linkEl = container.querySelector('a[href*="books.google"], a[href^="http"]');
-                    const url = linkEl ? linkEl.href : '';
-
-                    // Get snippet
-                    const snippetEl = container.querySelector('.VwiC3b, .cmlJmd, [data-sncf], .f5cPye');
-                    const snippet = snippetEl ? snippetEl.innerText.trim() : '';
-
-                    // Get author - look for text between the title and snippet
-                    let author = '';
-                    const metaEls = container.querySelectorAll('span, cite, .Y3v8qd');
-                    for (const el of metaEls) {
-                        const t = el.innerText.trim();
-                        if (t && t !== title && !t.includes('http') &&
-                            (t.includes(',') || t.includes('·') || /\d{4}/.test(t)) &&
-                            t.length < 200) {
-                            author = t;
+                    // Nearest ancestor that also holds the author link.
+                    let container = null;
+                    let node = a;
+                    for (let i = 0; i < 10 && node; i++) {
+                        node = node.parentElement;
+                        if (!node) break;
+                        if (node.querySelector('a[href*="inauthor:"]')) {
+                            container = node;
                             break;
                         }
                     }
+                    if (!container) container = a.closest('.MjjYud') || a.parentElement;
 
-                    // Extract ISBN from container text or URL
+                    // Author + publication year.
+                    let author = '';
+                    let year = '';
+                    const authorLink = container
+                        ? container.querySelector('a[href*="inauthor:"]')
+                        : null;
+                    if (authorLink) {
+                        author = (authorLink.innerText || '').trim();
+                        const row = authorLink.closest('div');
+                        const yearMatch = ((row && row.innerText) || '').match(/[·•]\s*(\d{4})/);
+                        if (yearMatch) year = yearMatch[1];
+                    }
+
+                    // ISBN is rarely on the SERP; keep the best-effort scan.
                     let isbn = '';
-                    const containerText = container.innerText || '';
-                    const containerHtml = container.innerHTML || '';
-                    const searchText = containerText + ' ' + containerHtml;
-                    const isbn13Match = searchText.match(/97[89][\d-]{10,16}/);
-                    if (isbn13Match) {
-                        isbn = isbn13Match[0].replace(/-/g, '');
-                        if (isbn.length !== 13) isbn = '';
-                    }
-                    if (!isbn) {
-                        const isbn10Match = searchText.match(/ISBN[:\s]*([\d][\d\-]{8,12}[\dXx])/i);
-                        if (isbn10Match) {
-                            const cleaned = isbn10Match[1].replace(/-/g, '');
-                            if (cleaned.length === 10 || cleaned.length === 13) isbn = cleaned;
-                        }
-                    }
-                    if (!isbn && url) {
-                        try {
-                            const u = new URL(url);
-                            const vid = u.searchParams.get('vid') || '';
-                            const isbnFromVid = vid.match(/ISBN[:\s]*([\d-]{10,17})/i);
-                            if (isbnFromVid) isbn = isbnFromVid[1].replace(/-/g, '');
-                            if (!isbn) {
-                                const isbnFromUrl = url.match(/isbn[=:]([\d-]{10,17})/i);
-                                if (isbnFromUrl) isbn = isbnFromUrl[1].replace(/-/g, '');
-                            }
-                        } catch(e) {}
+                    const containerText = (container && container.innerText) || '';
+                    const isbn13 = containerText.match(/97[89][\d-]{10,16}/);
+                    if (isbn13) {
+                        const cleaned = isbn13[0].replace(/-/g, '');
+                        if (cleaned.length === 13) isbn = cleaned;
                     }
 
-                    results.push({ title, url, author, snippet, isbn });
+                    results.push({
+                        title: title,
+                        url: bookId ? 'https://books.google.com/books?id=' + bookId : a.href,
+                        author: author,
+                        year: year,
+                        isbn: isbn,
+                        snippet: bookRow(container, title, author),
+                    });
                 }
 
                 // Fallback: raw page text
@@ -708,7 +748,10 @@ async def do_google_books(query: str, num_results: int = 5) -> str:
                     const searchArea = document.querySelector('#search, #rso, [role="main"]');
                     if (searchArea) {
                         const text = searchArea.innerText.substring(0, 3000);
-                        results.push({ title: '__raw__', url: '', author: '', snippet: text, isbn: '' });
+                        results.push({
+                            title: '__raw__', url: '', author: '', year: '',
+                            snippet: text, isbn: '',
+                        });
                     }
                 }
 
@@ -729,8 +772,11 @@ async def do_google_books(query: str, num_results: int = 5) -> str:
         lines = [f"Google Books Results for: {query}\n"]
         for i, r in enumerate(results[:num_results], 1):
             lines.append(f"{i}. {r['title']}")
-            if r.get("author"):
-                lines.append(f"   Author: {r['author']}")
+            byline = r.get("author", "")
+            if r.get("year"):
+                byline = f"{byline} · {r['year']}" if byline else r["year"]
+            if byline:
+                lines.append(f"   Author: {byline}")
             if r.get("isbn"):
                 lines.append(f"   ISBN: {r['isbn']}")
             if r.get("url"):
