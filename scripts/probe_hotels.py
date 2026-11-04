@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from _probe_common import save_html
+
 from google_search_mcp.browser import dismiss_consent, load_cookies
 from google_search_mcp.core.browser import pooled_browser
 
@@ -86,8 +88,8 @@ CARD_JS = """
 
 
 async def main() -> None:
-    query = sys.argv[1] if len(sys.argv) > 1 else "hotels in Berlin"
-    from urllib.parse import quote_plus
+    if len(sys.argv) > 1:
+        print(f"query = {sys.argv[1]!r} (candidate URLs below are fixed)")
 
     async with pooled_browser() as (ctx, page):
         await load_cookies(ctx)
@@ -102,10 +104,7 @@ async def main() -> None:
                 print("TITLE :", await page.title())
                 html = await page.content()
                 name = url.split("//", 1)[1].split("?", 1)[0].replace("/", "_")
-                path = f"/tmp/hotels_{name}.html"
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(html)
-                print(f"SAVED : {path} ({len(html)} bytes)")
+                save_html(f"hotels_{name}.html", html)
 
                 counts = await page.evaluate(STRUCT_JS, CARD_SELECTORS)
                 hits = {k: v for k, v in counts.items() if v}

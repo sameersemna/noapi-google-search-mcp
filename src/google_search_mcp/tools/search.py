@@ -508,6 +508,234 @@ async def do_google_news(query: str, num_results: int = 5) -> list:
         return content
 
 
+# ---------------------------------------------------------------------------
+# google_search_tabs_urls
+# ---------------------------------------------------------------------------
+
+# Section headings that are Google chrome rather than a result type. Compared
+# case-insensitively after whitespace collapsing.
+_SECTION_NOISE: frozenset[str] = frozenset({
+    "next",
+    "previous",
+    "more",
+    "feedback",
+    "customised date range",
+    "customized date range",
+    "choose what you're giving feedback on",
+    "choose what you’re giving feedback on",
+    "filters and topics",
+    "search filters",
+    "tools",
+})
+
+# Tab labels that are chrome / duplicates of a vertical switch already emitted.
+_TAB_NOISE: frozenset[str] = frozenset({
+    "view all",
+    "all images",
+    "all news",
+    "all videos",
+    "see all",
+    "more",
+})
+
+
+def _tab_label_allowed(label: str) -> bool:
+    """Whether a tab link's visible text is a vertical switch, not chrome."""
+    value = " ".join((label or "").split()).casefold()
+    return bool(value) and value not in _TAB_NOISE
+
+
+def _section_label_allowed(label: str) -> bool:
+    """Whether a section heading names a result type rather than page chrome."""
+    value = " ".join((label or "").split()).casefold()
+    return bool(value) and value not in _SECTION_NOISE
+
+
+@cached("google_search_tabs_urls")
+async def do_google_search_tabs_urls(
+    query: str,
+    include_sections: bool = False,
+) -> str:
+    """List the vertical tabs (and optionally result-type sections) for a query."""
+    url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en"
+
+    async with browse_google(url, screenshot_label="tabs") as browser_page:
+        if browser_page is None or isinstance(browser_page, str):
+            return f"Google Search tabs blocked by bot detection for: {query}\nTry again later."
+
+        await wait_for_google_results_ready(browser_page, timeout_ms=15000)
+
+        data = await browser_page.evaluate(
+            r"""
+            (includeSections) => {
+                const out = { tabs: [], sections: [] };
+
+                // Resolve relative hrefs. The SERP's own base is preferred, but
+                // it is unusable in a detached document (``about:blank``), and
+                // every link this tool cares about is Google-relative, so
+                // google.com is a correct fallback.
+                const resolve = (href) => {
+                    for (const base of [location.href, 'https://www.google.com']) {
+                        try {
+                            const u = new URL(href, base);
+                            if (u.protocol === 'http:' || u.protocol === 'https:') return u;
+                        } catch (e) {
+                            /* try the next base */
+                        }
+                    }
+                    return null;
+                };
+
+                // ── Vertical switches ──
+                // Google exposes them as `/search?...&udm=<key>` (AI Mode,
+                // Images, Videos, Forums, Web, …) or the older `&tbm=<key>`
+                // (News, …). One vertical can be linked several times (e.g.
+                // "Images" and "All images" both carry udm=2), so de-duplicate
+                // on the vertical key and keep the first label seen.
+                const seenVertical = new Set();
+                for (const a of document.querySelectorAll('a[href*="udm="], a[href*="tbm="]')) {
+                    const label = (a.innerText || '').trim().replace(/\s+/g, ' ');
+                    if (!label || label.length > 40) continue;
+
+                    const u = resolve(a.getAttribute('href') || '');
+                    if (!u || u.pathname !== '/search') continue;
+
+                    const udm = u.searchParams.get('udm') || '';
+                    const tbm = u.searchParams.get('tbm') || '';
+                    if (!udm && !tbm) continue;
+
+                    const key = udm + '|' + tbm;
+                    if (seenVertical.has(key)) continue;
+                    seenVertical.add(key);
+
+                    out.tabs.push({
+                        label: label,
+                        url: u.href,
+                        vertical: udm || tbm,
+                    });
+                }
+
+                if (!includeSections) return out;
+
+                // ── Result-type section headers ──
+                // Google mixes modules (AI Overview, Top stories, Discussions
+                // and forums, Hotels, Videos, People also ask, Web results…)
+                // into one page and titles each with a level-2 heading.
+                // Result titles are headings too, but they sit inside an
+                // outbound link, so they are excluded.
+                const NOISE = new Set([
+                    'next', 'previous', 'more', 'feedback',
+                    'customised date range', 'customized date range',
+                    "choose what you're giving feedback on",
+                    'choose what you\u2019re giving feedback on',
+                    'filters and topics', 'search filters', 'tools',
+                ]);
+
+                const seenSection = new Set();
+                const pushSection = (text) => {
+                    const clean = (text || '').trim().replace(/\s+/g, ' ');
+                    if (!clean || clean.length > 70) return;
+                    const low = clean.toLowerCase();
+                    if (NOISE.has(low) || seenSection.has(low)) return;
+                    seenSection.add(low);
+                    out.sections.push(clean);
+                };
+
+                const headings = document.querySelectorAll(
+                    'h2, [role="heading"][aria-level="2"]'
+                );
+                for (const el of headings) {
+                    const text = (el.innerText || '').trim();
+                    if (!text) continue;
+
+                    const link = el.closest('a');
+                    if (link) {
+                        // Inside an outbound result link => a result title.
+                        const h = resolve(link.getAttribute('href') || '');
+                        if (!h) continue;
+                        if (h.pathname !== '/search' && !/google\./.test(h.hostname)) {
+                            continue;
+                        }
+                    }
+                    pushSection(text);
+                }
+
+                // Modules that do not always carry a level-2 heading.
+                if (document.querySelector('.related-question-pair')) {
+                    pushSection('People also ask');
+                }
+                if (document.querySelector(
+                    '[data-attrid*="AIOverview"], div.ai-overview, [jsname="bd5vmd"]'
+                )) {
+                    pushSection('AI Overview');
+                }
+
+                return out;
+            }
+            """,
+            include_sections,
+        )
+
+        tabs = [
+            tab
+            for tab in data.get("tabs", [])
+            if _tab_label_allowed(tab.get("label", ""))
+        ]
+        sections = [
+            section
+            for section in data.get("sections", [])
+            if _section_label_allowed(section)
+        ]
+
+        lines = [f"Google Search tabs for: {query}", f"   SERP: {browser_page.url}", ""]
+
+        if tabs:
+            lines.append("Tabs:")
+            for i, tab in enumerate(tabs, 1):
+                lines.append(f"{i}. {tab['label']}")
+                lines.append(f"   URL: {tab['url']}")
+        else:
+            lines.append("No vertical tabs found on this SERP.")
+
+        if include_sections:
+            lines.append("")
+            if sections:
+                lines.append("Sections:")
+                lines.extend(f"- {section}" for section in sections)
+            else:
+                lines.append("Sections: (none — this SERP has a plain web layout)")
+
+        return "\n".join(lines)
+
+
+@mcp.tool()
+async def google_search_tabs_urls(query: str, include_sections: bool = False) -> str:
+    """List the vertical tabs and result-type sections Google offers for a query.
+
+    Google renders vertical switches (AI Mode, Images, News, Videos, Forums,
+    Web, Books, Shopping, Maps…) as `udm=`/`tbm=` links on each SERP, and mixes
+    result modules (AI Overview, Top stories, Discussions and forums, Hotels,
+    People also ask, Web results…) into the page with their own headers.
+
+    Use this to discover *where* the answers live before fetching them, e.g. to
+    decide whether to call `google_news` or `google_images` for a query.
+
+    Sample prompts that trigger this tool:
+        - "What search tabs does Google show for electric vehicles?"
+        - "Which result sections does Google mix in for this query?"
+        - "Get me the Google Images and News URLs for this search"
+        - "What verticals are available for this query?"
+        - "Show the AI Overview / Top stories sections for a query"
+
+    Args:
+        query: The search query to inspect.
+        include_sections: Also report the result-type section headers
+            (AI Overview, Top stories, Discussions, Hotels, …). Default False
+            returns only the tab labels and URLs.
+    """
+    return await do_google_search_tabs_urls(query, include_sections)
+
+
 @mcp.tool()
 async def google_news(query: str, num_results: int = 5) -> list:
     """Search Google News for recent headlines, articles, and article images.

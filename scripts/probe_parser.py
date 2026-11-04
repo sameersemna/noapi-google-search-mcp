@@ -63,7 +63,8 @@ async def main() -> None:
     num_results = int(sys.argv[3]) if len(sys.argv) > 3 else 5
 
     js = extract_js(vertical)
-    html = path.read_text(encoding="utf-8")
+    # Read the capture off the event loop: the file can be several MB.
+    html = await asyncio.to_thread(path.read_text, encoding="utf-8")
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()

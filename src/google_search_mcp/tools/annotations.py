@@ -4,7 +4,7 @@ Why a central map?
 ------------------
 Every tool must advertise whether it is read-only, idempotent, destructive and
 whether it touches the open world, so MCP clients (and the model) can reason
-about retries and side effects. Rather than scatter 42 ``@mcp.tool(...)``
+about retries and side effects. Rather than scatter 43 ``@mcp.tool(...)``
 arguments across eight modules, the mapping lives here as the single source of
 truth and is applied once, at startup, by :func:`apply_tool_annotations`.
 
@@ -62,8 +62,9 @@ _REMOTE_WRITE = dict(ro=False, de=False, idem=True, ow=True)
 
 
 _SPECS: dict[str, ToolSpec] = {
-    # ── Google lookups (16) ──
+    # ── Google lookups (17) ──
     "google_search": _spec("Google Web Search", **_LOOKUP),
+    "google_search_tabs_urls": _spec("Google Search Tabs & Sections", **_LOOKUP),
     "google_news": _spec("Google News", **_LOOKUP),
     "google_scholar": _spec("Google Scholar", **_LOOKUP),
     "google_images": _spec("Google Images", **_LOOKUP),

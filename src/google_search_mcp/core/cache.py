@@ -43,6 +43,7 @@ _SCHEMA_VERSION = 1
 # Per-tool TTLs (seconds). Unknown tools fall back to ``config.CACHE_TTL_SECONDS``.
 PER_TOOL_TTL: dict[str, int] = {
     "google_search": 3600,
+    "google_search_tabs_urls": 1800,
     "google_scholar": 3600,
     "google_books": 3600,
     "google_news": 600,

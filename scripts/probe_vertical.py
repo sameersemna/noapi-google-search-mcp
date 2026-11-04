@@ -14,6 +14,8 @@ import asyncio
 import sys
 from urllib.parse import quote_plus
 
+from _probe_common import save_html
+
 from google_search_mcp import anti_bot
 
 VERTICALS = {
@@ -47,9 +49,7 @@ async def main() -> None:
             return
         print(f"final url = {page.url}")
         html = await page.content()
-        with open(f"/tmp/{name}_serp.html", "w", encoding="utf-8") as fh:
-            fh.write(html)
-        print(f"saved /tmp/{name}_serp.html ({len(html)} bytes)\n")
+        save_html(f"{name}_serp.html", html)
 
         counts = await page.evaluate(
             """(sel) => {

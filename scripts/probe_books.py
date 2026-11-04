@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from google_search_mcp import anti_bot, anti_detect, config
+from _probe_common import save_html
+
+from google_search_mcp import anti_bot, config
 from google_search_mcp.anti_detect import is_google_search_url, parse_query_from_url
 
 QUERY = sys.argv[1] if len(sys.argv) > 1 else "taymiyyah"
@@ -31,9 +33,7 @@ async def main() -> None:
 
         # Save the whole page for offline inspection.
         html = await page.content()
-        with open("/tmp/books_serp.html", "w", encoding="utf-8") as fh:
-            fh.write(html)
-        print(f"html saved: /tmp/books_serp.html ({len(html)} bytes)")
+        save_html("books_serp.html", html)
 
         info = await page.evaluate(
             """

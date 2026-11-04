@@ -7,7 +7,7 @@ If you want to support noapi-google-mcp or gpt-oss-20B/120B-Vision and other ope
 > <img src="images/btc-donate-qr.jpeg" alt="BTC" width="80" align="left" style="margin-right:12px"> If you find this useful, consider supporting continued development and new features.<br>**BTC:** `16DT4AHemLyn7C6P116YepjY518gu9wUUH`<br clear="all">
 > <img src="images/eth-donate-qr.png" alt="ETH" width="80" align="left" style="margin-right:12px"> **ETH:** `0x7287D1F9c77832cFF246937af0443622bFdACD04`<br clear="all">
 
-**42 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
+**43 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
 
 ## What's New in v0.4.0 — Hardening (Caching, Resilience, Security, CI)
 
@@ -564,7 +564,7 @@ $ curl http://localhost:11499/health
   "python": { ... },
   "platform": { ... },
   "process": { "pid": 4126492, "memory_rss_mb": 153.4, "threads": 7, ... },
-  "mcp": { "name": "google-search", "tools": 42, "tool_names": [...] },
+  "mcp": { "name": "google-search", "tools": 43, "tool_names": [...] },
   "config": { "ENABLE_MANUAL_INTERVENTION": true, ... },
   "dependencies": { "playwright": { "ok": true, "chromium_installed": true, ... }, ... },
   "files": { "google_cookies": { "exists": true, "size_bytes": 4096 }, ... },
@@ -747,7 +747,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 
 ---
 
-## All 42 Tools by Category
+## All 43 Tools by Category
 
 ### Bot-Detection & Diagnostics
 | Tool | Description |
@@ -770,6 +770,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Tool | Description |
 |------|-------------|
 | `google_search` | Web search with time filters, site filters, pagination, language/region |
+| `google_search_tabs_urls` | The SERP's vertical tabs (AI Mode, Images, News, Videos, Forums, Books…) with their URLs; `include_sections=True` also lists the mixed-in result sections (AI Overview, Top stories, Discussions, Hotels, People also ask…) |
 | `google_news` | News search with article thumbnails inline |
 | `google_scholar` | Academic papers with citations |
 | `google_images` | Image search with results displayed inline in chat |
@@ -876,7 +877,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Setup time | **`pip install` + go** | Create Cloud project, enable API, configure | Multiple API keys |
 | Results quality | **Real Google results** | Custom Search Engine | Brave index |
 | JavaScript pages | **Renders them (Chromium)** | Cannot render JS | Cannot render JS |
-| Tools count | **42** | 1-3 | 2 (web_search, web_fetch) |
+| Tools count | **43** | 1-3 | 2 (web_search, web_fetch) |
 | Google Search | Built-in (with filters) | Basic only | Not available |
 | Google Shopping | Built-in | Not available | Not available |
 | Google Flights | Built-in | Not available | Not available |
@@ -1152,6 +1153,34 @@ and whether auto-saved session cookies exist. No parameters.
 | `page` | Results page (1-10, default 1) | `2` |
 | `language` | Language code | `"en"`, `"de"`, `"fr"`, `"ja"` |
 | `region` | Country/region code | `"us"`, `"gb"`, `"de"`, `"jp"` |
+
+#### `google_search_tabs_urls` — SERP Tabs & Result Sections
+
+Every Google SERP carries vertical switches (`udm=`/`tbm=`) and mixes result
+modules into the page. This tool reports them, so you can decide *which* tool to
+call next instead of guessing.
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `query` | Search query to inspect (required) | `"electric vehicles"` |
+| `include_sections` | Also list the mixed-in result-type headers (default `false`) | `true` |
+
+With the default `include_sections=false` you get the tabs only:
+
+```
+Tabs:
+1. AI Mode
+   URL: https://www.google.com/search?...&udm=50
+2. Images
+   URL: https://www.google.com/search?...&udm=2
+3. News
+   URL: https://www.google.com/search?...&tbm=nws
+```
+
+With `include_sections=true` the section headers are appended — for example
+`Web results`, `Top stories`, `Discussions and forums`, `People also ask`,
+`Videos`, `Hotels`, `AI Overview`. Those names tell you whether a result type is
+available at all before you spend a request on `google_news` or `google_images`.
 
 #### `google_shopping` — Product Search
 
@@ -1559,7 +1588,7 @@ mcp_servers:
       PYTHONUNBUFFERED: "1"
 ```
 
-This gives your OpenClaw agent access to all 42 tools — real Google search, live feeds, vision, OCR, video intelligence, the headful bot-detection fallback, and the built-in health endpoint — with zero API keys.
+This gives your OpenClaw agent access to all 43 tools — real Google search, live feeds, vision, OCR, video intelligence, the headful bot-detection fallback, and the built-in health endpoint — with zero API keys.
 
 ### As a CLI
 

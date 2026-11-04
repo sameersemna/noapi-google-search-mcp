@@ -1,4 +1,4 @@
-"""Google Search MCP Server — 42 tools for local LLMs.
+"""Google Search MCP Server — 43 tools for local LLMs.
 
 Provides real Google search, live feeds, vision, OCR, video transcription,
 email, document reading, and web utilities — all running locally through
@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = argparse.ArgumentParser(
         prog="noapi-google-search-mcp",
-        description="Google Search MCP server (42 tools for local LLMs).",
+        description="Google Search MCP server (43 tools for local LLMs).",
     )
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     parser.add_argument("--check", action="store_true", help="check dependencies and exit")

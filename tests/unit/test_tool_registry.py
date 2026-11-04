@@ -70,6 +70,9 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ),
         ("query",),
     ),
+    # Added in the search-surface work (ADR 0007 follow-up): reports the SERP's
+    # vertical tabs, and optionally the mixed-in result-type section headers.
+    "google_search_tabs_urls": (("include_sections", "query"), ("query",)),
     "google_shopping": (("num_results", "query"), ("query",)),
     "google_translate": (
         ("from_language", "text", "to_language"),
@@ -122,7 +125,7 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "wikipedia": (("fresh", "language", "query", "sentences"), ("query",)),
 }
 
-EXPECTED_TOOL_COUNT = 42
+EXPECTED_TOOL_COUNT = 43
 
 
 @pytest.fixture(scope="module")
@@ -139,7 +142,7 @@ def registry() -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
     return out
 
 
-def test_exactly_42_tools_registered(registry):
+def test_exactly_43_tools_registered(registry):
     assert len(registry) == EXPECTED_TOOL_COUNT, (
         f"tool count changed: expected {EXPECTED_TOOL_COUNT}, got {len(registry)}. "
         f"New: {sorted(set(registry) - set(EXPECTED))}  "
@@ -150,6 +153,20 @@ def test_exactly_42_tools_registered(registry):
 def test_no_tools_removed_or_renamed(registry):
     missing = sorted(set(EXPECTED) - set(registry))
     assert not missing, f"tools were removed/renamed (breaking): {missing}"
+
+
+def test_no_untracked_tools(registry):
+    """Every registered tool must be in this snapshot.
+
+    Without this, bumping ``EXPECTED_TOOL_COUNT`` alone would let a new tool in
+    without anyone reviewing its name and parameters — the count test would pass
+    and the snapshot would silently stop describing the whole registry.
+    """
+    untracked = sorted(set(registry) - set(EXPECTED))
+    assert not untracked, (
+        f"tool(s) registered but absent from the snapshot: {untracked}. "
+        "Add them to EXPECTED deliberately and record the addition in CHANGELOG.md."
+    )
 
 
 def test_parameter_names_match_snapshot(registry):

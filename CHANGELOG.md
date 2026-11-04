@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`google_search_tabs_urls`** — reports the vertical tabs Google exposes on a
+  SERP (`AI Mode`, `Images`, `News`, `Videos`, `Forums`, `Web`, `Books`, …) as
+  `{label, url}` pairs, and with `include_sections=True` also the result-type
+  section headers Google mixes into the page (`AI Overview`, `Top stories`,
+  `Discussions and forums`, `Hotels`, `People also ask`, `Web results`, …).
+  Tabs are de-duplicated by vertical (`Images` and `All images` are both
+  `udm=2`) and page chrome (`View all`, `Next`, date-range pickers) is dropped.
+  Read-only and cached for 30 min. Tool count is now **43**.
 - `NOAPI_MCP_HTTP_STATELESS`, `NOAPI_MCP_HTTP_JSON_RESPONSE`,
   `NOAPI_MCP_HTTP_ENABLE_LEGACY_SSE`, `NOAPI_MCP_HTTP_DNS_REBINDING_PROTECTION`,
   `NOAPI_MCP_HTTP_ALLOWED_HOSTS`, `NOAPI_MCP_HTTP_ALLOWED_ORIGINS`.
