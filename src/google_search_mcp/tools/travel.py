@@ -438,16 +438,38 @@ async def google_flights(
 # google_hotels
 # ---------------------------------------------------------------------------
 
+# Google navigation labels that a loose selector can mistake for a hotel name.
+_GOOGLE_NAV_LABELS: frozenset[str] = frozenset({
+    "sign in", "ai mode", "view all hotels", "images", "news", "forums",
+    "maps", "shopping", "videos", "books", "flights", "hotels", "search",
+    "filters", "all", "more",
+})
+
+
 def _is_hotel_listing_name(name: str) -> bool:
-    """Reject generic Google navigation cards parsed as hotel listings."""
-    return name.strip().casefold() not in {"sign in", "ai mode", "view all hotels"}
+    """Reject generic Google navigation labels parsed as hotel listings."""
+    value = name.strip().casefold()
+    return bool(value) and value not in _GOOGLE_NAV_LABELS
 
 
 @cached("google_hotels")
 async def do_google_hotels(query: str, num_results: int = 5) -> list:
-    """Search Google for hotel information."""
-    encoded_query = quote_plus(f"hotels {query}")
-    url = f"https://www.google.com/search?q={encoded_query}&hl=en"
+    """Search Google Travel for hotels matching *query*.
+
+    This targets ``google.com/travel/search`` — Google's hotel surface, whose
+    result cards carry name, nightly price, rating, review count, stay dates,
+    amenities and a photo. It used to target ``google.com/search?q=hotels ...``,
+    a generic web SERP: when the hotel pack was absent there were no listings at
+    all, and the tab links (Images/News/Forums) matched ``a[href*="hotel"]``
+    because their query string contained the word, so they were returned as
+    "hotels".
+
+    Prices are reported in the currency Google chooses for the requesting IP; a
+    ``curr=`` parameter is accepted in the URL but ignored (verified), so the
+    currency is passed through rather than silently mislabelled.
+    """
+    encoded_query = quote_plus(query)
+    url = f"https://www.google.com/travel/search?q={encoded_query}&hl=en"
 
     async with pooled_browser() as (context, page):
         await load_cookies(context)
@@ -483,127 +505,104 @@ async def do_google_hotels(query: str, num_results: int = 5) -> list:
                 r"""
                 (numResults) => {
                     const data = { hotels: [] };
+                    const abs = (href) => {
+                        if (!href) return '';
+                        try { return new URL(href, location.href).href; } catch (e) { return href; }
+                    };
 
-                    // Strategy: .BTPx6e elements ARE the hotel name elements.
-                    // Walk up to the row container to find price/rating/link/image.
-                    // Images are in sibling elements with class "uhHOwf".
-                    const nameEls = document.querySelectorAll(
-                        '.BTPx6e, .cuQzEe, .p69s9e, ' +
-                        'div[data-ved] a[href*="hotel"], ' +
-                        'div[data-ved] a[href*="travel"]'
-                    );
+                    // Google Travel hotel cards. Each card is one property:
+                    //   <h2 class="BgYkof">Name</h2>
+                    //   <span class="kixHKb">€49</span>       price
+                    //   <span class="KFi5wf">3.9</span>       rating
+                    //   <span class="jdzyld">(4.8K)</span>    review count
+                    //   <div class="DPNIGe">Nov 6 - 7</div>   stay dates
+                    //   <a class="PVOOXe" aria-label="Name">  detail link
+                    //   <img src="https://lh3.googleusercontent.com/...">  photo
+                    const cards = document.querySelectorAll('.uaTTDe, .PVOOXe');
+                    const seen = new Set();
 
-                    // Collect hotel thumbnail images separately — they sit in
-                    // .uhHOwf containers as siblings/cousins of the name elements.
-                    // Pair them with hotels by index.
-                    const thumbImgs = document.querySelectorAll('.uhHOwf img, .taJbee img, .wI3pFd img');
-                    const thumbSrcs = [];
-                    for (const img of thumbImgs) {
-                        const src = img.src || img.dataset?.src || '';
-                        if (src && !thumbSrcs.includes(src)) thumbSrcs.push(src);
-                    }
-
-                    for (const nameEl of nameEls) {
+                    for (const card of cards) {
                         if (data.hotels.length >= numResults) break;
 
-                        const name = nameEl.innerText.trim();
-                        if (!name || name.length < 2) continue;
-
-                        // Walk up to find the row container (up to 6 levels)
-                        let row = nameEl;
-                        for (let i = 0; i < 6; i++) {
-                            if (!row.parentElement) break;
-                            row = row.parentElement;
-                            // Stop when we find a container with a link or price
-                            if (row.querySelector('a[href]') && row.querySelector('a[href]') !== nameEl) break;
-                        }
-
-                        // Extract price — look in the row and siblings
-                        let price = '';
-                        const priceEl = row.querySelector('.kixHKb, .qeiSWe, .priceText, .hVE8ee, .gJTvYb');
-                        if (priceEl) {
-                            price = priceEl.innerText.trim();
-                        } else {
-                            // Search row text for price pattern
-                            const rowText = row.innerText || '';
-                            const priceMatch = rowText.match(/(?:CHF|USD|\$|€|£)\s*[\d,.]+/i)
-                                || rowText.match(/[\d,.]+\s*(?:CHF|USD|EUR|per night)/i);
-                            if (priceMatch) price = priceMatch[0].trim();
-                        }
-
-                        // Extract rating
-                        let rating = '';
-                        const ratingEl = row.querySelector('.KFi5wf, .MW4etd, .yi40Hd, .F7XJmb');
-                        if (ratingEl) rating = ratingEl.innerText.trim();
-
-                        // Extract reviews
-                        let reviews = '';
-                        const reviewsEl = row.querySelector('.jdzyld, .RDApEe, .gRlVJ');
-                        if (reviewsEl) reviews = reviewsEl.innerText.trim().replace(/[()]/g, '');
-
-                        // Extract link
-                        const bookLink = row.querySelector(
-                            'a[href*="hotel"], a[href*="book"], a[href*="travel"], a[href*="maps"]'
+                        const nameEl = card.querySelector(
+                            'h2.BgYkof, h2, .BqzcJ, .PVOOXe[aria-label], .PVOOXe'
                         );
-                        const linkEl = bookLink || row.querySelector('a[href]');
-                        let linkUrl = linkEl ? linkEl.href : '';
-                        if (linkUrl.includes('/url?') || linkUrl.includes('google.com/url')) {
-                            try {
-                                const u = new URL(linkUrl);
-                                linkUrl = u.searchParams.get('q') || u.searchParams.get('url') || linkUrl;
-                            } catch(e) {}
-                        }
+                        if (!nameEl) continue;
+                        let name = (nameEl.innerText || '').trim();
+                        if (!name) name = (nameEl.getAttribute('aria-label') || '').trim();
+                        // Some layouts append the price to the same node.
+                        name = name.split('\n')[0].replace(/\s{2,}/g, ' ').trim();
+                        if (!name || name.length < 2) continue;
+                        const key = name.toLowerCase();
+                        if (seen.has(key)) continue;
+                        seen.add(key);
 
-                        // Image: try within the row first, then pair by index
+                        const priceEl = card.querySelector(
+                            '.kixHKb.flySGb, .A9rngd, .Q01V4b, .kixHKb'
+                        );
+                        // .kixHKb is reused by the rating row, so reduce the
+                        // matched text to the first currency-shaped token.
+                        let price = '';
+                        if (priceEl) {
+                            const raw = priceEl.innerText.trim();
+                            const m = raw.match(
+                                /[$€£¥₹]\s?[\d][\d,.]*|(?:USD|EUR|GBP|CHF|JPY|INR)\s?[\d][\d,.]*|\d[\d,.]*\s?(?:USD|EUR|GBP|CHF|JPY|INR)/
+                            );
+                            price = m ? m[0].replace(/\s+/g, ' ').trim() : raw.split('\n')[0].trim();
+                        }
+                        const ratingEl = card.querySelector('.KFi5wf');
+                        const reviewsEl = card.querySelector('.jdzyld');
+                        const datesEl = card.querySelector('.DPNIGe');
+
+                        // Amenities are free text: "Amenities for <name>: A, B, C".
+                        let amenities = '';
+                        const cardText = card.innerText || '';
+                        const am = cardText.match(/Amenities for [^:]+:\s*([^\n]+)/i);
+                        if (am) amenities = am[1].replace(/,\s*$/, '').trim();
+
+                        const linkEl = card.querySelector('a.PVOOXe[href], a[href*="/travel/"], a[href]');
+                        let linkUrl = linkEl ? (linkEl.getAttribute('href') || linkEl.href) : '';
+
                         let thumbnail = '';
-                        // Check row for images
-                        const rowImgs = row.querySelectorAll('img');
-                        for (const img of rowImgs) {
-                            const s = img.src || img.dataset?.src || '';
-                            if (!s) continue;
-                            if (s.startsWith('data:image') && s.length > 500) { thumbnail = s; break; }
-                            if (s.startsWith('http') && !s.includes('gstatic.com/s/i/')) { thumbnail = s; break; }
-                            // Protocol-relative URLs
-                            if (s.startsWith('//')) { thumbnail = 'https:' + s; break; }
-                        }
-                        // Fallback: pair by index from the collected thumbnails
-                        if (!thumbnail) {
-                            const idx = data.hotels.length;
-                            if (idx < thumbSrcs.length) {
-                                let s = thumbSrcs[idx];
-                                if (s.startsWith('//')) s = 'https:' + s;
-                                thumbnail = s;
-                            }
-                        }
+                        const img = card.querySelector('img');
+                        if (img) thumbnail = img.src || img.dataset?.src || '';
 
                         data.hotels.push({
-                            name, price, rating, reviews, url: linkUrl, thumbnail,
+                            name,
+                            price,
+                            rating: ratingEl ? ratingEl.innerText.trim() : '',
+                            reviews: reviewsEl ? reviewsEl.innerText.trim().replace(/[()]/g, '') : '',
+                            dates: datesEl ? datesEl.innerText.trim() : '',
+                            amenities,
+                            url: abs(linkUrl),
+                            thumbnail,
                         });
                     }
 
-                    // Fallback: get the hotel widget text
-                    if (data.hotels.length === 0) {
-                        const widget = document.querySelector(
-                            '[data-attrid*="hotel"], .kp-wholepage, .liYKde, .f5cPye'
-                        );
-                        if (widget) {
-                            const text = widget.innerText.substring(0, 3000);
-                            if (text.toLowerCase().includes('hotel') || text.includes('$') || text.includes('/night')) {
-                                data.widget_text = text;
-                            }
+                    // Link to the full list, else the current (travel) search page.
+                    //
+                    // Must not be picked by href alone: the account menu link is
+                    // `accounts.google.com/SignOutOptions?continue=<travel search>`,
+                    // whose query string matches `a[href*="/travel/search"]`.
+                    let viewAll = '';
+                    for (const a of document.querySelectorAll('a[href*="travel/"]')) {
+                        const href = a.getAttribute('href') || '';
+                        const text = (a.innerText || '').trim();
+                        if (/^https?:\/\/accounts\.google\.com/.test(href)) continue;
+                        if (/view all|see all|show more|all hotels|more hotels/i.test(text)) {
+                            viewAll = href;
+                            break;
+                        }
+                        if (!viewAll && /^\/(travel|search)/.test(href)) {
+                            const t = (a.getAttribute('aria-label') || '') + ' ' + text;
+                            if (!/sign|account|profile/i.test(t)) viewAll = href;
                         }
                     }
+                    data.hotels_url = viewAll ? abs(viewAll) : (location.href || '');
 
-                    // "View all hotels" link
-                    const viewAll = document.querySelector('a[href*="google.com/travel/hotels"]');
-                    data.hotels_url = viewAll ? viewAll.href : '';
-
-                    // Last resort: raw page text
-                    if (data.hotels.length === 0 && !data.widget_text) {
-                        const searchArea = document.querySelector('#search, #rso, [role="main"]');
-                        if (searchArea) {
-                            data.raw_text = searchArea.innerText.substring(0, 3000);
-                        }
+                    if (data.hotels.length === 0) {
+                        const area = document.querySelector('[role="main"], #main, body');
+                        if (area) data.raw_text = area.innerText.substring(0, 2500);
                     }
 
                     return data;
@@ -663,11 +662,15 @@ async def do_google_hotels(query: str, num_results: int = 5) -> list:
                     desc = f"{i}. {h['name']}"
                     if h.get("price"):
                         desc += f"\n   Price: {h['price']}"
+                    if h.get("dates"):
+                        desc += f" ({h['dates']})"
                     if h.get("rating"):
                         rating_str = f"   Rating: {h['rating']}"
                         if h.get("reviews"):
                             rating_str += f" ({h['reviews']} reviews)"
                         desc += f"\n{rating_str}"
+                    if h.get("amenities"):
+                        desc += f"\n   Amenities: {h['amenities']}"
                     if h.get("url"):
                         desc += f"\n   URL: {h['url']}"
                     content.append(desc)
@@ -702,7 +705,7 @@ async def do_google_hotels(query: str, num_results: int = 5) -> list:
                 content.append("No hotel data found. Try searching directly:")
                 content.append("https://www.google.com/travel/hotels")
             elif not has_data:
-                content.append("No hotel listings could be extracted from Google results.")
+                content.append("No hotel listings could be extracted from Google Travel.")
 
             return content
 

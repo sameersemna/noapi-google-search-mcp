@@ -35,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`google_hotels` returned search-tab links instead of hotels.**
+  It searched `google.com/search?q=hotels <query>` (a generic web SERP) and
+  parsed `div[data-ved] a[href*="hotel"]`. Those tab links (Images, News, Forums)
+  *matched* because their query string contains the word "hotels", so they were
+  emitted as results with nothing but a URL — and when Google rendered no hotel
+  pack there were no listings at all. The tool now targets
+  `google.com/travel/search` (Google's hotel surface) and reads the travel result
+  cards: name, nightly price, rating, review count, stay dates, amenities, photo
+  and detail link. The leading `"hotels "` prefix that doubled the word on the
+  wire is gone, and the bot-detection guard is unchanged.
 - **`google_books` returned plain web results instead of book results.** The
   search-via-typing anti-detect flow rebuilds the query from scratch, so the
   `tbm=` vertical in the request URL was dropped and the scraper parsed a normal
