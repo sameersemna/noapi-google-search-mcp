@@ -6,10 +6,12 @@
 graph TD
     CLI["__init__.py — CLI (--version / --check / --transport)"] --> APP["server.py — FastMCP instance, lifespan, tool registration"]
     MAIN["__main__.py — python -m entry"] --> CLI
+    CLI --> HTTP["http_app.py — native HTTP transports (/mcp, /sse)"]
 
     APP --> TOOLS
     APP --> CORE
     APP --> HEALTH["health_server.py — /health (separate port)"]
+    HTTP --> APP
 
     subgraph TOOLS["tools/ — one module per tool family"]
         T_SEARCH["search.py"]
@@ -132,10 +134,15 @@ returns the original outcome instead of performing the side effect twice.
 - Backward compatibility first: new behaviour is additive (optional parameters,
   env flags); tool names, parameter names and defaults are unchanged.
 - Heavy native imports (`cv2`, `numpy`, `onnxruntime`, `faster_whisper`,
-  `yt_dlp`) stay inside functions so server startup and the common path stay light.
+  `yt_dlp`, `uvicorn`) stay inside functions so server startup and the common
+  path stay light.
 - Sending *fewer* upstream requests (cache, singleflight, rate limiting,
   conditional GET) is preferred over disguising requests better.
 - Errors are raised as typed exceptions and converted to MCP `ToolError`
   (`isError: true`) with the original human-readable wording preserved.
 - Logs go to **stderr only** — on the stdio transport stdout is the protocol
   channel (enforced by a test).
+- One process serves the MCP protocol; there is no proxy hop. `http_app.py`
+  composes `/mcp` and `/sse` onto one Starlette app and owns process-wide
+  startup/shutdown, because FastMCP's lifespan runs once per *session*, not once
+  per process (see [ADR 0007](adr/0007-native-http-transport.md)).

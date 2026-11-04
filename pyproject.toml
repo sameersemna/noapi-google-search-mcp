@@ -25,7 +25,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # The HTTP transports depend on SDK behaviour that has changed across
+    # releases (TransportSecuritySettings defaults and when FastMCP snapshots
+    # them, StreamableHTTPSessionManager's stateful/stateless dispatch, and the
+    # SSE transport's session-id query parameter). See
+    # docs/adr/0007-native-http-transport.md before widening this bound.
+    "mcp>=1.27,<2",
     "playwright>=1.40.0",
     "lingua-language-detector>=2.0.2",
     "opencv-python-headless>=4.8.0",

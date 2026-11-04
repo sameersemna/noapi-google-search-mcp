@@ -40,10 +40,28 @@ Environment=HEALTH_HOST=0.0.0.0
 Environment=HEALTH_PORT=11499
 # Set HEALTH_AUTH_TOKEN to require a bearer token (empty = no auth).
 # Environment=HEALTH_AUTH_TOKEN=
+
+# ── MCP HTTP transport (served natively; no mcp-proxy) ──
+# Port 11403 is now bound by this process itself. Stateful streamable HTTP is
+# the default: the client gets an Mcp-Session-Id on initialize and echoes it
+# back. Set NOAPI_MCP_HTTP_STATELESS=1 for a client that POSTs once per tool
+# call — stateless mode keeps no session registry at all, so a dropped
+# connection can never leave a dangling session behind.
+Environment=NOAPI_MCP_HTTP_STATELESS=0
+# Serve the deprecated GET /sse + POST /messages/ transport alongside /mcp for
+# one release so existing SSE clients keep working. Set to 0 to serve /mcp only.
+Environment=NOAPI_MCP_HTTP_ENABLE_LEGACY_SSE=1
+# Host/Origin validation for DNS-rebinding protection. OFF by default: the SDK
+# auto-enables it for loopback binds with a loopback-only allow-list, which
+# answers 421 to any request addressed to a LAN name such as `latitude:11403`.
+# Turn it on (and list NOAPI_MCP_HTTP_ALLOWED_HOSTS) if this port is ever exposed
+# beyond the LAN.
+Environment=NOAPI_MCP_HTTP_DNS_REBINDING_PROTECTION=0
+
 Environment=PATH=/home/sameer/.n/n/versions/node/26.3.0/bin:/home/sameer/anaconda3/envs/mcp-google/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Pre-start cleanup: kill any lingering process on the health port (11499)
-# and the MCP proxy port (11403) to prevent "address already in use" errors.
+# and the MCP port (11403) to prevent "address already in use" errors.
 ExecStartPre=-/bin/bash -c 'fuser -k 11499/tcp 2>/dev/null || true'
 ExecStartPre=-/bin/bash -c 'fuser -k 11403/tcp 2>/dev/null || true'
 # Clean up stale PID file from previous runs.
@@ -52,9 +70,14 @@ ExecStartPre=-/bin/bash -c 'rm -f /home/sameer/Shared/Sync/Private/Apps/services
 StandardOutput=append:/home/sameer/Shared/Sync/Private/Apps/services/mcp/noapi-google-search-mcp/service.log
 StandardError=inherit
 
-# ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -i -m google_search_mcp
-# Remove the -i flag from the systemd unit so the process exits on crash (allowing systemd to restart it)
-ExecStart=/home/sameer/.n/n/versions/node/26.3.0/bin/node /home/sameer/.n/n/versions/node/26.3.0/bin/npx -y mcp-proxy --port 11403 --transport streamable-http -- /home/sameer/anaconda3/envs/mcp-google/bin/python -m google_search_mcp
+# The MCP server binds 11403 itself and speaks streamable HTTP (/mcp) plus the
+# legacy SSE transport (/sse + /messages/). This replaces the previous
+# `npx mcp-proxy --port 11403 --transport streamable-http -- python -m ...`
+# chain: mcp-proxy has no --transport option, so that flag was silently ignored,
+# and it added an unpinned npx download plus a second process to every restart.
+# The app must NOT be run with `-i`: it needs to exit on crash so systemd's
+# Restart=on-failure can restart it.
+ExecStart=/home/sameer/anaconda3/envs/mcp-google/bin/python -m google_search_mcp --transport streamable-http --host 0.0.0.0 --port 11403
 
 # Ensure the old process is fully terminated before restart.
 # KillMode=mixed: SIGTERM to main process, SIGKILL to children.

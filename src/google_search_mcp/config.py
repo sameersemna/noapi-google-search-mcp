@@ -6,6 +6,7 @@ in individual tool modules.
 """
 
 import os
+import socket
 from pathlib import Path
 
 # Import comprehensive stealth JS from its dedicated module
@@ -616,10 +617,74 @@ GOOGLE_BURST: int = env_int("GOOGLE_BURST", 2)
 CIRCUIT_COOLDOWN_SECONDS: int = env_int("CIRCUIT_COOLDOWN_SECONDS", 600)
 CIRCUIT_MAX_COOLDOWN_SECONDS: int = env_int("CIRCUIT_MAX_COOLDOWN_SECONDS", 3600)
 
-# Transport: "stdio" (default) or "streamable-http".
+# ── HTTP transports (``sse`` / ``streamable-http``) ──
+# Transport: "stdio" (default), "sse", or "streamable-http".
 TRANSPORT: str = env("TRANSPORT", "stdio").strip().lower()
 HTTP_HOST: str = env("HTTP_HOST", "127.0.0.1")
 HTTP_PORT: int = env_int("HTTP_PORT", 11498)
+
+# Streamable-HTTP session model. Stateful (default) keeps a session — and the
+# server instance behind it — alive across requests and hands the client an
+# ``Mcp-Session-Id`` to echo back. Stateless builds a fresh transport for every
+# request and issues no session id at all, which is the right choice for a
+# client that POSTs once per tool call and never resumes. With stateless there
+# is no session registry, so an absent or stale session id can never produce a
+# 400/404 — see ``docs/adr/0007-native-http-transport.md``.
+HTTP_STATELESS: bool = env_flag("HTTP_STATELESS", False)
+
+# Answer ``/mcp`` with plain ``application/json`` instead of an SSE-framed
+# body. Only meaningful together with HTTP_STATELESS (a stateful client needs
+# the stream to receive server-initiated messages).
+HTTP_JSON_RESPONSE: bool = env_flag("HTTP_JSON_RESPONSE", False)
+
+# Also serve the deprecated HTTP+SSE transport (``GET /sse`` +
+# ``POST /messages/``) alongside ``/mcp``. Kept on for one release so existing
+# SSE clients keep working. That transport binds a session to a single open GET
+# stream — closing the stream ends the session — and is deprecated by the MCP
+# spec. Set to 0 to serve only ``/mcp``.
+HTTP_ENABLE_LEGACY_SSE: bool = env_flag("HTTP_ENABLE_LEGACY_SSE", True)
+
+# DNS-rebinding protection (Host/Origin validation) on the MCP endpoints.
+#
+# OFF by default on purpose. FastMCP auto-enables it whenever the bind host is
+# a loopback address, with a loopback-only allow-list — so a request addressed
+# to a LAN name such as ``latitude:11403`` would be answered with
+# ``421 Invalid Host header``. The mcp-proxy deployment this replaces performed
+# no such check, so leaving it off preserves existing behaviour. Enable it (and
+# populate HTTP_ALLOWED_HOSTS) when the endpoint is reachable from untrusted
+# networks.
+#
+# Only ``host:*`` suffix wildcards are understood by the SDK — CIDR ranges and
+# ``192.168.178.*``-style patterns are NOT supported, so list each host by name.
+HTTP_DNS_REBINDING_PROTECTION: bool = env_flag(
+    "HTTP_DNS_REBINDING_PROTECTION", False
+)
+HTTP_ALLOWED_HOSTS: tuple[str, ...] = tuple(
+    h.strip()
+    for h in env(
+        "HTTP_ALLOWED_HOSTS",
+        ",".join((
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+            "latitude:*",
+            f"{socket.gethostname()}:*",
+        )),
+    ).split(",")
+    if h.strip()
+)
+HTTP_ALLOWED_ORIGINS: tuple[str, ...] = tuple(
+    o.strip()
+    for o in env(
+        "HTTP_ALLOWED_ORIGINS",
+        ",".join((
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+        )),
+    ).split(",")
+    if o.strip()
+)
 
 # Output caps.
 MAX_TEXT_CHARS: int = env_int("MAX_TEXT_CHARS", MAX_PAGE_CHARS)

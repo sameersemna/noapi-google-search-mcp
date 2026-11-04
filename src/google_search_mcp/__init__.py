@@ -126,8 +126,10 @@ def main(argv: list[str] | None = None) -> None:
         --host / --port bind address for the HTTP transports (default
                         127.0.0.1:<NOAPI_MCP_HTTP_PORT>)
 
-    The MCP server runs in the foreground (blocking). The health server is
-    started in the background by ``app_lifespan`` and is reachable on
+    The MCP server runs in the foreground (blocking). With ``--transport
+    streamable-http`` (or ``sse``) it is served over HTTP by
+    ``http_app.serve``; with the default ``stdio`` it speaks JSON-RPC on
+    stdin/stdout. Either way the health server is reachable on
     ``HEALTH_HOST:HEALTH_PORT`` (default 0.0.0.0:11499).
     """
     from . import config
@@ -157,8 +159,23 @@ def main(argv: list[str] | None = None) -> None:
     if transport not in _TRANSPORTS:
         transport = "stdio"
 
-    # Only meaningful for the HTTP transports, but harmless for stdio.
-    mcp.settings.host = args.host or config.HTTP_HOST
-    mcp.settings.port = args.port or config.HTTP_PORT
+    host = args.host or config.HTTP_HOST
+    port = config.HTTP_PORT if args.port is None else args.port
 
-    mcp.run(transport=transport)
+    # Only meaningful for the HTTP transports, but harmless for stdio.
+    mcp.settings.host = host
+    mcp.settings.port = port
+
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    # The HTTP transports are served from ``http_app`` rather than
+    # ``mcp.run(transport=...)`` for two reasons: FastMCP's lifespan is entered
+    # once per session (so the health server and browser pool would be
+    # started/torn down per client), and the Host-header allow-list has to be
+    # set explicitly because FastMCP freezes it at construction time from the
+    # loopback default. See docs/adr/0007-native-http-transport.md.
+    from . import http_app
+
+    http_app.serve(mcp, host=host, port=port)

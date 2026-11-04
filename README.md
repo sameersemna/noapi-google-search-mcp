@@ -46,7 +46,8 @@ Highlights:
   (ETag/Last-Modified), correct date ordering, FTS `bm25()` ranking, and a
   `PRAGMA user_version` migration system.
 - **CLI**: `--version`, `--check` (dependency doctor), and
-  `--transport streamable-http` (binds `127.0.0.1` by default).
+  `--transport streamable-http` (binds `127.0.0.1` by default). The HTTP
+transports are served natively from the Python process — no `mcp-proxy` hop.
 - **20 latent bugs fixed** (B1–B20) — including several tools that were
   completely broken by a missing import, e.g. `google_translate` and local-file
   clip extraction.
@@ -127,8 +128,39 @@ is verified against the code by a test.
 |---|---|---|
 | `NOAPI_MCP_TRANSPORT` | `stdio` | `stdio`, `sse` or `streamable-http`. |
 | `NOAPI_MCP_HTTP_HOST` / `NOAPI_MCP_HTTP_PORT` | `127.0.0.1` / `11498` | Bind address for HTTP transports. |
+| `NOAPI_MCP_HTTP_STATELESS` | `0` | Serve `/mcp` with no session registry: a fresh transport per request, no `Mcp-Session-Id`. Best for a client that POSTs once per tool call. |
+| `NOAPI_MCP_HTTP_JSON_RESPONSE` | `0` | Answer `/mcp` with plain `application/json` instead of an SSE-framed body. Pair with stateless mode. |
+| `NOAPI_MCP_HTTP_ENABLE_LEGACY_SSE` | `1` | Also serve the deprecated `GET /sse` + `POST /messages/` transport. Set `0` to serve only `/mcp`. |
+| `NOAPI_MCP_HTTP_DNS_REBINDING_PROTECTION` | `0` | Host/Origin validation. Off so LAN names like `latitude` work; enable for untrusted networks. |
+| `NOAPI_MCP_HTTP_ALLOWED_HOSTS` | loopback + `latitude` + hostname, `:*` | Comma-separated allow-list used when DNS-rebinding protection is on. Only `host:*` wildcards are supported — no CIDR. |
+| `NOAPI_MCP_HTTP_ALLOWED_ORIGINS` | `http://127.0.0.1:*` | Comma-separated `Origin` allow-list for the same check. |
 | `NOAPI_MCP_SEARCH_PAGE_SIZE` | `0` (off) | Fixed page stride for `google_search` pagination. |
 | `LOG_LEVEL` | `INFO` | Log level (logs always go to **stderr**). |
+
+### HTTP endpoints
+
+The HTTP transports are served by the Python process itself — there is no proxy
+in the middle (see [`docs/adr/0007-native-http-transport.md`](docs/adr/0007-native-http-transport.md)).
+
+| Endpoint | Method | Transport |
+|---|---|---|
+| `/mcp` | `POST`, `GET`, `DELETE` | Streamable HTTP (recommended) |
+| `/sse` | `GET` | Deprecated HTTP+SSE handshake |
+| `/messages/` | `POST` | Deprecated HTTP+SSE message sink (`?session_id=…`) |
+
+```bash
+# Streamable HTTP, stateful (the client keeps the returned mcp-session-id)
+curl -s -D- -X POST http://localhost:11403/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
+```
+
+**About `GET /sse`.** The legacy transport delivers responses on the *same open
+GET stream* that emitted `event: endpoint`. If the client closes that stream
+after reading the endpoint, or an intermediary drops the idle connection, the
+session ends and every later `POST /messages/?session_id=…` is rejected. Use
+`/mcp` unless a client requires SSE.
 
 ### CLI
 
@@ -137,6 +169,7 @@ noapi-google-search-mcp --version          # print version
 noapi-google-search-mcp --check            # dependency doctor (exit != 0 if a required dep is missing)
 noapi-google-search-mcp                    # run over stdio (default)
 noapi-google-search-mcp --transport streamable-http --host 127.0.0.1 --port 11498
+noapi-google-search-mcp --transport streamable-http --host 0.0.0.0 --port 11403   # what the systemd unit runs
 ```
 
 See also [SECURITY.md](SECURITY.md) for the threat model and an operator

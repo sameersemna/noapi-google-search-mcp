@@ -197,18 +197,66 @@ async def _shutdown_services(health) -> None:
         print(f"[shutdown] browser pool close failed: {exc}", file=sys.stderr)
 
 
-@asynccontextmanager
-async def app_lifespan(server: FastMCP):
-    """Validate Google cookies at server startup.
+# ── Process-wide lifecycle ownership ───────────────────────────────────────
+# FastMCP's lifespan is NOT process-scoped for the HTTP transports: the
+# streamable-HTTP session manager enters ``app.run(...)`` once per new session
+# (stateful) or once per request (stateless), and the SSE app enters it once per
+# SSE connection. Running the startup work there would rebind the health port
+# (11499) on every new client and, worse, ``_shutdown_services`` would close the
+# shared browser pool the moment any single client disconnected.
+#
+# When the CLI serves HTTP, it therefore starts the process-wide services once
+# itself (see ``http_app.serve``) and flips this flag so the per-session lifespan
+# becomes a pass-through.
+_external_lifecycle: bool = False
 
-    If cookies are invalid or show a logged-out session, the server offers
-    to open a headful browser for manual login. If the user declines or
-    login fails, the server exits with a non-zero code.
-    YouTube warnings are printed but don't block startup.
 
-    Also starts a small HTTP health server on a separate port (default
-    11499) so monitoring tools / k8s probes can check liveness, readiness,
-    and pull a full status snapshot without going through the MCP proxy.
+def set_external_lifecycle(enabled: bool = True) -> None:
+    """Delegate process-wide startup/shutdown to the caller (HTTP transports).
+
+    Called by :func:`google_search_mcp.http_app.serve` before the ASGI app is
+    handed to uvicorn. When enabled, ``app_lifespan`` yields immediately instead
+    of starting the health server / validating cookies / closing the browser
+    pool on every session boundary.
+    """
+    global _external_lifecycle
+    _external_lifecycle = enabled
+
+
+def is_external_lifecycle() -> bool:
+    """True when startup/shutdown is owned by the caller, not by ``app_lifespan``."""
+    return _external_lifecycle
+
+
+def _start_whisper_probe() -> None:
+    """Kick the optional remote-Whisper health probe (best-effort, non-blocking)."""
+    try:
+        from .utils import whisper_remote
+
+        if not whisper_remote.is_configured():
+            return
+
+        import functools
+        import threading
+
+        threading.Thread(
+            target=functools.partial(whisper_remote.startup_probe),
+            name="whisper-remote-startup-probe",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # pragma: no cover - defensive
+        # Never let probe wiring break startup.
+        print(f"[startup] whisper_remote probe wiring failed: {exc}", file=sys.stderr)
+
+
+async def _startup_services(server: FastMCP):
+    """Start process-wide services and validate cookies. Returns the health server.
+
+    Split out of :func:`app_lifespan` so the HTTP entry point can run it exactly
+    once per process rather than once per MCP session.
+
+    Raises :class:`SystemExit` (code 1) when cookie validation fails and the
+    operator declines the interactive login flow.
     """
     # Register the FastMCP server so /health can introspect its tools
     health_server.set_mcp_server(server)
@@ -220,25 +268,7 @@ async def app_lifespan(server: FastMCP):
     # Mark start time so uptime_sec is accurate
     health_server.set_loaded_at()
 
-    # ── Remote-Whisper startup probe (best-effort, non-blocking) ───────
-    # If WHISPER_REMOTE_ENABLED=1, kick a single short HTTP GET against
-    # /v1/models so /health is informative on the first request. Runs
-    # in a thread because the probe is synchronous urllib.
-    try:
-        from .utils import whisper_remote
-
-        if whisper_remote.is_configured():
-            import functools
-            import threading
-
-            threading.Thread(
-                target=functools.partial(whisper_remote.startup_probe),
-                name="whisper-remote-startup-probe",
-                daemon=True,
-            ).start()
-    except Exception as exc:  # pragma: no cover - defensive
-        # Never let probe wiring break startup.
-        print(f"[startup] whisper_remote probe wiring failed: {exc}", file=sys.stderr)
+    _start_whisper_probe()
 
     if SKIP_COOKIE_VALIDATION:
         print("SKIP_COOKIE_VALIDATION is set — skipping cookie validation.", file=sys.stderr)
@@ -246,11 +276,7 @@ async def app_lifespan(server: FastMCP):
             skipped=True, passed=None,
             errors=[], warnings=[],
         )
-        try:
-            yield {}
-        finally:
-            await _shutdown_services(health)
-        return
+        return health
 
     print("Validating Google cookies at startup...", file=sys.stderr)
     result = await validate_google_cookies()
@@ -282,7 +308,7 @@ async def app_lifespan(server: FastMCP):
         print("Choose option 1 or 2 (default: 2): ", file=sys.stderr, end="", flush=True)
 
         try:
-            # Read from /dev/tty directly — stdin is the MCP protocol pipe
+            # Read from /dev/tty directly — stdin may be the MCP protocol pipe
             with open("/dev/tty", "r") as tty:
                 choice = tty.readline().strip()
         except (OSError, EOFError, KeyboardInterrupt):
@@ -301,20 +327,15 @@ async def app_lifespan(server: FastMCP):
                         skipped=False, passed=True,
                         errors=[], warnings=result.get("warnings", []),
                     )
-                    try:
-                        yield {}
-                    finally:
-                        await _shutdown_services(health)
-                    return
-                else:
-                    print("Cookie validation still FAILED after login.", file=sys.stderr)
-                    for err in result.get("errors", []):
-                        print(f"  ! {err}", file=sys.stderr)
-                    health_server.set_startup_result(
-                        skipped=False, passed=False,
-                        errors=result.get("errors", []),
-                        warnings=result.get("warnings", []),
-                    )
+                    return health
+                print("Cookie validation still FAILED after login.", file=sys.stderr)
+                for err in result.get("errors", []):
+                    print(f"  ! {err}", file=sys.stderr)
+                health_server.set_startup_result(
+                    skipped=False, passed=False,
+                    errors=result.get("errors", []),
+                    warnings=result.get("warnings", []),
+                )
             else:
                 print("Login flow did not complete successfully.", file=sys.stderr)
         else:
@@ -323,6 +344,9 @@ async def app_lifespan(server: FastMCP):
         print("Cookie validation FAILED — exiting.", file=sys.stderr)
         # Stop the health server before exiting so the process is clean
         await health.stop()
+        # Hard exit: this runs inside a lifespan (per-session for HTTP, or the
+        # stdio loop), where raising would be reported as a framework error
+        # rather than as "the operator decided not to run".
         os._exit(1)
 
     print("Cookie validation PASSED — Google session is active.", file=sys.stderr)
@@ -332,6 +356,31 @@ async def app_lifespan(server: FastMCP):
         skipped=False, passed=True,
         errors=[], warnings=result.get("warnings", []),
     )
+    return health
+
+
+@asynccontextmanager
+async def app_lifespan(server: FastMCP):
+    """Validate Google cookies at server startup.
+
+    If cookies are invalid or show a logged-out session, the server offers
+    to open a headful browser for manual login. If the user declines or
+    login fails, the server exits with a non-zero code.
+    YouTube warnings are printed but don't block startup.
+
+    Also starts a small HTTP health server on a separate port (default
+    11499) so monitoring tools / k8s probes can check liveness, readiness,
+    and pull a full status snapshot without going through an MCP proxy.
+
+    For the HTTP transports the lifespan is entered once per MCP session, so
+    ``set_external_lifecycle(True)`` makes this a pass-through: process-wide
+    services are started once by ``http_app.serve`` instead.
+    """
+    if _external_lifecycle:
+        yield {}
+        return
+
+    health = await _startup_services(server)
     try:
         yield {}
     finally:

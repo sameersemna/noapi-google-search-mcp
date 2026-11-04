@@ -45,8 +45,8 @@ def test_chromium_installed_is_bool():
     assert isinstance(google_search_mcp._chromium_installed(), bool)
 
 
-@pytest.mark.parametrize("transport", ["stdio", "sse", "streamable-http"])
-def test_transport_flag_selects_transport(monkeypatch, transport):
+def test_stdio_transport_calls_mcp_run(monkeypatch):
+    """stdio still goes through ``mcp.run`` — it owns that event loop."""
     from google_search_mcp import server
 
     captured: dict[str, object] = {}
@@ -55,10 +55,58 @@ def test_transport_flag_selects_transport(monkeypatch, transport):
         captured.update(kwargs)
 
     monkeypatch.setattr(server.mcp, "run", fake_run)
-    cli_main(["--transport", transport, "--host", "127.0.0.1", "--port", "11498"])
-    assert captured.get("transport") == transport
+    cli_main(["--transport", "stdio", "--host", "127.0.0.1", "--port", "11498"])
+    assert captured.get("transport") == "stdio"
     assert server.mcp.settings.host == "127.0.0.1"
     assert server.mcp.settings.port == 11498
+
+
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+def test_http_transports_are_served_by_http_app(monkeypatch, transport):
+    """HTTP transports delegate to ``http_app.serve``, not ``mcp.run``.
+
+    ``mcp.run(transport=...)`` was retired for HTTP: FastMCP's lifespan is
+    entered once per session, so running it there started the health server and
+    closed the browser pool on every client connect/disconnect.
+    """
+    from google_search_mcp import http_app, server
+
+    served: dict[str, object] = {}
+
+    def fake_serve(mcp_arg, host=None, port=None, **kwargs):
+        served["mcp"] = mcp_arg
+        served["host"] = host
+        served["port"] = port
+
+    def forbidden_run(**kwargs):  # pragma: no cover - must never fire
+        raise AssertionError(f"mcp.run must not be used for {transport}")
+
+    monkeypatch.setattr(http_app, "serve", fake_serve)
+    monkeypatch.setattr(server.mcp, "run", forbidden_run)
+
+    cli_main(["--transport", transport, "--host", "0.0.0.0", "--port", "11403"])
+
+    assert served["mcp"] is server.mcp
+    assert served["host"] == "0.0.0.0"
+    assert served["port"] == 11403
+    assert server.mcp.settings.host == "0.0.0.0"
+    assert server.mcp.settings.port == 11403
+
+
+def test_http_transport_defaults_come_from_config(monkeypatch):
+    from google_search_mcp import config, http_app
+
+    monkeypatch.setattr(config, "HTTP_HOST", "127.0.0.1")
+    monkeypatch.setattr(config, "HTTP_PORT", 11498)
+
+    served: dict[str, object] = {}
+    monkeypatch.setattr(
+        http_app, "serve", lambda *a, **kw: served.update(a=a, kw=kw)
+    )
+    cli_main(["--transport", "streamable-http"])
+
+    assert served["kw"]["host"] == "127.0.0.1"
+    assert served["kw"]["port"] == 11498
 
 
 def test_default_transport_is_stdio(monkeypatch):

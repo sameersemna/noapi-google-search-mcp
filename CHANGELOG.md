@@ -5,6 +5,46 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The HTTP transports are now served natively; `mcp-proxy` is gone.**
+  `python -m google_search_mcp --transport streamable-http` binds the port itself
+  and serves `/mcp` (streamable HTTP), plus the deprecated `/sse` + `/messages/`
+  transport for one release. The Node proxy was an extra process, an unpinned
+  `npx -y` download on every restart, and a deprecated transport on the wire —
+  and its `--transport` flag never existed (`--server` is the real one), so the
+  unit file's stated intent had always been silently ignored. See
+  [`docs/adr/0007-native-http-transport.md`](docs/adr/0007-native-http-transport.md).
+- `mcp-google.service`, `start.sh` and `restart_server.sh` launch the Python
+  server directly on `11403`. `restart_server.sh` lost the second half that
+  killed the systemd-owned proxy and `nohup`ed a competing one. `-i` is no longer
+  passed, so a crash exits and systemd can restart the process.
+- `mcp` is now pinned to `>=1.27,<2`; the HTTP transport behaviour above is
+  version-sensitive.
+
+### Added
+
+- `NOAPI_MCP_HTTP_STATELESS`, `NOAPI_MCP_HTTP_JSON_RESPONSE`,
+  `NOAPI_MCP_HTTP_ENABLE_LEGACY_SSE`, `NOAPI_MCP_HTTP_DNS_REBINDING_PROTECTION`,
+  `NOAPI_MCP_HTTP_ALLOWED_HOSTS`, `NOAPI_MCP_HTTP_ALLOWED_ORIGINS`.
+- `google_search_mcp.http_app` — composes the streamable-HTTP and legacy SSE
+  apps onto one Starlette app and owns process-wide startup/shutdown, because
+  FastMCP's lifespan is entered once per session rather than once per process.
+
+### Fixed
+
+- Requests addressed to a LAN hostname (e.g. `latitude:11403`) are no longer
+  rejected with `421 Invalid Host header`. `FastMCP` freezes its
+  `transport_security` allow-list from the construction-time loopback host, so
+  the HTTP entry point now sets it explicitly (protection stays off by default,
+  matching the previous deployment).
+- The PyInstaller spec pointed at `server.py`, which has no `__main__` guard, so
+  the frozen binary imported the server and exited. It now builds
+  `scripts/frozen_entry.py` and bundles `uvicorn`/`starlette`, which the HTTP
+  path imports lazily.
+
 ## [0.4.0] - 2026-10-17
 
 Hardening release: correctness fixes, production-grade infrastructure (caching,
