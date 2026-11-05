@@ -1,0 +1,41 @@
+[Unit]
+Description=OCR microservice (RapidOCR on ONNX Runtime)
+Documentation=https://github.com/sameersemna/noapi-google-search-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged account — this service accepts file uploads.
+# To run as your own user instead, change User/Group/WorkingDirectory/ExecStart
+# together; the venv must live at WorkingDirectory/.venv.
+User=ocr
+Group=ocr
+WorkingDirectory=/opt/ocr-server
+
+# Optional: put OCR_SERVER_TOKEN / tuning here rather than in this file, so
+# `systemctl show` cannot print a secret.
+EnvironmentFile=-/etc/ocr-server.env
+
+Environment=PYTHONUNBUFFERED=1
+# ONNX Runtime spawns one thread pool per session; capping OMP threads keeps a
+# single request from monopolising the Arm cores. GB10 has 20; 8 is a sensible
+# ceiling for a background service.
+Environment=OMP_NUM_THREADS=8
+Environment=OCR_CONCURRENCY=2
+Environment=OCR_WARMUP=1
+
+# `-m uvicorn` rather than the console script: `pip install` skips creating the
+# script when uvicorn is already importable from a shared site-packages.
+ExecStart=/opt/ocr-server/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8769
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+# Model weights plus onnxruntime arenas live here; keep the service well below
+# the box's total memory so a runaway request cannot trigger global OOM.
+MemoryHigh=3G
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+# OCR microservice dependencies.
+#
+# Deliberately NOT opencv-python (which RapidOCR declares): that build links
+# against libGL and fails on a headless server with
+#   ImportError: libGL.so.1: cannot open shared object file
+# The headless build provides the same `cv2` module without the GUI libs.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+rapidocr-onnxruntime>=1.4.0,<2
+opencv-python-headless>=4.8.0
+numpy>=1.24,<3
