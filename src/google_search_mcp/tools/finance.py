@@ -67,7 +67,16 @@ async def do_google_finance(query: str) -> str:
         if page is None:
             return f"Google Finance blocked by bot detection for: {query}\nTry again later."
 
-        await page.wait_for_timeout(2000)
+        # The knowledge panel is injected after the SERP skeleton. A fixed 2 s
+        # wait often read an empty panel, which silently pushed the call into the
+        # /finance/quote fallback and discarded the name, change and stat rows.
+        from contextlib import suppress
+
+        with suppress(Exception):
+            await page.wait_for_selector(
+                '[data-attrid="title"], [data-last-price]', timeout=12000
+            )
+        await page.wait_for_timeout(1500)
 
         data = await page.evaluate(
             """
@@ -107,6 +116,53 @@ async def do_google_finance(query: str) -> str:
                 }
                 data.stats = stats;
 
+                // ── Knowledge panel anchored on data-attrid ──
+                // The current SERP panel no longer carries [data-last-price];
+                // name/subtitle/price/change and the stat rows all hang off
+                // data-attrid attributes, so anchor on those instead of guessing
+                // at rotating class names.
+                const attrid = (name) => {
+                    const el = document.querySelector('[data-attrid="' + name + '"]');
+                    return el ? el.innerText.trim() : '';
+                };
+                if (!data.name) data.name = attrid('title');
+                if (!data.exchange) data.exchange = attrid('subtitle');
+
+                const STAT_KEYS = new Set([
+                    'Open', 'High', 'Low', 'Mkt cap', 'P/E ratio',
+                    '52-wk high', '52-wk low', 'Dividend', 'Qtrly Div Amt',
+                    'Avg vol', 'Volume', 'Beta', 'EPS', 'Shares outstanding',
+                ]);
+                data.stats = data.stats || {};
+                for (const el of document.querySelectorAll('[data-attrid]')) {
+                    const key = el.getAttribute('data-attrid');
+                    if (!STAT_KEYS.has(key)) continue;
+                    const value = (el.innerText || '').trim().split('\\n')[0];
+                    if (value && !data.stats[key]) data.stats[key] = value;
+                }
+
+                const chart = document.querySelector('[data-attrid="Chart"]');
+                if (chart) {
+                    const chartText = chart.innerText || '';
+                    if (!data.price) {
+                        // e.g. "554,69 USD" (locale decimal separator varies).
+                        const pm = chartText.match(/([\\d][\\d.,]*)\\s*([A-Z]{3})\\b/);
+                        if (pm) {
+                            data.price = pm[1];
+                            data.currency = pm[2];
+                        }
+                    }
+                    if (!data.change_abs || !data.change_pct) {
+                        const cm = chartText.match(
+                            /([+\\-\\u2212]\\s?[\\d][\\d.,]*)\\s*\\(?([+\\-\\u2212]?[\\d][\\d.,]*\\s?%)?\\)?/
+                        );
+                        if (cm) {
+                            data.change_abs = cm[1];
+                            data.change_pct = cm[2] || '';
+                        }
+                    }
+                }
+
                 // Get the knowledge panel text as fallback
                 const panel = document.querySelector('.kp-wholepage, .knowledge-panel, .f5cPye');
                 data.panel_text = panel ? panel.innerText.substring(0, 1500) : '';
@@ -117,7 +173,10 @@ async def do_google_finance(query: str) -> str:
         )
 
         if not data.get("price") or not data.get("name"):
-            # Fallback: try direct finance URL
+            # Fallback: try direct finance URL. Keep whatever the panel already
+            # produced (name, change, stats) and only fill the gaps -- replacing
+            # `data` outright is what lost the company name.
+            panel = dict(data)
             direct_url = f"https://www.google.com/finance/quote/{encoded_query}"
             await page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
@@ -182,6 +241,15 @@ async def do_google_finance(query: str) -> str:
                 data["display_price"] = _extract_contextual_price(
                     query, data.get("page_text", "")
                 )
+
+            # Restore the knowledge-panel fields the quote page does not carry.
+            for key, value in panel.items():
+                if value and not data.get(key):
+                    data[key] = value
+            if panel.get("stats"):
+                merged_stats = dict(panel["stats"])
+                merged_stats.update(data.get("stats") or {})
+                data["stats"] = merged_stats
 
         lines = [f"Google Finance: {query}\n"]
 
@@ -412,110 +480,126 @@ async def do_google_shopping(query: str, num_results: int = 5) -> list:
             r"""
             (numResults) => {
                 const results = [];
+                const seen = new Set();
+                const PRICE_RE = /[€$£¥₹]\s?\d[\d.,]*/;
+                const RATING_RE = /^([\d.,]+)\s*\(\s*([\d.,]+[KM]?)\s*\)$/;
+                const NOISE = new Set([
+                    'sale', 'sponsored', 'ad', 'about this result',
+                    'report a violation', 'in stores nearby', 'in store',
+                    '& more prices', '& more', '30-day returns',
+                    'free delivery', 'special offer', 'price drop', 'deal',
+                ]);
 
-                // Google Shopping uses various container classes
-                const items = document.querySelectorAll(
-                    '.sh-dgr__content, .sh-dlr__list-result, ' +
-                    '.KZmu8e, .i0X6df, .xcR77, ' +
-                    '[data-docid], .sh-pr__product-result, ' +
-                    'div[data-docid], div.sh-pr__product-result, ' +
-                    'div.i0X6df, div.xcR77'
-                );
+                const abs = (href) => {
+                    if (!href) return '';
+                    try { return new URL(href, location.href).href; } catch (e) { return href; }
+                };
 
-                for (const el of items) {
+                // Product boxes.
+                //
+                // The shopping vertical lists one product per box whose text runs
+                //   [SALE] / <title lines> / <price> / [list price] / <merchant> / <rating>
+                // The price span (.lmQWe and friends) is the stable anchor, but its
+                // class names churn, so boxes are collected from the known container
+                // class *and* by walking up from anything that looks like a price.
+                // Every class the old extractor used (.sh-dgr__content, [data-docid],
+                // .KZmu8e, …) is gone from the current page; it matched nothing and
+                // the caller dumped raw page text.
+                const boxes = new Set();
+                for (const el of document.querySelectorAll('.UC8ZCe')) boxes.add(el);
+                for (const el of document.querySelectorAll('span, div')) {
+                    const t = (el.innerText || '').trim();
+                    if (!PRICE_RE.test(t) || t.length > 12) continue;
+                    let n = el;
+                    for (let i = 0; i < 8 && n; i++) {
+                        n = n.parentElement;
+                        if (!n) break;
+                        const len = (n.innerText || '').length;
+                        if (len > 60 && len < 420) { boxes.add(n); break; }
+                    }
+                }
+
+                for (const box of boxes) {
                     if (results.length >= numResults) break;
 
-                    const titleEl = el.querySelector('h3, h4, .tAxDx, .Xjkr3b, .EI11Pd');
-                    const priceEl = el.querySelector('.a8Pemb, .HRLxBb, .kHxwFf, .T14wmb, b');
-                    const storeEl = el.querySelector('.aULzUe, .IuHnof, .E5ocAb, .dD8iuc');
-                    const ratingEl = el.querySelector('.Rsc7Yb, .QIrs8, .yi40Hd');
+                    const lines = (box.innerText || '')
+                        .split('\n')
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                    if (!lines.length) continue;
 
-                    const title = titleEl ? titleEl.innerText.trim() : '';
-                    if (!title) continue;
+                    // A product needs a title *before* its price.
+                    const priceIdx = lines.findIndex(
+                        (l) => PRICE_RE.test(l) && l.length <= 16
+                    );
+                    if (priceIdx < 1) continue;
 
-                    // Extract clean product URL from Google redirect wrappers
-                    let productUrl = '';
-                    // 1. Check data-merchant-url attribute on links
-                    const merchantLink = el.querySelector('a[data-merchant-url]');
-                    if (merchantLink) {
-                        productUrl = merchantLink.getAttribute('data-merchant-url');
+                    const titleParts = [];
+                    for (let i = 0; i < priceIdx; i++) {
+                        const low = lines[i].toLowerCase();
+                        if (NOISE.has(low) || PRICE_RE.test(lines[i])) continue;
+                        titleParts.push(lines[i]);
                     }
-                    if (!productUrl) {
-                        // 2. Try links with url?q= redirect pattern
-                        const redirectLink = el.querySelector('a[href*="/url?"]');
-                        if (redirectLink) {
-                            try {
-                                const u = new URL(redirectLink.href);
-                                productUrl = u.searchParams.get('q') || u.searchParams.get('url') || '';
-                            } catch(e) {}
+                    const title = titleParts.join(' ').trim();
+                    if (title.length < 3) continue;
+
+                    const price = (lines[priceIdx].match(PRICE_RE) || [''])[0].trim();
+                    if (!price) continue;
+
+                    let store = '';
+                    let oldPrice = '';
+                    let rating = '';
+                    for (let i = priceIdx + 1; i < lines.length; i++) {
+                        const line = lines[i];
+                        const low = line.toLowerCase();
+                        const rm = line.match(RATING_RE);
+                        if (rm && !rating) { rating = rm[1] + ' (' + rm[2] + ')'; continue; }
+                        if (PRICE_RE.test(line) && line.length <= 16) {
+                            if (!oldPrice && line !== price) oldPrice = line;
+                            continue;
                         }
-                    }
-                    if (!productUrl) {
-                        // 3. Try links with aclk (Google Ads click tracker)
-                        const aclkLink = el.querySelector('a[href*="aclk?"]');
-                        if (aclkLink) {
-                            try {
-                                const u = new URL(aclkLink.href);
-                                productUrl = u.searchParams.get('adurl') || '';
-                            } catch(e) {}
-                        }
-                    }
-                    if (!productUrl) {
-                        // 4. Fallback: any link with an external href
-                        const allLinks = el.querySelectorAll('a[href]');
-                        for (const a of allLinks) {
-                            const h = a.href;
-                            if (h && h.startsWith('http') &&
-                                !h.includes('google.com/aclk') &&
-                                !h.includes('google.com/url') &&
-                                !h.includes('google.com/search') &&
-                                !h.includes('google.com/shopping')) {
-                                productUrl = h;
-                                break;
-                            }
-                        }
-                    }
-                    if (!productUrl) {
-                        // 5. Last resort: use raw href
-                        const linkEl = el.querySelector('a[href]');
-                        productUrl = linkEl ? linkEl.href : '';
+                        if (!store && !NOISE.has(low) && line.length <= 80) store = line;
                     }
 
-                    // Extract product thumbnail
+                    const key = (title + '|' + price).toLowerCase();
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+
+                    // Prefer an outbound merchant link; the box's own anchor is
+                    // usually a Google comparison page.
+                    let linkUrl = '';
+                    for (const a of box.querySelectorAll('a[href]')) {
+                        const h = abs(a.getAttribute('href'));
+                        let host = '';
+                        try { host = new URL(h).hostname; } catch (e) { host = ''; }
+                        if (/^https?:\/\//.test(h) && host && !/google\./.test(host)) {
+                            linkUrl = h;
+                            break;
+                        }
+                    }
+                    if (!linkUrl) {
+                        const own = box.querySelector('a[href]');
+                        if (own) linkUrl = abs(own.getAttribute('href'));
+                    }
+
                     let thumbnail = '';
-                    const imgs = el.querySelectorAll('img');
-                    for (const img of imgs) {
-                        const s = img.src || img.dataset?.src || '';
-                        if (!s) continue;
-                        if (s.startsWith('data:image') && s.length > 500) { thumbnail = s; break; }
-                        if (s.startsWith('http') && !s.includes('gstatic.com/s/i/')) { thumbnail = s; break; }
-                        if (s.startsWith('//')) { thumbnail = 'https:' + s; break; }
-                    }
+                    const img = box.querySelector('img');
+                    if (img) thumbnail = img.src || img.dataset?.src || '';
 
                     results.push({
-                        title: title,
-                        price: priceEl ? priceEl.innerText.trim() : '',
-                        store: storeEl ? storeEl.innerText.trim() : '',
-                        rating: ratingEl ? ratingEl.innerText.trim() : '',
-                        url: productUrl,
-                        thumbnail: thumbnail,
+                        title, price, old_price: oldPrice, store, rating,
+                        url: linkUrl, thumbnail,
                     });
                 }
 
-                // Fallback: parse the visible text on shopping results
                 if (results.length === 0) {
-                    const body = document.querySelector('#search, #rso, main');
-                    if (body) {
-                        const text = body.innerText;
-                        const pricePattern = /(?:[$£€]|CHF|USD|EUR)\s*[\d,.]+/g;
-                        const matches = [...text.matchAll(pricePattern)];
-                        if (matches.length > 0) {
-                            return [{
-                                title: '__raw__',
-                                raw_text: text.substring(0, 3000),
-                                price: '', store: '', rating: '', url: ''
-                            }];
-                        }
+                    const area = document.querySelector('#rso, #search, [role="main"]');
+                    if (area) {
+                        results.push({
+                            title: '__raw__',
+                            raw_text: area.innerText.substring(0, 3000),
+                            price: '', store: '', rating: '', url: '',
+                        });
                     }
                 }
 
@@ -532,7 +616,12 @@ async def do_google_shopping(query: str, num_results: int = 5) -> list:
         if len(results) == 1 and results[0].get("title") == "__raw__":
             raw = results[0].get("raw_text", "")
             raw = re.sub(r'\n{3,}', '\n\n', raw).strip()
-            return [f"Google Shopping Results for: {query}\n\n{raw}"]
+            # Say so explicitly. An unlabelled dump reads like real output and
+            # hid the fact that every product selector had stopped matching.
+            return [
+                f"Google Shopping Results for: {query}\n\n"
+                f"(Could not extract structured results. Raw page content:)\n{raw}"
+            ]
 
         # Download product thumbnail images via page context
         import base64 as b64mod

@@ -6,7 +6,6 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 
 import asyncio
 import os
-import re
 from typing import Literal
 from urllib.parse import quote_plus
 
@@ -1066,50 +1065,98 @@ async def do_google_trends(query: str) -> str:
                             f"https://trends.google.com/trends/explore?q={encoded_query}"
                         )
 
-            # Trends takes longer to load its widgets
-            await page.wait_for_timeout(5000)
+            # Trends renders its widgets lazily (four <trends-widget> elements
+            # whose bodies fill in after the initial HTML). A fixed sleep returned
+            # titles with empty bodies, which is why the old class-based selectors
+            # matched *other* widgets' text and reported regions as "related
+            # queries". Wait for the widgets themselves, not just for text.
+            for _ in range(10):
+                await page.wait_for_timeout(2000)
+                ready = await page.evaluate(
+                    """() => Array.from(document.querySelectorAll('trends-widget'))
+                        .filter(w => (w.innerText || '').length > 150).length"""
+                )
+                if ready >= 3:
+                    break
 
             data = await page.evaluate(
-                """
+                r"""
                 () => {
-                    const data = { interest: [], related_topics: [], related_queries: [] };
+                    const data = {
+                        interest: [],
+                        regions: [],
+                        related_topics: [],
+                        related_queries: [],
+                    };
 
-                    // Interest over time - try to get the widget content
-                    const timeWidget = document.querySelector('fe-line-chart-directive, .fe-line-chart');
-                    if (timeWidget) {
-                        data.interest_note = 'Interest over time data available (see Google Trends for chart)';
-                    }
+                    const widgets = Array.from(document.querySelectorAll('trends-widget'));
 
-                    // Related topics
-                    const topicWidgets = document.querySelectorAll('fe-related-queries .comparison-item, .fe-atoms-generic-list .item');
-                    for (const el of topicWidgets) {
-                        const label = el.querySelector('.label-text, .item-text, a');
-                        const value = el.querySelector('.progress-bar-wrapper, .bar');
-                        if (label) {
-                            data.related_topics.push({
-                                topic: label.innerText.trim(),
-                                value: value ? value.getAttribute('aria-label') || value.innerText.trim() : ''
-                            });
+                    const titleOf = (w) => {
+                        const el = w.querySelector('.widget-title, .fe-atoms-generic-title, h2');
+                        let text = el ? el.innerText : '';
+                        if (!text) text = (w.innerText || '').split('\n')[0] || '';
+                        return text.replace(/help_outline/g, '').trim();
+                    };
+
+                    // Every widget renders its list as "index / label / value"
+                    // lines, e.g.  1 | St. Helena | 100
+                    //              2 | best electric vehicles 2026 | +1,250%
+                    // Anchoring on the leading index keeps rows apart and skips
+                    // the toolbar ("file_download", "code", "share").
+                    const parseRows = (w) => {
+                        const lines = (w.innerText || '')
+                            .split('\n')
+                            .map((s) => s.trim())
+                            .filter(Boolean);
+                        const out = [];
+                        const CHROME = /^(more_vert|file_download|code|share|help_outline)$/;
+                        let i = 0;
+                        while (i < lines.length) {
+                            if (!/^\d{1,2}$/.test(lines[i])) { i += 1; continue; }
+                            const label = lines[i + 1] || '';
+                            if (!label) { i += 1; continue; }
+                            // A numeric "value" can itself look like an index
+                            // (region share "53"), so consume the whole row instead
+                            // of rescanning it as the next row's number.
+                            let value = lines[i + 2] || '';
+                            let consumed = 2;
+                            if (CHROME.test(value)) {
+                                value = '';
+                            } else {
+                                consumed = 3;
+                            }
+                            if (!/^Showing \d/.test(label)) {
+                                out.push({ label: label, value: value });
+                            }
+                            i += consumed;
                         }
-                    }
+                        return out;
+                    };
 
-                    // Related queries - look for the queries widget
-                    const queryCards = document.querySelectorAll('.fe-related-queries-wrapper .comparison-item, [class*="related"] .item');
-                    for (const el of queryCards) {
-                        const label = el.querySelector('.label-text, .item-text, a');
-                        const value = el.querySelector('.progress-bar-wrapper, .bar');
-                        if (label) {
-                            data.related_queries.push({
-                                query: label.innerText.trim(),
-                                value: value ? value.getAttribute('aria-label') || value.innerText.trim() : ''
-                            });
+                    for (const w of widgets) {
+                        const title = titleOf(w);
+                        const low = title.toLowerCase();
+
+                        if (low.includes('related queries')) {
+                            data.related_queries = parseRows(w);
+                        } else if (low.includes('related topics')) {
+                            data.related_topics = parseRows(w);
+                        } else if (low.includes('interest by region')) {
+                            data.regions = parseRows(w);
+                        } else if (low.includes('interest over time')) {
+                            // "Nov 2, 2025        44" pairs, one per line. Google
+                            // wraps each date in bidi isolation marks (U+202A /
+                            // U+202C), which the strip below removes before the
+                            // date pattern is applied.
+                            const text = (w.innerText || '')
+                                .replace(/[\u200e\u200f\u202a-\u202e]/g, '');
+                            const re = /([A-Z][a-z]{2} \d{1,2}, \d{4})\s+(\d{1,3})/g;
+                            let m;
+                            while ((m = re.exec(text)) !== null) {
+                                data.interest.push({ date: m[1], value: m[2] });
+                                if (data.interest.length >= 60) break;
+                            }
                         }
-                    }
-
-                    // Fallback: get all visible text from the trends page
-                    const mainContent = document.querySelector('.trends-wrapper, main, [role="main"]');
-                    if (mainContent) {
-                        data.page_text = mainContent.innerText.substring(0, 3000);
                     }
 
                     return data;
@@ -1119,33 +1166,38 @@ async def do_google_trends(query: str) -> str:
 
             lines = [f"Google Trends for: {query}\n"]
 
-            if data.get("interest_note"):
-                lines.append(f"Note: {data['interest_note']}\n")
+            if data.get("interest"):
+                lines.append(f"Interest over time ({len(data['interest'])} points):")
+                for point in data["interest"][:12]:
+                    lines.append(f"  {point['date']}: {point['value']}")
+                if len(data["interest"]) > 12:
+                    lines.append(f"  … {len(data['interest']) - 12} more")
+                lines.append("")
+
+            if data.get("regions"):
+                lines.append("Interest by region:")
+                for row in data["regions"][:10]:
+                    value = f" ({row['value']})" if row.get("value") else ""
+                    lines.append(f"  - {row['label']}{value}")
+                lines.append("")
 
             if data.get("related_topics"):
                 lines.append("Related Topics:")
-                for t in data["related_topics"][:10]:
-                    val = f" ({t['value']})" if t.get("value") else ""
-                    lines.append(f"  - {t['topic']}{val}")
+                for row in data["related_topics"][:10]:
+                    value = f" ({row['value']})" if row.get("value") else ""
+                    lines.append(f"  - {row['label']}{value}")
                 lines.append("")
 
             if data.get("related_queries"):
                 lines.append("Related Queries:")
-                for q in data["related_queries"][:10]:
-                    val = f" ({q['value']})" if q.get("value") else ""
-                    lines.append(f"  - {q['query']}{val}")
+                for row in data["related_queries"][:10]:
+                    value = f" ({row['value']})" if row.get("value") else ""
+                    lines.append(f"  - {row['label']}{value}")
                 lines.append("")
 
-            # If structured data extraction didn't work well, fall back to page text
-            if not data.get("related_topics") and not data.get("related_queries"):
-                page_text = data.get("page_text", "")
-                if page_text:
-                    # Clean up the text
-                    page_text = re.sub(r'\n{3,}', '\n\n', page_text).strip()
-                    lines.append(page_text)
-                else:
-                    lines.append("Could not extract structured trends data.")
-                    lines.append(f"Visit: https://trends.google.com/trends/explore?q={encoded_query}")
+            if len(lines) == 1:
+                lines.append("Could not extract trends widgets (the page may still be loading).")
+                lines.append(f"Visit: https://trends.google.com/trends/explore?q={encoded_query}")
 
             return "\n".join(lines)
 

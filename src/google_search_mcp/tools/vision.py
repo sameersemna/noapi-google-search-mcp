@@ -248,8 +248,14 @@ async def do_google_lens(image_source: str) -> str:
                         }
                     }
 
-                    // Visual matches section - all the heading DIVs are visual match titles
-                    const allHeadings = document.querySelectorAll('div[role="heading"]');
+                    // Visual matches section - anchored on the results container.
+                    //
+                    // Iterating every div[role=heading] on the page also picked up
+                    // Google's own chrome ("Skip to main content", "Accessibility
+                    // help", "Footer links"), which is how an empty Lens result
+                    // used to look like output.
+                    const resultsRoot = document.querySelector('#rso, [role="main"]') || document.body;
+                    const allHeadings = resultsRoot.querySelectorAll('div[role="heading"]');
                     const skipTexts = new Set([
                         'Choose what you\'re giving feedback on',
                         'Customised date range',
@@ -293,14 +299,16 @@ async def do_google_lens(image_source: str) -> str:
                         }
                     }
 
-                    // Product results with prices (h3 elements with links)
-                    const h3s = document.querySelectorAll('h3');
+                    // Product results with prices. Anchored to #rso: an unanchored
+                    // `h3` scan matched nav headings, the same defect google_books
+                    // had. ``.g`` is the legacy web-SERP card.
+                    const h3s = resultsRoot.querySelectorAll('h3');
                     for (const h3 of h3s) {
                         if (data.product_results.length >= 8) break;
                         const text = h3.innerText.trim();
                         if (!text || text.length < 5) continue;
 
-                        const container = h3.closest('.g') || h3.parentElement?.parentElement?.parentElement;
+                        const container = h3.closest('.g, .MjjYud') || h3.parentElement?.parentElement;
                         if (!container) continue;
 
                         const linkEl = container.querySelector('a[href^="http"]');
@@ -320,13 +328,19 @@ async def do_google_lens(image_source: str) -> str:
                         }
                     }
 
-                    // Fallback: get full page text if nothing else worked
-                    if (!data.ai_overview && data.visual_matches.length === 0 && data.product_results.length === 0) {
-                        const main = document.querySelector('[role="main"], body');
-                        if (main) {
-                            data.raw_text = main.innerText.substring(0, 5000);
+                    // How much real result content exists. Zero means Lens served
+                    // its shell but never populated it (today's default for the
+                    // udm=26 AI surface), which the caller must report honestly
+                    // instead of echoing page chrome.
+                    data.result_links = Array.from(
+                        resultsRoot.querySelectorAll('a[href^="http"]')
+                    ).filter((a) => {
+                        try {
+                            return !/google\./.test(new URL(a.href).hostname);
+                        } catch (e) {
+                            return false;
                         }
-                    }
+                    }).length;
 
                     return data;
                 }
@@ -371,7 +385,20 @@ async def do_google_lens(image_source: str) -> str:
                 has_data = True
 
             if not has_data:
-                lines.append("Could not identify the image. Try with a clearer image or a direct product photo.")
+                # Do not echo the page text here: with an unpopulated Lens shell
+                # that text is Google's navigation chrome, which reads as results.
+                # Report the empty state and hand back the URL instead.
+                lines.append(
+                    "Google Lens returned no results for this image. The result "
+                    "surface (udm=26) loads as an AI shell that did not populate "
+                    "— it may be gated for this account/region, or still pending."
+                )
+                lines.append(f"Open in a browser: {getattr(page, 'url', '')}")
+                lines.append(
+                    "Try a clearer or more product-like photo, or use "
+                    "google_lens_detect with a local file for object detection."
+                )
+                has_data = True
 
             return "\n".join(lines)
 

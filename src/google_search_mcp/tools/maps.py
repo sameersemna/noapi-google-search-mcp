@@ -296,38 +296,53 @@ async def do_google_maps_directions(
                 () => {
                     const data = {distance: '', duration: '', steps: [], summary: ''};
 
-                    // Try to get distance and duration from the trip info
-                    const tripEl = document.querySelector(
-                        '#section-directions-trip-0, ' +
-                        '[data-trip-index="0"], ' +
-                        '.MespJc'
-                    );
+                    // Distance and duration, paired inside one route row.
+                    //
+                    // The old code looked for #section-directions-trip-0 and, when
+                    // that (now absent) element was missing, scanned the *entire
+                    // page* for the first distance-like string it could find. On
+                    // the current Maps layout that matched unrelated UI text and
+                    // reported "25 mi" for Berlin -> Dresden (the real route is
+                    // ~191 km). Pairing the two figures inside a common ancestor
+                    // is what guarantees they describe the same route.
+                    const DIST_RE = /^[\\d.,]+\\s*(?:km|mi|miles)$/i;
+                    const DUR_RE = /^\\d+\\s*(?:hr|h|min|d)\\b(?:\\s*\\d+\\s*(?:min|m))?$/i;
+                    const leaves = Array.from(document.querySelectorAll('*'))
+                        .filter((e) => e.children.length === 0);
 
-                    if (tripEl) {
-                        const text = tripEl.innerText;
-                        // Extract distance and duration patterns
-                        const distMatch = text.match(/(\\d[\\d,.]+\\s*(?:km|mi|m|miles|ft))/i);
-                        const durMatch = text.match(/(\\d+\\s*(?:hr|hour|min|h|d|day)s?(?:\\s*\\d+\\s*(?:min|hr|h)s?)?)/i);
-                        if (distMatch) data.distance = distMatch[1];
-                        if (durMatch) data.duration = durMatch[1];
-                    }
-
-                    // Broader fallback: search entire page for distance/duration
-                    if (!data.distance || !data.duration) {
-                        const allText = document.body.innerText;
-                        if (!data.distance) {
-                            const dm = allText.match(/(\\d[\\d,.]+\\s*(?:km|mi|miles))\\b/i);
-                            if (dm) data.distance = dm[1];
-                        }
-                        if (!data.duration) {
-                            const tm = allText.match(/(\\d+\\s*(?:hr|hour|h)s?\\s*\\d*\\s*(?:min)?s?)/i);
-                            if (!tm) {
-                                const tm2 = allText.match(/(\\d+\\s*min)/i);
-                                if (tm2) data.duration = tm2[1];
-                            } else {
-                                data.duration = tm[1];
+                    const pairFor = (leaf) => {
+                        let node = leaf;
+                        for (let i = 0; i < 8; i++) {
+                            node = node.parentElement;
+                            if (!node) return null;
+                            const inner = Array.from(node.querySelectorAll('*'))
+                                .filter((e) => e.children.length === 0);
+                            const dist = inner.find((e) => DIST_RE.test((e.innerText || '').trim()));
+                            const dur = inner.find((e) => DUR_RE.test((e.innerText || '').trim()));
+                            if (dist && dur) {
+                                return {
+                                    distance: dist.innerText.trim(),
+                                    duration: dur.innerText.trim(),
+                                };
                             }
                         }
+                        return null;
+                    };
+
+                    const routes = [];
+                    for (const leaf of leaves) {
+                        if (!DIST_RE.test((leaf.innerText || '').trim())) continue;
+                        const pair = pairFor(leaf);
+                        if (pair && !routes.some((r) => r.distance === pair.distance)) {
+                            routes.push(pair);
+                        }
+                        if (routes.length >= 5) break;
+                    }
+
+                    if (routes.length) {
+                        data.distance = routes[0].distance;
+                        data.duration = routes[0].duration;
+                        data.alternatives = routes.slice(1);
                     }
 
                     // Try to get route summary (e.g. "via A9")

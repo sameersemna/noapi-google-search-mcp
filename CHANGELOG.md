@@ -43,6 +43,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Domain-relevance audit across the Google tools.** An audit harness
+  (`scripts/audit_tools.py`) calls every Google-facing tool and checks the output
+  for markers that only exist in that domain, so a tool that silently answers a
+  domain query with generic search results fails loudly. It also flags a
+  page-chrome dump (Google's own navigation echoed as results), which is what
+  first hid the `google_lens` defect.
+- **`google_trends` reported the wrong widgets.** It matched any
+  `[class*="related"]` element, so *interest by region* was emitted as *related
+  queries* (and stray "trending now" rows leaked into every section). Widgets are
+  now identified by their title (`trends-widget` → Related queries / Related
+  topics / Interest by region / Interest over time) and each list is parsed by its
+  row structure. A numeric value (a region share such as `53`) is no longer read
+  as the next row's index, and the bidi marks Google wraps around trend dates are
+  stripped before matching. Verified: regions `St. Helena 100, Singapore 53, South
+  Korea 53, United States 45`, topics `Australia, TOYOTA, Toyota, Income, Fleet
+  vehicle`, queries `comparing eight electric vehicles (Breakout), ford fathom
+  (+950%)`.
+- **`google_maps_directions` reported the wrong distance.** Its
+  `#section-directions-trip-0` container no longer exists, so the code fell back
+  to "the first distance anywhere on the page" and returned `25 mi` for a route
+  whose real length is 191 km. Distance and duration are now read from the same
+  route row (an ancestor containing both), so the pair always describes one
+  option; the whole-page fallback is gone. Berlin → Dresden now reports
+  `191 km | 2 hr 14 min`.
+- **`google_finance` returned only a price.** `[data-last-price]` is gone from the
+  current panel, and the code read the SERP before the panel rendered — then the
+  `/finance/quote` fallback **replaced** the whole result, discarding the company
+  name, change and stat rows. It now waits for the panel, reads `data-attrid`
+  (`title`, `subtitle`, `Chart`, `Open`, `High`, `Low`, `Mkt cap`, `P/E ratio`,
+  …), and *merges* the quote-page fallback instead of replacing it. `MSFT:NASDAQ`
+  now returns the company, exchange and nine key stats.
+- **`google_lens` presented page chrome as results.** Its extractors scanned every
+  `div[role="heading"]`/`h3` on the page and, having matched nothing, appended the
+  entire body text — which on an empty Lens page is Google's navigation
+  ("Skip to main content / Accessibility help / Footer links"). That read as
+  output and concealed the failure. Parsers are anchored to `#rso` now, the
+  whole-body dump is removed, and an empty result is reported as such together
+  with the Lens URL. Verified working: the sample image returns a description
+  (`orange tabby cat … amber-gold eyes`) plus source links (Wikipedia, Wikimedia
+  Commons, Flickr, Instagram, Pixabay). Note the Lens shell populates
+  asynchronously and can still be empty transiently — that is now reported
+  honestly instead of as chrome text.
+- **Two inline ``page.evaluate`` scripts were invalid JavaScript.**
+  `browser.detect_block_reason` and the manual-intervention poll loop both
+  contained `'verify it\'s you'` inside a *non-raw* Python string: Python
+  consumes the backslash, so JavaScript received a bare apostrophe, the script
+  failed to parse, and the exception was swallowed by the surrounding
+  `try/except`. Consequence: a block was never classified (`reason=unknown`, which
+  is what the service log had been printing) and a resolved manual intervention
+  was never noticed. The literals are double-quoted now, and
+  `tests/unit/test_evaluate_scripts_syntax.py` compiles **every** inline script
+  with `node --check` (parsing the module with `ast`, so raw/non-raw escaping is
+  resolved exactly as the browser sees it).
+- **`google_shopping` matched nothing and dumped raw page text.** Every selector
+  it used (`.sh-dgr__content`, `.KZmu8e`, `.i0X6df`, `.xcR77`, `[data-docid]`,
+  `.sh-pr__product-result`) has disappeared from the shopping vertical, so the
+  extractor returned nothing and the caller appended `#rso`'s inner text without
+  a label — which read as output. It now anchors on the product box
+  (`.UC8ZCe`, else the nearest ancestor of a price span that also holds a
+  title), requires a title *before* the price (a filter chip such as "Under €60"
+  is not a product), and parses current price, list price, merchant and rating.
+  The raw fallback is labelled "(Could not extract structured results …)" so a
+  selector rot can never again look like data. Verified: five keyboards with
+  `Price: €59.99`, `Store: Amazon.de - Amazon.de-Seller`, `Rating: 4,9 (956)` and
+  inline images.
+- **`google_trends` failed with "lookup failed".** The widget extractor had an
+  unbalanced brace, which is a JavaScript syntax error — so *every* call threw
+  and was reported as a transient failure. Fixed; regions and topics are now
+  returned as separate lists (`St. Helena 100, Singapore 56, South Korea 55 …`;
+  `National Health Service +500%, March +450% …`).
 - **`google_hotels` returned search-tab links instead of hotels.**
   It searched `google.com/search?q=hotels <query>` (a generic web SERP) and
   parsed `div[data-ved] a[href*="hotel"]`. Those tab links (Images, News, Forums)

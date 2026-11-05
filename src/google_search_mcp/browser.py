@@ -1026,7 +1026,12 @@ async def detect_block_reason(page) -> str:
                     ),
                     hasVerification: body.includes('2-step verification') ||
                                      body.includes('verify it') ||
-                                     body.includes('verify it\'s you') ||
+                                     // Double-quoted on purpose: this script lives in a
+                                     // non-raw Python string, so a backslash-escaped
+                                     // apostrophe (\') is consumed by Python and reaches
+                                     // JavaScript as a bare quote, breaking the whole
+                                     // script. Double quotes sidestep the escaping.
+                                     body.includes("verify it's you") ||
                                      body.includes('enter the code'),
                     hasConsent: body.includes('before you continue') ||
                                 body.includes('consent') ||
@@ -1257,7 +1262,9 @@ async def manual_intervention_for_block(
                              body.includes('sign in'));
                         const isVerification =
                             body.includes('2-step verification') ||
-                            body.includes('verify it\'s you') ||
+                            // Double-quoted so the apostrophe needs no escaping;
+                            // a \' here is eaten by Python and yields invalid JS.
+                            body.includes("verify it's you") ||
                             body.includes('enter the code we');
                         const hasSearchBox = !!document.querySelector(
                             'input[name="q"], textarea[name="q"], input[title="search"]'

@@ -61,9 +61,16 @@ def test_browser_binds_config_module():
     assert getattr(browser, "config", None) is not None
 
 
-def test_search_binds_re_and_ddg_images_fallback():
+def test_search_binds_ddg_images_fallback():
+    """B17 guard: the images fallback is used, so it must be imported.
+
+    This also used to require ``re`` to be bound. The Trends rewrite removed the
+    last ``re`` use from ``search.py`` (the old raw-text cleanup), and an unused
+    import is exactly what B17 was about — so the requirement is now the binding
+    that still matters.
+    """
     from google_search_mcp.tools import search
-    assert getattr(search, "re", None) is not None
+
     assert getattr(search, "fallback_duckduckgo_images", None) is not None
 
 
