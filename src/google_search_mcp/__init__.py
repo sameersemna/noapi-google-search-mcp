@@ -140,6 +140,32 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     parser.add_argument("--check", action="store_true", help="check dependencies and exit")
+    parser.add_argument(
+        "--manual-browser",
+        nargs="?",
+        const="https://www.google.com",
+        default=None,
+        metavar="URL",
+        help="open a visible Chromium window sharing the server's cookies, then exit "
+        "(default URL: https://www.google.com). Use it to log in, clear a consent "
+        "dialog or find a feed URL by hand; cookies are written back so the next "
+        "tool call uses the new session.",
+    )
+    parser.add_argument(
+        "--browser-profile",
+        default=None,
+        metavar="DIR",
+        help="profile directory for --manual-browser (default: a dedicated \n"
+        "'google-mcp-browser-manual' profile). Point it at the service's profile "
+        "only while the service is stopped.",
+    )
+    parser.add_argument(
+        "--browser-timeout",
+        type=int,
+        default=0,
+        metavar="SEC",
+        help="close the --manual-browser window after SEC seconds (0 = until you close it)",
+    )
     parser.add_argument("--transport", choices=_TRANSPORTS, default=None,
                         help="MCP transport (default: stdio, or NOAPI_MCP_TRANSPORT)")
     parser.add_argument("--host", default=None, help="bind host for HTTP transports")
@@ -154,6 +180,19 @@ def main(argv: list[str] | None = None) -> None:
         report, ok = _dependency_report()
         print(report)
         raise SystemExit(0 if ok else 1)
+
+    if args.manual_browser:
+        # A headful session is interactive: it must not start the MCP server, the
+        # health endpoint or the browser pool.
+        from .manual_browser import run_manual_browser
+
+        raise SystemExit(
+            run_manual_browser(
+                args.manual_browser,
+                profile_dir=args.browser_profile,
+                timeout_sec=args.browser_timeout,
+            )
+        )
 
     transport = args.transport or config.TRANSPORT
     if transport not in _TRANSPORTS:
