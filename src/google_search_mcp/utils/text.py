@@ -14,6 +14,12 @@ def format_error(operation: str, exc: BaseException | None = None) -> str:
     logged server-side for debugging; the returned string is a concise,
     actionable message with no internal traceback noise.
 
+    Known exceptions (:class:`GoogleMcpError` and subclasses) are the exception:
+    their message is written *for* the caller — "the remote Whisper host is
+    unreachable, set WHISPER_REMOTE_URL" — and replacing it with "please try
+    again" removes the one piece of information that makes the failure fixable.
+    Retrying does not help an unreachable host.
+
     Args:
         operation: A short human-readable label for what failed, e.g.
                    ``"Google Maps search"``.
@@ -21,10 +27,19 @@ def format_error(operation: str, exc: BaseException | None = None) -> str:
              message are logged at ERROR level.
 
     Returns:
-        A clean message like ``"Google Maps search failed. Please try again."``
+        The exception's own message for a known :class:`GoogleMcpError`,
+        otherwise ``"<operation> failed. Please try again."``
     """
     if exc is not None:
         logger.error("%s failed: %s: %s", operation, type(exc).__name__, exc)
+        # Imported here to avoid a cycle: errors.py imports nothing from here,
+        # but utils is imported very early during startup.
+        try:
+            from ..errors import GoogleMcpError
+        except ImportError:  # pragma: no cover - defensive
+            GoogleMcpError = ()  # type: ignore[assignment]
+        if isinstance(exc, GoogleMcpError) and str(exc).strip():
+            return str(exc)
     return f"{operation} failed. Please try again."
 
 

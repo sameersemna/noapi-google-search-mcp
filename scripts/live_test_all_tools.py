@@ -23,6 +23,7 @@ Groups: local, google, remote, heavy.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 import time
@@ -35,7 +36,10 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 # Fixtures the caller prepares first; see the module docstring.
-URL = "http://127.0.0.1:11403/mcp"
+# Target any deployment, e.g. a second instance started on another port to test
+# a config change before it is rolled out:
+#   MCP_TEST_URL=http://127.0.0.1:11404/mcp python scripts/live_test_all_tools.py heavy
+URL = os.environ.get("MCP_TEST_URL", "http://127.0.0.1:11403/mcp")
 FIXTURES = Path(tempfile.gettempdir()) / "mcp_selftest"
 SAMPLE_IMAGE = str(Path(tempfile.gettempdir()) / "audit_sample.jpg")
 

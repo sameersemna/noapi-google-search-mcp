@@ -376,18 +376,54 @@ def test_transcribe_remote_malformed_json_returns_none(monkeypatch, tmp_path):
     assert result is None
 
 
-def test_transcribe_remote_missing_segments_returns_none(monkeypatch, tmp_path):
+def test_transcribe_remote_empty_segments_is_no_speech_not_failure(monkeypatch, tmp_path):
+    """An empty ``segments`` list is a valid "no speech" result.
+
+    whisper.cpp returns ``{"language":"english","segments":[],"text":"",
+    "duration":2.0}`` for silent audio. This used to be normalised to ``None``,
+    which — with the local fallback gone — surfaced as "Transcription is
+    unavailable: the remote host did not transcribe the audio", i.e. it blamed
+    the GPU host for a silent recording.
+    """
+    _enable_remote(monkeypatch, min_bytes=1)
+    audio = tmp_path / "silence.mp3"
+    audio.write_bytes(b"\xff" * 2048)
+
+    with mock.patch.object(
+        whisper_remote.urllib.request, "urlopen",
+        return_value=_fake_http_response(200, {
+            "task": "transcribe",
+            "language": "english",
+            "duration": 2.0,
+            "text": "",
+            "segments": [],
+            "detected_language": "english",
+            "language_probabilities": {"en": 0.42},
+        }),
+    ):
+        result = whisper_remote.transcribe_remote(str(audio), "tiny", "")
+
+    assert result is not None, "empty segments must not be treated as a failure"
+    assert result["segments"] == []
+    assert result["language"] == "en"
+    assert 0.0 < result["language_probability"] <= 1.0
+
+
+def test_transcribe_remote_malformed_segment_dicts_return_none(monkeypatch, tmp_path):
+    """Segment dicts that carry no usable fields ARE malformed."""
     _enable_remote(monkeypatch, min_bytes=1)
     audio = tmp_path / "clip.mp3"
     audio.write_bytes(b"\xff" * 2048)
 
     with mock.patch.object(
         whisper_remote.urllib.request, "urlopen",
-        return_value=_fake_http_response(200, {"language": "en", "segments": []}),
+        return_value=_fake_http_response(200, {
+            "language": "en",
+            "segments": [{"id": 0}, {"id": 1}],
+        }),
     ):
         result = whisper_remote.transcribe_remote(str(audio), "tiny", "")
 
-    # Empty segments list is normalised to None
     assert result is None
 
 

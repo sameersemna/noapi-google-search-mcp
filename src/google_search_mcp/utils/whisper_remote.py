@@ -698,10 +698,18 @@ def _normalise_response(payload: Any) -> dict | None:
         return None
 
     language_raw = payload.get("language") or ""
-    segments_raw = payload.get("segments") or []
-    if language_raw and isinstance(segments_raw, list) and segments_raw:
+    segments_raw = payload.get("segments")
+    segments_is_list = isinstance(segments_raw, list)
+
+    # A ``segments`` list (even an EMPTY one) alongside a detected language is a
+    # valid Whisper outcome, not a parse failure. whisper.cpp returns
+    #   {"language":"english","segments":[],"text":"","duration":2.0}
+    # for audio that contains no speech. Treating that as malformed blamed the
+    # GPU host for silence and, now that there is no local fallback, turned a
+    # perfectly normal "nothing was said" into a hard error.
+    if segments_is_list and (segments_raw or language_raw):
         out_segments: list[dict] = []
-        for seg in segments_raw:
+        for seg in segments_raw or []:
             if not isinstance(seg, dict):
                 continue
             start = seg.get("start")
@@ -712,7 +720,8 @@ def _normalise_response(payload: Any) -> dict | None:
             out_segments.append(
                 {"start": float(start), "end": float(end), "text": str(text).strip()}
             )
-        if not out_segments:
+        # Segment dicts were present but none were usable — that IS malformed.
+        if segments_raw and not out_segments:
             return None
 
         # Normalise language to an ISO code. For whisper.cpp the
