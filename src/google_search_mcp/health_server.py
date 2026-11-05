@@ -809,6 +809,41 @@ def _compute_status(health: dict[str, Any]) -> str:
     return "ok"
 
 
+def _check_engines() -> dict[str, Any]:
+    """Report resident native engines plus this process's RSS.
+
+    The engine cache exists because rebuilding Whisper/RapidOCR/ORT engines per
+    call leaked their native arenas until the server reached 6.9 GB and the
+    kernel OOM-killer took down the whole desktop. These numbers make a
+    regression visible here, before it becomes a crash.
+    """
+    from .utils import singletons
+
+    info: dict[str, Any] = {
+        "cache_enabled": None,
+        "resident": {},
+        "rss_mb": None,
+    }
+    try:
+        from . import config
+
+        info["cache_enabled"] = config.CACHE_ENGINES
+        info["resident"] = {
+            name: list(key) for name, key in singletons.engine_cache_info().items()
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        info["error"] = f"{type(exc).__name__}: {exc}"
+
+    if _PSUTIL_AVAILABLE:
+        try:
+            info["rss_mb"] = round(
+                psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 1
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return info
+
+
 def _build_health_payload() -> dict[str, Any]:
     """Assemble the full /health JSON response."""
     from . import config, browser
@@ -827,6 +862,7 @@ def _build_health_payload() -> dict[str, Any]:
         "config": _check_config(),
         "anti_detect": _check_anti_detect(),
         "metrics": _check_metrics(),
+        "engines": _check_engines(),
         "dependencies": _check_dependencies(),
         "files": _check_files(),
         "disk": _check_disk(),

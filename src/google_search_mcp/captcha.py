@@ -16,6 +16,7 @@ from .config import (
     IMAGENET_STD,
     MOBILENET_ONNX_PATH,
 )
+from .utils.singletons import cached_engine
 
 
 async def is_blocked(page) -> bool:
@@ -147,7 +148,13 @@ def _classify_cells(cells: list[bytes], prompt_keywords: list[str]) -> list[bool
     if not _ensure_captcha_model():
         return [False] * len(cells)
 
-    session = ort.InferenceSession(MOBILENET_ONNX_PATH)
+    # One inference session for the process. Creating an InferenceSession per
+    # classification call leaked an ORT arena every time a CAPTCHA was seen.
+    session = cached_engine(
+        "mobilenet",
+        (MOBILENET_ONNX_PATH,),
+        lambda: ort.InferenceSession(MOBILENET_ONNX_PATH),
+    )
     input_name = session.get_inputs()[0].name
 
     target_classes: set[int] = set()

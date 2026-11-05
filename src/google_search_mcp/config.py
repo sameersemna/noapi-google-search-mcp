@@ -654,6 +654,12 @@ CACHE_TTL_SECONDS: int = env_int("CACHE_TTL_SECONDS", 3600)
 CACHE_MAX_ENTRIES: int = env_int("CACHE_MAX_ENTRIES", 512)
 CACHE_DB_PATH: str = env("CACHE_DB_PATH", os.path.join(CACHE_DIR, "cache.db"))
 
+# Reuse heavyweight native engines (Whisper, RapidOCR, the MobileNet CAPTCHA
+# classifier) across calls instead of rebuilding them per call. Rebuilding
+# leaked their native arenas -- the server reached 6.9 GB RSS and got OOM-killed.
+# Set to 0 only to debug an engine-construction problem.
+CACHE_ENGINES: bool = env_flag("CACHE_ENGINES", True)
+
 # Idempotency store for side-effecting remote writes.
 IDEMPOTENCY_DB_PATH: str = env(
     "IDEMPOTENCY_DB_PATH", os.path.join(CACHE_DIR, "idempotency.db")

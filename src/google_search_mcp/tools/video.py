@@ -39,6 +39,7 @@ from ..server import (
     try_solve_captcha,
 )
 from ..utils import ytdlp
+from ..utils.singletons import cached_engine
 from ..utils.text import format_timestamp
 
 log = logging.getLogger("google_search_mcp.video")
@@ -213,7 +214,15 @@ def _transcribe_audio_local(audio_path: str, model_size: str, language: str) -> 
     """
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    # Reuse the model across calls. Constructing a WhisperModel per call leaked
+    # ctranslate2's native arena every time (the server reached 6.9 GB RSS and
+    # was OOM-killed). The cache keeps one instance per model size and releases
+    # the previous one when the size changes.
+    model = cached_engine(
+        "whisper",
+        (model_size,),
+        lambda: WhisperModel(model_size, device="cpu", compute_type="int8"),
+    )
 
     transcribe_opts = {"beam_size": 5}
     if language:

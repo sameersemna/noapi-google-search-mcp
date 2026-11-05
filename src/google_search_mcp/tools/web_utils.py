@@ -45,6 +45,7 @@ from ..server import (
     format_error,
     strip_html,
 )
+from ..utils.singletons import cached_engine
 from ..utils.text import format_timestamp
 
 
@@ -444,7 +445,9 @@ def _read_pdf_text(file_path: str) -> str:
             if img_proc.returncode != 0:
                 return ""
 
-            ocr = RapidOCR()
+            # Shared with ocr_image: one RapidOCR engine per process, not one
+            # per PDF page batch (each rebuild leaked an ONNX Runtime arena).
+            ocr = cached_engine("rapidocr", (), RapidOCR)
             all_text: list[str] = []
             for img_file in sorted(Path(tmpdir).glob("*.png")):
                 result, _ = ocr(str(img_file))

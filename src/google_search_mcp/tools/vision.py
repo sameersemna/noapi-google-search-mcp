@@ -35,6 +35,7 @@ from ..server import (
     try_solve_captcha,
 )
 from ..utils.image import is_base64_image, is_local_file, save_base64_image
+from ..utils.singletons import cached_engine
 
 
 # google_lens (reverse image search)
@@ -857,7 +858,9 @@ async def ocr_image(image_source: str) -> str:
         if not os.path.isfile(file_path):
             return f"File not found: {image_source}\nPlease provide a valid file path."
 
-        engine = RapidOCR()
+        # One OCR engine for the process: rebuilding RapidOCR per call leaked an
+        # ONNX Runtime arena (~200+ MB) on every invocation.
+        engine = cached_engine("rapidocr", (), RapidOCR)
         result, elapse = engine(file_path)
 
         if not result:
