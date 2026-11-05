@@ -89,5 +89,22 @@ Restart=on-failure
 RestartSec=10
 StartLimitBurst=3
 
+# ── Memory guard ───────────────────────────────────────────────────────
+# This service once grew to 6.9 GB because native engines (Whisper, RapidOCR,
+# ONNX Runtime) were rebuilt per call and their arenas never released. The leak
+# is fixed in utils/singletons.py, but the failure mode is worth containing:
+# the kernel OOM-killer picked `code` before it picked the server, so a server
+# leak crashed the editor twice.
+#
+# MemoryMax makes systemd stop THIS unit at the ceiling instead of letting it
+# push the machine into global OOM. MemoryHigh adds back-pressure first
+# (reclaim) so normal load is unaffected. OOMScoreAdjust biases the kernel to
+# kill the server rather than the desktop if global OOM happens anyway.
+# Raise MemoryMax if you routinely transcribe long videos: a Whisper
+# medium/large model alone is ~1.5-3 GB.
+MemoryHigh=3G
+MemoryMax=6G
+OOMScoreAdjust=500
+
 [Install]
 WantedBy=multi-user.target

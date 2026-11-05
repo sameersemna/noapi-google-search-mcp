@@ -80,6 +80,7 @@ is verified against the code by a test.
 | `NOAPI_MCP_CACHE_TTL_SECONDS` | `3600` | Fallback TTL for tools without a specific one. |
 | `NOAPI_MCP_CACHE_MAX_ENTRIES` | `512` | In-memory LRU bound. |
 | `NOAPI_MCP_CACHE_DB_PATH` | `<cache>/cache.db` | Optional on-disk tier. |
+| `NOAPI_MCP_CACHE_ENGINES` | `1` | Reuse Whisper/RapidOCR/ONNX engines across calls. `0` rebuilds per call — which leaks their native memory; for debugging only. |
 
 ### Idempotency
 

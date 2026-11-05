@@ -87,6 +87,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The server grew to 6.9 GB and the kernel OOM-killer crashed the desktop.**
+  Four sites built a heavyweight native engine on every call and released none
+  of them: `WhisperModel` in `_transcribe_audio_local`, `RapidOCR()` in
+  `ocr_image` and in the scanned-PDF fallback, and an `onnxruntime`
+  `InferenceSession` in the CAPTCHA classifier. Each construction allocates
+  model weights plus a ctranslate2 / ONNX Runtime thread-pool arena, and those
+  arenas are not promptly returned to the OS, so they accumulated for the life
+  of the process. Observed: `Out of memory: Killed process 310235 (python)
+  anon-rss:6873480kB`, with the editor (`code`) killed twice before it.
+  `utils/singletons.py` now keeps one instance per engine family: a repeat call
+  reuses the engine, and changing the model size replaces the resident one, so
+  memory stays bounded instead of growing with usage.
+  `NOAPI_MCP_CACHE_ENGINES=0` restores build-per-call for debugging. `/health`
+  reports the resident engines and the process RSS so a regression is visible
+  before it becomes a crash, and the unit file caps the service
+  (`MemoryHigh=3G`, `MemoryMax=6G`, `OOMScoreAdjust=500`) so a future leak stops
+  the service rather than the desktop.
 - **`/health` reported the wrong transport.** The field was hardcoded to
   `"transport": "stdio"`, so every HTTP deployment advertised stdio — the same
   class of stale label that made the retired `mcp-proxy --transport
