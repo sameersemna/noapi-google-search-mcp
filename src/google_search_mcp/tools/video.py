@@ -198,97 +198,52 @@ def _format_and_cache_transcript(
     return full_transcript
 
 
-def _transcribe_audio_local(audio_path: str, model_size: str, language: str) -> dict:
-    """Transcribe audio file locally with faster-whisper on CPU/int8.
+def _transcribe_audio(audio_path: str, model_size: str, language: str) -> dict:
+    """Transcribe an audio file on the remote Whisper host (runs in a thread).
 
-    Always invoked as ``await asyncio.to_thread(...)`` by the calling tool —
-    the function itself is synchronous.
+    Transcription is **always** delegated to ``WHISPER_REMOTE_URL`` — there is
+    no local model. That host is ``promaxgb10-6116`` (Dell Pro Max GB10) on the
+    LAN, which runs the model on a GPU: the same file that takes ~20 s per
+    minute of audio on this machine's CPU comes back in well under a second.
+
+    The local ``faster-whisper`` path was removed deliberately, not lost:
+
+    * it was the largest memory consumer here (ctranslate2 arenas pushed the
+      process to 6.9 GB and the kernel OOM-killer took down the desktop), and
+    * a silent CPU fallback is worse than an error — a transcription that used
+      to take 0.3 s would take minutes and the caller would not know why.
+
+    Because there is no fallback, an unreachable remote raises
+    :class:`UpstreamError` naming the host and the setting to fix, rather than
+    returning a misleading "no speech detected".
 
     Returns the canonical segment shape::
 
         {
           "segments": [{"start": float, "end": float, "text": str}, ...],
-          "language": str,
+          "language": str,                 # ISO code, e.g. "en"
           "language_probability": float,
         }
-    """
-    from faster_whisper import WhisperModel
-
-    # Reuse the model across calls. Constructing a WhisperModel per call leaked
-    # ctranslate2's native arena every time (the server reached 6.9 GB RSS and
-    # was OOM-killed). The cache keeps one instance per model size and releases
-    # the previous one when the size changes.
-    model = cached_engine(
-        "whisper",
-        (model_size,),
-        lambda: WhisperModel(model_size, device="cpu", compute_type="int8"),
-    )
-
-    transcribe_opts = {"beam_size": 5}
-    if language:
-        transcribe_opts["language"] = language
-
-    segments_gen, whisper_info = model.transcribe(audio_path, **transcribe_opts)
-
-    segments = []
-    for seg in segments_gen:
-        segments.append({
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text.strip(),
-        })
-
-    return {
-        "segments": segments,
-        "language": whisper_info.language,
-        "language_probability": whisper_info.language_probability,
-    }
-
-
-def _transcribe_audio(audio_path: str, model_size: str, language: str) -> dict:
-    """Transcribe audio file (runs in thread). Returns segments + info.
-
-    Strategy:
-        1. If a remote Whisper server is configured (``WHISPER_REMOTE_ENABLED=1``
-           and ``WHISPER_REMOTE_URL`` set), try it first via
-           ``utils.whisper_remote.transcribe_remote``. This offloads heavy
-           transcription to a GPU host (e.g. a Dell Pro Max GB10 running
-           ``speaches``) and dramatically reduces wall time on long audio.
-        2. On any failure (remote disabled, unreachable, timeout, ineligible
-           file size, malformed response), fall back transparently to the
-           local ``faster-whisper`` CPU path.
-
-    The returned shape is identical regardless of which path produced it, so
-    every downstream consumer (``_format_and_cache_transcript``,
-    ``search_transcript``, ``transcribe_local``, ``_auto_transcribe_youtube``)
-    works unchanged.
 
     Args:
         audio_path: Local path to the audio file to transcribe.
-        model_size: Whisper model size (tiny|base|small|medium|large). Used
-            for the LOCAL path; the remote path always uses
-            ``WHISPER_REMOTE_MODEL``.
-        language: ISO 639-1 language code or empty string for auto-detect.
+        model_size: Accepted for backward compatibility and used only as a
+            transcript-cache key. The remote host decides which model actually
+            runs (``WHISPER_REMOTE_MODEL``, or the model it loaded via
+            ``/load`` for whisper.cpp), so this no longer selects a model.
+        language: ISO 639-1 language code, or empty string for auto-detect.
+
+    Raises:
+        UpstreamError: the remote is disabled, unreachable, or returned an
+            unusable response.
     """
-    # ── Remote first (best-effort) ─────────────────────────────────────
-    # transcribe_remote never raises; it returns None on any failure so
-    # the caller can fall back. The try/except is purely defensive — if
-    # anything in the import path itself blows up, we still want to
-    # produce a transcript locally rather than fail the whole call.
-    try:
-        from ..utils import whisper_remote
+    from ..utils import whisper_remote
 
-        remote_result = whisper_remote.transcribe_remote(
-            audio_path, model_size, language
-        )
-        if remote_result is not None:
-            return remote_result
-    except Exception as exc:  # pragma: no cover - defensive
-        # Swallow — we are about to try the local path anyway.
-        log.debug("Remote Whisper path raised unexpectedly: %s", exc)
+    result = whisper_remote.transcribe_remote(audio_path, model_size, language)
+    if result is not None:
+        return result
 
-    # ── Local fallback ─────────────────────────────────────────────────
-    return _transcribe_audio_local(audio_path, model_size, language)
+    raise whisper_remote.remote_unavailable_error(audio_path)
 
 
 @mcp.tool()
@@ -393,10 +348,10 @@ async def transcribe_video(
                 segments=segments,
             )
 
-    try:
-        from faster_whisper import WhisperModel  # noqa: F401
-    except ImportError:
-        return "faster-whisper is required. Install with: pip install faster-whisper"
+    from ..utils import whisper_remote as _whisper_remote
+
+    if not _whisper_remote.is_configured():
+        return str(_whisper_remote.remote_unavailable_error())
 
     os.makedirs(TRANSCRIBE_CACHE_DIR, exist_ok=True)
 
@@ -419,7 +374,7 @@ async def transcribe_video(
     try:
         # Transcribe in a thread so progress notifications can be sent
         if ctx:
-            await ctx.report_progress(progress=25, total=100, message="Transcribing audio (this may take a minute)...")
+            await ctx.report_progress(progress=25, total=100, message="Transcribing on the remote Whisper host...")
 
         whisper_result = await asyncio.to_thread(
             _transcribe_audio, actual_audio_path, model_size, language

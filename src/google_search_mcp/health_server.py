@@ -595,8 +595,6 @@ def _check_dependencies() -> dict[str, Any]:
     deps["opencv"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     ok, ver = _safe_import("onnxruntime")
     deps["onnxruntime"] = {"ok": ok, "version": ver, "error": None if ok else ver}
-    ok, ver = _safe_import("faster_whisper")
-    deps["faster_whisper"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     ok, ver = _safe_import("yt_dlp")
     deps["yt_dlp"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     deps["yt_dlp_ejs"] = _check_ytdlp_ejs()
@@ -804,6 +802,13 @@ def _compute_status(health: dict[str, Any]) -> str:
     if pw.get("chromium_installed") is False:
         # Playwright is importable but chromium isn't installed — searches
         # will fail. Degraded.
+        return "degraded"
+
+    # Transcription is remote-only, so an unreachable Whisper host means the
+    # transcribe_* tools cannot work at all. Degraded rather than down: the
+    # other 40-odd tools are unaffected.
+    wr = deps.get("whisper_remote", {})
+    if wr.get("configured") and wr.get("ok") is False:
         return "degraded"
 
     return "ok"

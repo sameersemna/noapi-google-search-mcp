@@ -14,6 +14,7 @@ the config module to override individual values.
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import urllib.error
@@ -439,35 +440,24 @@ def test_get_stats_records_attempts(monkeypatch, tmp_path):
 # Integration with tools.video._transcribe_audio
 # ─────────────────────────────────────────────────────────────────────
 
-def test_video_transcribe_falls_back_to_local_when_remote_disabled(monkeypatch):
-    """When the remote is off, _transcribe_audio must use the local path."""
+def test_video_transcribe_raises_when_remote_disabled(monkeypatch):
+    """There is no local fallback: a disabled remote is a clear, loud error."""
+    from google_search_mcp.errors import UpstreamError
     from google_search_mcp.tools import video
 
     monkeypatch.setattr(config, "WHISPER_REMOTE_ENABLED", False)
 
-    fake_local_result = {
-        "segments": [{"start": 0.0, "end": 1.0, "text": "local"}],
-        "language": "en",
-        "language_probability": 0.9,
-    }
-    with mock.patch.object(
-        video, "_transcribe_audio_local", return_value=fake_local_result,
-    ) as local_mock, mock.patch.object(
-        whisper_remote, "transcribe_remote", return_value=None,
-    ) as remote_mock:
-        result = video._transcribe_audio("/tmp/fake.wav", "tiny", "")
+    with mock.patch.object(whisper_remote, "transcribe_remote", return_value=None):
+        with pytest.raises(UpstreamError) as excinfo:
+            video._transcribe_audio("/tmp/fake.wav", "tiny", "")
 
-    assert result["language"] == "en"
-    assert result["segments"][0]["text"] == "local"
-    local_mock.assert_called_once()
-    # Even when disabled, _transcribe_audio still calls transcribe_remote
-    # — the remote module is responsible for short-circuiting. This keeps
-    # the call path uniform (one try/except, one fallback).
-    remote_mock.assert_called_once()
+    message = str(excinfo.value)
+    assert "WHISPER_REMOTE_ENABLED" in message
+    assert "no local transcription fallback" in message
 
 
 def test_video_transcribe_prefers_remote_when_available(monkeypatch):
-    """When the remote returns a result, _transcribe_audio must NOT call local."""
+    """When the remote returns a result, that result is used as-is."""
     from google_search_mcp.tools import video
 
     _enable_remote(monkeypatch, min_bytes=1)
@@ -479,32 +469,91 @@ def test_video_transcribe_prefers_remote_when_available(monkeypatch):
     }
     with mock.patch.object(
         whisper_remote, "transcribe_remote", return_value=fake_remote_result,
-    ), mock.patch.object(video, "_transcribe_audio_local") as local_mock:
+    ):
         result = video._transcribe_audio("/tmp/fake.wav", "tiny", "")
 
     assert result["segments"][0]["text"] == "remote"
-    local_mock.assert_not_called()
 
 
-def test_video_transcribe_falls_back_when_remote_returns_none(monkeypatch):
-    """If the remote is configured but returns None, _transcribe_audio uses local."""
+def test_video_transcribe_raises_when_remote_returns_none(monkeypatch):
+    """A configured-but-failing remote must not silently degrade to nothing.
+
+    Before this change the caller fell back to a local model. With that path
+    removed, returning an empty transcript (or "no speech detected") would
+    blame the audio for a network problem, so the failure is raised instead.
+    """
+    from google_search_mcp.errors import UpstreamError
     from google_search_mcp.tools import video
 
     _enable_remote(monkeypatch, min_bytes=1)
 
-    fake_local_result = {
-        "segments": [{"start": 0.0, "end": 1.0, "text": "local-fallback"}],
-        "language": "en",
-        "language_probability": 0.85,
-    }
-    with mock.patch.object(
-        whisper_remote, "transcribe_remote", return_value=None,
-    ), mock.patch.object(
-        video, "_transcribe_audio_local", return_value=fake_local_result,
-    ):
-        result = video._transcribe_audio("/tmp/fake.wav", "tiny", "")
+    with mock.patch.object(whisper_remote, "transcribe_remote", return_value=None):
+        with pytest.raises(UpstreamError) as excinfo:
+            video._transcribe_audio("/tmp/fake.wav", "tiny", "")
 
-    assert result["segments"][0]["text"] == "local-fallback"
+    message = str(excinfo.value)
+    assert "promaxgb10-6116" in message, "the error must name the host to check"
+    assert "no local transcription fallback" in message
+
+
+def test_local_whisper_path_is_gone():
+    """The local engine must not be reachable — it was the OOM cause."""
+    from google_search_mcp.tools import video
+
+    assert not hasattr(video, "_transcribe_audio_local")
+    assert "faster_whisper" not in inspect.getsource(video)
+
+
+def test_min_file_bytes_misconfiguration_is_named_not_blamed_on_the_host(
+    monkeypatch, tmp_path,
+):
+    """A stale 1 MB threshold must not look like an unreachable GPU host.
+
+    ``WHISPER_REMOTE_MIN_FILE_BYTES`` used to default to 1 MB so short clips
+    stayed local. With the local model gone, an inherited value silently skips
+    every small file — and the generic message ("the host did not transcribe")
+    would send someone debugging the network instead of the threshold.
+    """
+    from google_search_mcp.errors import UpstreamError
+    from google_search_mcp.tools import video
+
+    _enable_remote(monkeypatch, min_bytes=1024 * 1024)
+    audio = tmp_path / "short.mp3"
+    audio.write_bytes(b"\x00" * 500)
+
+    with mock.patch.object(whisper_remote, "transcribe_remote", return_value=None):
+        with pytest.raises(UpstreamError) as excinfo:
+            video._transcribe_audio(str(audio), "tiny", "")
+
+    message = str(excinfo.value)
+    assert "WHISPER_REMOTE_MIN_FILE_BYTES=0" in message
+    assert "WHISPER_REMOTE_MIN_FILE_BYTES is 1048576" in message
+
+
+def _config_source() -> str:
+    """Read config.py itself — the autouse fixture monkeypatches these values."""
+    import pathlib
+
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src" / "google_search_mcp" / "config.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_default_min_file_bytes_sends_every_file_to_the_host():
+    """The shipped default must be 0: nothing is transcribed locally any more."""
+    src = _config_source()
+    assert 'os.environ.get("WHISPER_REMOTE_MIN_FILE_BYTES", "0")' in src, (
+        "the default must be 0 — a 1 MB default silently skips short clips now "
+        "that there is no local model"
+    )
+
+
+def test_remote_is_enabled_by_default():
+    src = _config_source()
+    assert 'os.environ.get(\n    "WHISPER_REMOTE_ENABLED", "1"\n)' in src, (
+        "transcription has no local fallback, so the remote must default on"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -591,7 +640,7 @@ def test_whispercpp_url_dispatch(monkeypatch):
     assert whisper_remote._transcribe_url().endswith("/v1/audio/transcriptions")
 
     monkeypatch.setattr(config, "WHISPER_REMOTE_API_STYLE", "whispercpp")
-    assert whisper_remote._probe_url().endswith("/health")
+    assert whisper_remote._probe_url().endswith("/")
     assert whisper_remote._transcribe_url().endswith("/inference")
 
 
@@ -615,20 +664,28 @@ def test_whispercpp_multipart_omits_model_and_language(tmp_path):
     assert "verbose_json" in decoded
 
 
-def test_whispercpp_probe_uses_health_endpoint(monkeypatch):
-    """Health probe must hit /health when style is whispercpp."""
+def test_whispercpp_probe_uses_root_endpoint(monkeypatch):
+    """whisper.cpp's server serves ``/`` and has no ``/health``.
+
+    Verified against the real host: ``GET /`` returns 200 with the server's HTML
+    index, while ``GET /health`` returns 404 and ``GET /inference`` 404s (it is
+    POST-only). Probing ``/health`` therefore reported a working GPU host as
+    unreachable — which, with no local fallback left, would fail every
+    transcription.
+    """
     _enable_remote(monkeypatch)
     monkeypatch.setattr(config, "WHISPER_REMOTE_API_STYLE", "whispercpp")
 
     with mock.patch.object(
         whisper_remote.urllib.request, "urlopen",
-        return_value=_fake_http_response(200, body=b'{"status":"ok"}'),
+        return_value=_fake_http_response(200, body=b"<html>Whisper.cpp Server</html>"),
     ) as uo:
         result = whisper_remote.probe()
 
     assert result["ok"] is True
     called_url = uo.call_args.args[0].full_url
-    assert called_url.endswith("/health")
+    assert called_url.endswith("/")
+    assert not called_url.endswith("/health")
 
 
 def test_whispercpp_transcribe_normalises_language_name(monkeypatch, tmp_path):

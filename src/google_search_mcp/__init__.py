@@ -81,10 +81,28 @@ def _dependency_report() -> tuple[str, bool]:
     ))
     rows.append(("ffmpeg binary", shutil.which("ffmpeg") is not None, "install ffmpeg", False))
     rows.append(("yt-dlp", _has_module("yt_dlp"), "pip install 'yt-dlp[default]'", False))
-    rows.append(("faster-whisper", _has_module("faster_whisper"), "pip install faster-whisper", False))
-    rows.append(("opencv (cv2)", _has_module("cv2"), "pip install opencv-python-headless", False))
     rows.append(("av (clip extraction)", _has_module("av"), "pip install av", False))
     rows.append(("onnxruntime (captcha solver)", _has_module("onnxruntime"), "pip install onnxruntime", False))
+    # Transcription is remote-only: report the host, not a local package.
+    _whisper_row: tuple[str, bool, str, bool]
+    try:
+        from . import config as _cfg
+        from .utils import whisper_remote as _wr
+
+        _configured = _wr.is_configured()
+        _host = _cfg.WHISPER_REMOTE_URL or "(WHISPER_REMOTE_URL unset)"
+        _reachable = bool(_wr.probe().get("ok")) if _configured else False
+        _whisper_row = (
+            f"whisper remote ({_host})",
+            _reachable,
+            "set WHISPER_REMOTE_URL to the GPU host (e.g. http://promaxgb10-6116:8768)"
+            if not _configured
+            else "remote host unreachable — transcription tools will fail",
+            False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _whisper_row = ("whisper remote", False, f"check failed: {exc}", False)
+    rows.append(_whisper_row)
     rows.append((
         "rapidocr (OCR extra)",
         _has_module("rapidocr_onnxruntime"),

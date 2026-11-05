@@ -216,14 +216,17 @@ async def transcribe_local(
         except Exception:
             pass
 
-    try:
-        from faster_whisper import WhisperModel  # noqa: F401
-    except ImportError:
-        return "faster-whisper is required. Install with: pip install faster-whisper"
+    # Transcription runs on the remote GPU host; there is no local model.
+    # Checking configuration up front turns "the LAN host is down" into a
+    # clear message instead of a failed download followed by a vague error.
+    from ..utils import whisper_remote as _whisper_remote
+
+    if not _whisper_remote.is_configured():
+        return str(_whisper_remote.remote_unavailable_error(file_path))
 
     if ctx:
         await ctx.report_progress(
-            progress=0, total=100, message="Transcribing (this may take a minute)...",
+            progress=0, total=100, message="Transcribing on the remote Whisper host...",
         )
 
     try:
@@ -231,7 +234,7 @@ async def transcribe_local(
             _transcribe_audio, file_path, model_size, language,
         )
     except Exception as e:
-        return format_error("Local transcription", e)
+        return format_error("Transcription", e)
 
     segments = whisper_result["segments"]
     if not segments:

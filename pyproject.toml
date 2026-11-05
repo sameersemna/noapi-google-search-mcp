@@ -47,7 +47,9 @@ dependencies = [
     # YouTube's JavaScript signature challenges. Without it every YouTube
     # download fails with "HTTP Error 403: Forbidden".
     "yt-dlp[default]>=2024.0",
-    "faster-whisper>=1.0.0",
+    # NO faster-whisper / ctranslate2: transcription is delegated to a GPU host
+    # (WHISPER_REMOTE_URL). The local model was the largest memory consumer on
+    # the deployment host and its arenas pushed the process into OOM-kill.
 ]
 
 [project.scripts]

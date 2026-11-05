@@ -87,6 +87,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Transcription now always runs on the remote GPU host; the local Whisper
+  stack is removed.** `faster-whisper` and `ctranslate2` are no longer
+  dependencies and nothing in the code imports them. Transcription is delegated
+  unconditionally to `WHISPER_REMOTE_URL` (in this deployment
+  `http://promaxgb10-6116:8768`, whisper.cpp). Rationale: the local CPU model
+  was the largest memory consumer on the host machine — its native arenas took
+  the process to 6.9 GB RSS and the kernel OOM-killer killed the editor twice
+  before killing the service — and a silent CPU fallback hid the failure behind
+  calls that took minutes instead of a fraction of a second.
+  Consequences encoded in the code: `WHISPER_REMOTE_ENABLED` now defaults to
+  `1`; `WHISPER_REMOTE_MIN_FILE_BYTES` now defaults to `0` (the old 1 MB
+  threshold existed to keep short clips local, which no longer exists, so it
+  would have skipped them entirely); and an unavailable host raises a specific
+  `UpstreamError` naming the URL, API style and setting to fix rather than
+  returning an empty transcript or "no speech detected".
+- **The whisper.cpp health probe used `/health`, which that server does not
+  serve.** Verified against the real host: `GET /` returns its HTML index with
+  200, while `/health` returns 404 and `/inference` 404s on GET (POST-only). The
+  probe therefore reported a working GPU host as unreachable — which, with the
+  local fallback gone, would have failed every transcription. It now probes `/`
+  for the `whispercpp` style.
+- **A misconfigured `WHISPER_REMOTE_MIN_FILE_BYTES` no longer blames the
+  network.** If a file is smaller than the configured minimum, the error says
+  so and names the setting, instead of reporting that the host failed to
+  transcribe a file it never received.
+- `/health` reports `whisper_remote` only (the `faster_whisper` probe is gone)
+  and returns `degraded` — not `down` — when the host is unreachable, since the
+  other tools are unaffected.
 - **The server grew to 6.9 GB and the kernel OOM-killer crashed the desktop.**
   Four sites built a heavyweight native engine on every call and released none
   of them: `WhisperModel` in `_transcribe_audio_local`, `RapidOCR()` in

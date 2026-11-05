@@ -786,10 +786,12 @@ async def _auto_transcribe_youtube(
     # ── dependency check — soft fail, never crash ──────────────────────
     if not ytdlp.is_available():
         return " (auto-transcription skipped: install yt-dlp)"
-    try:
-        from faster_whisper import WhisperModel  # noqa: F401
-    except ImportError:
-        return " (auto-transcription skipped: install faster-whisper)"
+    # Transcription happens on the remote GPU host; skip quietly (rather than
+    # failing the whole feed check) when that host is not configured.
+    from ..utils import whisper_remote as _whisper_remote
+
+    if not _whisper_remote.is_configured():
+        return " (auto-transcription skipped: WHISPER_REMOTE_URL not set)"
 
     os.makedirs(TRANSCRIBE_CACHE_DIR, exist_ok=True)
     os.makedirs(TRANSCRIPT_CACHE_DIR, exist_ok=True)

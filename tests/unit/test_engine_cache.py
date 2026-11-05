@@ -127,16 +127,20 @@ def _src(module) -> str:
     return inspect.getsource(module)
 
 
-def test_transcribe_path_does_not_construct_whisper_per_call():
+def test_transcribe_path_has_no_local_whisper():
+    """Transcription is remote-only: the local model is gone entirely.
+
+    ``faster-whisper`` was removed after it pushed this process to 6.9 GB. If
+    it ever comes back as the default path, this fails — that is the point.
+    """
     from google_search_mcp.tools import video
 
     src = _src(video)
-    assert "cached_engine(" in src, "video.py must route Whisper through the cache"
-    # The only construction may be inside the cached factory (a lambda), so a
-    # bare assignment like `model = WhisperModel(...)` must not exist.
-    assert "model = WhisperModel(" not in src, (
-        "WhisperModel must not be constructed per call — that is the 6.9 GB leak"
+    assert "faster_whisper" not in src, (
+        "video.py must not import faster_whisper — transcription is remote-only"
     )
+    assert "WhisperModel" not in src
+    assert "whisper_remote" in src, "video.py must delegate to the remote host"
 
 
 def test_ocr_sites_use_the_cache():

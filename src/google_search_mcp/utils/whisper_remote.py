@@ -105,9 +105,15 @@ import time
 import uuid
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import config
+
+if TYPE_CHECKING:  # pragma: no cover
+    # Imported for the return annotation only: errors.py is imported lazily
+    # inside remote_unavailable_error() so this module stays importable without
+    # the mcp SDK (the doctor probes it from a bare interpreter).
+    from ..errors import UpstreamError
 
 log = logging.getLogger("google_search_mcp.whisper_remote")
 
@@ -176,6 +182,62 @@ def get_stats() -> dict[str, Any]:
             "last_probe_latency_ms": _last_probe_latency_ms,
             "last_probe_error": _last_probe_error,
         }
+
+
+def remote_unavailable_error(audio_path: str | None = None) -> UpstreamError:
+    """Build the error raised when the (mandatory) remote cannot transcribe.
+
+    Transcription has no local fallback, so this message is the whole
+    diagnosis the caller gets. It therefore names the specific cause
+    (disabled / no URL / file below the minimum / unreachable) and the setting
+    to change, instead of a generic "transcription failed" that sends someone
+    looking at the audio file.
+
+    The minimum-size case matters: ``WHISPER_REMOTE_MIN_FILE_BYTES`` used to
+    default to 1 MB so short clips stayed on a local model. A deployment that
+    kept that value would otherwise see a working GPU host blamed for a file
+    that was never sent.
+    """
+    from ..errors import UpstreamError
+
+    if not config.WHISPER_REMOTE_ENABLED:
+        return UpstreamError(
+            "Transcription is unavailable: the remote Whisper host is disabled. "
+            "Set WHISPER_REMOTE_ENABLED=1 — there is no local transcription "
+            "fallback on this machine."
+        )
+    if not config.WHISPER_REMOTE_URL:
+        return UpstreamError(
+            "Transcription is unavailable: WHISPER_REMOTE_URL is not set. "
+            "Point it at the Whisper host (for example "
+            "WHISPER_REMOTE_URL=http://promaxgb10-6116:8768). There is no local "
+            "transcription fallback on this machine."
+        )
+
+    if config.WHISPER_REMOTE_MIN_FILE_BYTES > 0 and audio_path:
+        try:
+            size = os.path.getsize(audio_path)
+        except OSError:
+            size = None
+        if size is not None and size < config.WHISPER_REMOTE_MIN_FILE_BYTES:
+            return UpstreamError(
+                f"Transcription was skipped: the audio is {size} bytes but "
+                f"WHISPER_REMOTE_MIN_FILE_BYTES is "
+                f"{config.WHISPER_REMOTE_MIN_FILE_BYTES}. That setting used to "
+                f"keep short clips on a local model, which no longer exists — "
+                f"set WHISPER_REMOTE_MIN_FILE_BYTES=0 to send every file to "
+                f"{config.WHISPER_REMOTE_URL}."
+            )
+
+    reason = _last_error or "no successful response"
+    return UpstreamError(
+        f"Transcription is unavailable: the remote Whisper host "
+        f"{config.WHISPER_REMOTE_URL} did not transcribe the audio ({reason}). "
+        f"Check that the service on that host is running and reachable "
+        f"(WHISPER_REMOTE_API_STYLE={config.WHISPER_REMOTE_API_STYLE}, "
+        f"timeout {config.WHISPER_REMOTE_TIMEOUT_SEC:g}s). There is no local "
+        f"transcription fallback on this machine."
+    )
 
 
 def _set_probe(ok: bool, error: str | None, latency_ms: float | None) -> None:
@@ -285,10 +347,19 @@ def _language_to_iso(language: str | None) -> str:
 
 
 def _probe_url() -> str:
-    """Health-probe URL for the configured API style."""
+    """Health-probe URL for the configured API style.
+
+    whisper.cpp's ``server`` example serves an HTML index at ``/`` and has no
+    ``/health`` endpoint (``GET /health`` returns 404, ``/inference`` is
+    POST-only and also 404s on GET). Probing ``/health`` therefore reported a
+    perfectly working GPU host as unreachable, which — now that transcription
+    has no local fallback — would have made every transcription fail. ``/`` is
+    the real liveness signal for that server.
+    """
+    base = config.WHISPER_REMOTE_URL.rstrip("/")
     if config.WHISPER_REMOTE_API_STYLE == "whispercpp":
-        return config.WHISPER_REMOTE_URL.rstrip("/") + "/health"
-    return config.WHISPER_REMOTE_URL.rstrip("/") + "/v1/models"
+        return base + "/"
+    return base + "/v1/models"
 
 
 def _transcribe_url() -> str:

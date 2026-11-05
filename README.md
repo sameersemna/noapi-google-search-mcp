@@ -80,7 +80,7 @@ is verified against the code by a test.
 | `NOAPI_MCP_CACHE_TTL_SECONDS` | `3600` | Fallback TTL for tools without a specific one. |
 | `NOAPI_MCP_CACHE_MAX_ENTRIES` | `512` | In-memory LRU bound. |
 | `NOAPI_MCP_CACHE_DB_PATH` | `<cache>/cache.db` | Optional on-disk tier. |
-| `NOAPI_MCP_CACHE_ENGINES` | `1` | Reuse Whisper/RapidOCR/ONNX engines across calls. `0` rebuilds per call — which leaks their native memory; for debugging only. |
+| `NOAPI_MCP_CACHE_ENGINES` | `1` | Reuse RapidOCR/ONNX engines across calls. `0` rebuilds per call — which leaks their native memory; for debugging only. |
 
 ### Idempotency
 
@@ -269,6 +269,45 @@ So: log in to whatever the tools need, close the window, then call the tool. Pas
 See also [SECURITY.md](SECURITY.md) for the threat model and an operator
 hardening checklist.
 
+## What's New — Transcription Is Remote-Only
+
+> **Superseding the v0.3.6 section below.** That release made remote Whisper an
+> *optimisation* that fell back to a local CPU model. The local model has since
+> been **removed**: transcription now always runs on the GPU host named by
+> `WHISPER_REMOTE_URL` (in this deployment, `promaxgb10-6116`). The flow below
+> still describes the wire protocol; ignore its "falls back to local" branches.
+
+Why it went away: the local `faster-whisper` / ctranslate2 stack was the largest
+memory consumer on the host machine. Its native arenas pushed the server process
+to **6.9 GB RSS**, the kernel OOM-killer then killed the editor twice and the
+service once. A silent CPU fallback also made the failure mode confusing —
+transcription quietly went from 0.3 s to over a minute per audio minute.
+
+What that means now:
+
+- There is no `faster-whisper` or `ctranslate2` dependency, and the code no
+  longer imports either.
+- `WHISPER_REMOTE_MIN_FILE_BYTES` defaults to **0**: every file goes to the
+  host. (The old 1 MB default would skip short clips, which have nowhere else
+  to go.)
+- An unreachable host is a **loud, specific error** naming the URL, the API
+  style and the setting to fix — never an empty transcript or
+  "no speech detected".
+- The whisper.cpp liveness probe uses `/`, not `/health`: that server serves its
+  index at `/` and returns 404 for `/health`, so probing `/health` reported a
+  healthy GPU host as down.
+- `/health` reports `dependencies.whisper_remote`, and the service shows
+  `degraded` (not `down`) when the host is unreachable — the other tools still
+  work.
+
+```bash
+# the deployment values
+WHISPER_REMOTE_ENABLED=1
+WHISPER_REMOTE_URL=http://promaxgb10-6116:8768
+WHISPER_REMOTE_API_STYLE=whispercpp
+WHISPER_REMOTE_MIN_FILE_BYTES=0
+```
+
 ## What's New in v0.3.6 — Remote Whisper Delegation (Delegate Heavy Transcription to a GPU Host)
 
 The local `faster-whisper` path runs on CPU + int8 and is fast enough for
@@ -338,14 +377,14 @@ strict performance optimisation, not a dependency.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `WHISPER_REMOTE_ENABLED` | `0` | Master switch — `0` = local-only (original behaviour) |
+| `WHISPER_REMOTE_ENABLED` | `1` | Master switch. `0` disables the transcription tools entirely (there is no local fallback). |
 | `WHISPER_REMOTE_API_STYLE` | `openai` | `openai` or `whispercpp` |
 | `WHISPER_REMOTE_URL` | _empty_ | e.g. `http://promaxgb10-6116:8768` |
 | `WHISPER_REMOTE_API_KEY` | _empty_ | Optional bearer token (OpenAI style only) |
 | `WHISPER_REMOTE_MODEL` | `large-v3` | Model to request (ignored by whisper.cpp) |
 | `WHISPER_REMOTE_TIMEOUT_SEC` | `300` | Per-request timeout |
 | `WHISPER_REMOTE_HEALTH_TIMEOUT_SEC` | `5` | Health-probe timeout |
-| `WHISPER_REMOTE_MIN_FILE_BYTES` | `1048576` (1 MB) | Skip remote for files smaller than this |
+| `WHISPER_REMOTE_MIN_FILE_BYTES` | `0` | Minimum size to send to the host. Keep `0`: nothing is transcribed locally any more. |
 | `WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC` | `60` | Skip remote for this long after a network failure |
 | `WHISPER_REMOTE_PROBE_ON_STARTUP` | `1` | Probe at server startup so `/health` is immediately informative |
 
@@ -621,7 +660,7 @@ streamable HTTP, or stdio).
 - **Process metrics** (PID, PPID, RSS memory, VMS, CPU%, thread count, nice)
 - **MCP introspection** (tool count, prompt count, resource count, **full list of tool names**)
 - **Config snapshot** (env-driven settings: `ENABLE_MANUAL_INTERVENTION`, `SKIP_COOKIE_VALIDATION`, etc.)
-- **Dependency status** for every Python package: `playwright` (with chromium install path!), `opencv`, `onnxruntime`, `faster_whisper`, `yt_dlp`, `yt_dlp_ejs`, `js_runtime`, `rapidocr`, `lingua`, `psutil`, `starlette`, `uvicorn`
+- **Dependency status** for every Python package: `playwright` (with chromium install path!), `opencv`, `onnxruntime`, `yt_dlp`, `yt_dlp_ejs`, `js_runtime`, `rapidocr`, `lingua`, `psutil`, `starlette`, `uvicorn` — plus the **remote Whisper host** (URL + reachability).
 - **File presence & sizes** for `google_cookies.txt`, `youtube_cookies.txt`, auto-saved cookies, MobileNetV2 model, feeds DB, browser data dir
 - **Disk usage** for the cache directory (free / total / used %)
 - **Manual intervention state** (enabled, display available, currently active, last result)
@@ -757,7 +796,7 @@ Found something interesting? Ask the LLM to extract that segment as a clip. It r
 
 **How it works:**
 1. `subscribe` to a YouTube channel — by handle (`@3Blue1Brown`), URL, or channel ID
-2. `check_feeds` — new videos are fetched and **auto-transcribed** locally with faster-whisper. Transcripts are written into the database for instant search. Up to 5 videos per check, cached so nothing gets re-downloaded.
+2. `check_feeds` — new videos are fetched and **auto-transcribed** on the remote GPU Whisper host. Transcripts are written into the database for instant search. Up to 5 videos per check, cached so nothing gets re-downloaded.
 3. `search_feeds` — full-text search across all transcripts. Supports AND, OR, NOT, and quoted phrases. Your LLM finds the exact video and passage that answers your question.
 4. `extract_video_clip` — tell the LLM what you're interested in and it cuts the clip from the video. The LLM uses the transcript to find the right segment and extracts it automatically.
 
@@ -770,7 +809,7 @@ Found something interesting? Ask the LLM to extract that segment as a clip. It r
 "Cut a clip of the hardware comparison section"
 ```
 
-No embeddings, no vector database, no API — just Whisper + SQLite FTS5 running on your machine.
+No embeddings, no vector database, no API — just Whisper on your own GPU host + SQLite FTS5 running on your machine.
 
 > **Roadmap:** The clip extraction is the first step toward full AI-driven video editing. Future releases will add music/audio overlay, video remixing, multi-clip compilation, vertical reformat for TikTok/Reels/Shorts, and automated highlight reels — all driven by your LLM understanding the content.
 
@@ -808,7 +847,7 @@ Transcribe meetings, convert formats, read documents — all local, no cloud.
 
 | New Tool | What It Does |
 |----------|-------------|
-| `transcribe_local` | Transcribe any local audio or video file with Whisper (mp3, wav, mp4, mkv, etc.) |
+| `transcribe_local` | Transcribe any local audio or video file (mp3, wav, mp4, mkv, etc.) on the remote GPU Whisper host |
 | `convert_media` | FFmpeg format conversion — video to audio, format to format, video to GIF |
 | `read_document` | Extract text from PDF, DOCX, HTML, CSV, JSON, and 30+ text formats |
 
@@ -988,7 +1027,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | Google Lens | Built-in (reverse image search) | Not available | Not available |
 | Object detection | Built-in (OpenCV + Lens) | Not available | Not available |
 | Local OCR | Built-in (offline) | Not available | Not available |
-| Video transcription | Built-in (local Whisper) | Not available | Not available |
+| Video transcription | Built-in (GPU Whisper host) | Not available | Not available |
 | Platform captions (no Whisper needed) | **Built-in (fast, exact)** | Not available | Not available |
 | Caption language discovery | **Built-in (`list_subtitles`)** | Not available | Not available |
 | Video clip extraction | **Built-in (AI/LLM-powered)** | Not available | Not available |
@@ -1429,13 +1468,13 @@ Extract text from images using RapidOCR. No internet needed.
 #### `transcribe_video` — Video Transcription
 
 Transcribe any video with timestamps. Uses platform captions when available
-(much faster and exact for human-authored tracks), falling back to
-faster-whisper when a video has no captions.
+(much faster and exact for human-authored tracks), otherwise sending the audio
+to the remote GPU Whisper host named by `WHISPER_REMOTE_URL`.
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
 | `url` | YouTube or video URL (required) | `"https://youtube.com/watch?v=..."` |
-| `model_size` | Whisper model size (default: tiny) | `"tiny"`, `"base"`, `"small"`, `"medium"`, `"large"` |
+| `model_size` | Accepted for backward compatibility; the remote host decides the model (default: tiny) | `"tiny"`, `"base"`, `"small"`, `"medium"`, `"large"` |
 | `language` | Language code (optional, auto-detected) | `"en"`, `"ar"`, `"de"` |
 | `prefer_subtitles` | Use platform captions when available (default: true) | `false` to force Whisper |
 

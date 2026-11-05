@@ -429,21 +429,21 @@ HEALTH_PORT: int = int(os.environ.get("HEALTH_PORT", "11499"))
 HEALTH_AUTH_TOKEN: str = os.environ.get("HEALTH_AUTH_TOKEN", "").strip()
 
 # ---------------------------------------------------------------------------
-# Remote Whisper server — delegate heavy transcription to a GPU host
+# Remote Whisper server — the ONLY transcription backend
 # ---------------------------------------------------------------------------
-# When enabled, audio files larger than ``WHISPER_REMOTE_MIN_FILE_BYTES``
-# are sent to a remote Whisper server (e.g. running on a Dell Pro Max
-# GB10) instead of being transcribed locally on CPU. The local
-# ``faster-whisper`` model is used as a fallback whenever the remote
-# server is unreachable, returns an error, or the file is too small to
-# justify the network round-trip.
+# Transcription is delegated to a GPU host on the LAN; there is no local
+# fallback. The local ``faster-whisper``/ctranslate2 stack was removed because
+# it was the largest single memory consumer on the host machine (a CPU + int8
+# model takes seconds per audio minute and gigabytes of RSS when rebuilt, and
+# its per-call construction leaked native arenas badly enough to trigger the
+# kernel OOM-killer).
+#
+# Deployment target: ``promaxgb10-6116`` (Dell Pro Max GB10) running the
+# whisper.cpp ``server`` example on port 8768. Because the remote is the only
+# path, an unreachable server is a hard error with an actionable message rather
+# than a silent CPU fallback that quietly costs minutes per call.
 #
 # The remote server must speak one of two supported API styles:
-#
-#   "openai"      — OpenAI-compatible ``POST /v1/audio/transcriptions``
-#                   (e.g. ``speaches``, formerly ``fedirz/faster-whisper-server``,
-#                   ``octopus2023/insanely-fast-whisper-server``, OpenAI's own API).
-#                   The remote gets a ``model=<WHISPER_REMOTE_MODEL>`` field.
 #
 #   "whispercpp"  — whisper.cpp server's ``POST /inference`` endpoint
 #                   (https://github.com/ggml-org/whisper.cpp, run via the
@@ -452,10 +452,14 @@ HEALTH_AUTH_TOKEN: str = os.environ.get("HEALTH_AUTH_TOKEN", "").strip()
 #                   Response includes ``detected_language`` and
 #                   ``language_probabilities`` keyed by ISO codes.
 #
-# Disabling the master switch returns to the original behaviour — all
-# transcription runs locally via faster-whisper.
+#   "openai"      — OpenAI-compatible ``POST /v1/audio/transcriptions``
+#                   (e.g. ``speaches``, ``octopus2023/insanely-fast-whisper-server``).
+#                   The remote gets a ``model=<WHISPER_REMOTE_MODEL>`` field.
+#
+# Set WHISPER_REMOTE_ENABLED=0 only to run the server without transcription
+# tools; those calls then fail with an explanation instead of falling back.
 WHISPER_REMOTE_ENABLED: bool = os.environ.get(
-    "WHISPER_REMOTE_ENABLED", "0"
+    "WHISPER_REMOTE_ENABLED", "1"
 ).strip().lower() in ("1", "true", "yes", "on")
 
 # Base URL of the remote server (no trailing slash). Example:
@@ -499,13 +503,15 @@ WHISPER_REMOTE_HEALTH_TIMEOUT_SEC: float = float(
     os.environ.get("WHISPER_REMOTE_HEALTH_TIMEOUT_SEC", "5")
 )
 
-# Minimum audio file size (in bytes) before the remote path is
-# considered. Smaller files are transcribed locally — the round-trip
-# latency outweighs the CPU time. A 30 s mp3 at 128 kbps is ~480 KB,
-# so 1 MB is a comfortable threshold that keeps sub-minute clips
-# local.
+# Minimum audio file size (in bytes) before the remote path is considered.
+#
+# Defaults to 0 — every file goes to the remote. The old 1 MB threshold existed
+# to keep short clips on a local model, which no longer exists; leaving it at
+# 1 MB would make short recordings (a 30 s mp3 is ~480 KB) fail outright rather
+# than being transcribed. Raise it only if you deliberately want small files
+# rejected.
 WHISPER_REMOTE_MIN_FILE_BYTES: int = int(
-    os.environ.get("WHISPER_REMOTE_MIN_FILE_BYTES", str(1024 * 1024))
+    os.environ.get("WHISPER_REMOTE_MIN_FILE_BYTES", "0")
 )
 
 # When the remote is detected as down, mark it unhealthy for this
