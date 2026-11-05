@@ -381,4 +381,5 @@ _Changed_ below.
 
 [Unreleased]: https://github.com/sameersemna/noapi-google-search-mcp/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/sameersemna/noapi-google-search-mcp/releases/tag/v0.5.0
-[0.4.0]: https://github.com/VincentKaufmann/noapi-google-search-mcp/releases/tag/v0.4.0
+[0.4.0]: https://github.com/sameersemna/noapi-google-search-mcp/releases/tag/v0.4.0
+[0.3.1]: https://github.com/engram-ae/noapi-google-search-mcp/releases/tag/v0.3.1
