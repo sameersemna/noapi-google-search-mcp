@@ -539,8 +539,25 @@ RETRY_BACKOFF_SECONDS: list[float] = [1.0, 3.0, 5.0]
 # General limits
 # ---------------------------------------------------------------------------
 
-MAX_PAGE_CHARS: int = 8000
+# How many objects ``google_lens_detect`` crops and identifies per image.
 MAX_OBJECTS: int = 4
+
+# Page-text cap defaults. ``visit_page`` truncates because its output lands in
+# a model's context window; ``PAGE_CHARS_DEFAULT`` is a reasonable small-model
+# answer, not a universal one. The ceiling exists because a tool that can
+# silently return a megabyte turns one careless page visit into a blown
+# context. See ``page_chars_default()`` for how both are applied.
+PAGE_CHARS_DEFAULT: int = 8000
+PAGE_CHARS_CEILING: int = 200_000
+
+# User-facing install hint for the opt-in OCR extra. OCR is not a core
+# dependency because ``rapidocr-onnxruntime`` declares Requires-Python <3.13
+# upstream, which made the whole package uninstallable on 3.13. Every OCR entry
+# point returns this hint instead of raising when the extra is absent.
+OCR_INSTALL_HINT = (
+    "OCR is an optional extra. Install it with: "
+    'pip install "noapi-google-search-mcp[ocr]"'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +589,55 @@ def env_float(name: str, default: float) -> float:
         return float(env(name, str(default)).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_page_chars(raw: str | None) -> int | None:
+    """Parse a page-character limit, or return ``None`` if it is unusable.
+
+    Blank, non-numeric and non-positive values are all ignored rather than
+    raising, because a typo in a client's ``env`` block must not stop the
+    server from starting. Anything above ``PAGE_CHARS_CEILING`` is clamped
+    instead of refused, so an over-ambitious setting still works.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return min(value, PAGE_CHARS_CEILING)
+
+
+def page_chars_default() -> int:
+    """How much page text ``visit_page`` returns before truncating.
+
+    Reads the first usable value from, in order:
+
+    * ``NOAPI_MCP_MAX_PAGE_CHARS`` — the namespaced spelling
+    * ``MAX_PAGE_CHARS`` — the legacy spelling of the same name
+    * ``NOAPI_MCP_MAX_CHARACTERS`` / ``max_characters`` — the spelling people
+      reach for first, accepted as an alias
+
+    Falls back to ``PAGE_CHARS_DEFAULT`` when nothing usable is set.
+
+    Call this at import time for the process default, or per call to pick up a
+    client-supplied override.
+    """
+    for name in (
+        "NOAPI_MCP_MAX_PAGE_CHARS",
+        "MAX_PAGE_CHARS",
+        "NOAPI_MCP_MAX_CHARACTERS",
+        "max_characters",
+    ):
+        value = _coerce_page_chars(os.environ.get(name))
+        if value is not None:
+            return value
+    return PAGE_CHARS_DEFAULT
 
 
 # Maximum number of concurrent Chromium contexts (browser pool cap).
@@ -687,6 +753,12 @@ HTTP_ALLOWED_ORIGINS: tuple[str, ...] = tuple(
 )
 
 # Output caps.
+#
+# ``visit_page`` truncates at ``MAX_PAGE_CHARS``, resolved from the environment
+# at import time (see ``page_chars_default``). ``MAX_TEXT_CHARS`` is the older,
+# generic name for the same thing and is kept readable so existing
+# deployments that set it keep working.
+MAX_PAGE_CHARS: int = page_chars_default()
 MAX_TEXT_CHARS: int = env_int("MAX_TEXT_CHARS", MAX_PAGE_CHARS)
 
 # Per-document text cap for ``read_document`` (PDF/DOCX/HTML/plain text).

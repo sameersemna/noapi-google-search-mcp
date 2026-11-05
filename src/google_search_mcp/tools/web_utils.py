@@ -7,6 +7,7 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 import asyncio
 import hashlib
 import imaplib
+import importlib.util
 import json
 import os
 import re
@@ -24,11 +25,12 @@ from typing import Literal
 
 from mcp.server.fastmcp import Context, Image
 
+from .. import config
 from ..config import (
     IMAP_SERVERS,
     MAX_DOCUMENT_CHARS,
     MAX_EMAIL_BODY_CHARS,
-    MAX_PAGE_CHARS,
+    OCR_INSTALL_HINT,
     TRANSCRIPT_CACHE_DIR,
 )
 from ..core import fsguard, idempotency, netguard
@@ -58,6 +60,24 @@ def _cap_text(text: str, limit: int, label: str = "") -> str:
     return f"{text[:limit]}\n\n... [truncated, showing first {limit} characters{suffix}]"
 
 
+def _resolve_page_chars(requested: int | None) -> int:
+    """Resolve the effective ``visit_page`` truncation limit.
+
+    A per-call value wins over the configured default (``config.MAX_PAGE_CHARS``)
+    and is clamped to ``config.PAGE_CHARS_CEILING``. Anything unusable — zero,
+    negative, blank, non-numeric — falls back to the default rather than failing
+    the call, so a model guessing at units cannot break its own page read.
+    """
+    if requested is not None:
+        try:
+            value = int(requested)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return min(value, config.PAGE_CHARS_CEILING)
+    return config.MAX_PAGE_CHARS
+
+
 def _normalize_web_url(url: str) -> str:
     """Scheme-check, add a missing scheme, then run the SSRF guard.
 
@@ -80,8 +100,14 @@ def _normalize_web_url(url: str) -> str:
 
 
 @cached("visit_page")
-async def _fetch_page_text(url: str) -> str:
-    """Fetch a URL with headless Chromium and extract readable text."""
+async def _fetch_page_text(url: str, max_characters: int | None = None) -> str:
+    """Fetch a URL with headless Chromium and extract readable text.
+
+    *max_characters* caps the returned text (``None`` → the configured default,
+    see ``config.MAX_PAGE_CHARS``). The cap is part of the cache key, so a later
+    call that asks for more text is not served a shorter cached answer.
+    """
+    limit = _resolve_page_chars(max_characters)
     netguard.assert_url_allowed(url)
     async with pooled_browser() as (context, page):
         try:
@@ -111,10 +137,7 @@ async def _fetch_page_text(url: str) -> str:
             if not text:
                 return f"Could not extract text content from: {url}"
 
-            if len(text) > MAX_PAGE_CHARS:
-                text = text[:MAX_PAGE_CHARS] + f"\n\n... [truncated, showing first {MAX_PAGE_CHARS} characters]"
-
-            return f"Content from: {url}\n\n{text}"
+            return f"Content from: {url}\n\n{_cap_text(text, limit)}"
 
         except Exception as e:
             return f"Failed to fetch {url}: {e}"
@@ -124,7 +147,7 @@ async def _fetch_page_text(url: str) -> str:
 
 
 @mcp.tool()
-async def visit_page(url: str) -> str:
+async def visit_page(url: str, max_characters: int = 0) -> str:
     """Fetch a web page and return its text content. Use this after google_search to read the actual content of a result.
 
     Sample prompts that trigger this tool:
@@ -135,8 +158,11 @@ async def visit_page(url: str) -> str:
 
     Args:
         url: The full URL to visit and extract text from.
+        max_characters: Optional cap on the returned text. Use a larger value to
+            read long documentation; 0 (the default) uses the server's configured
+            limit. Values are clamped to 200000 — the text lands in a context window.
     """
-    return await _fetch_page_text(url)
+    return await _fetch_page_text(url, max_characters or None)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +396,19 @@ async def convert_media(
 # ---------------------------------------------------------------------------
 
 
+def _ocr_available() -> bool:
+    """True if the opt-in OCR extra (``rapidocr-onnxruntime``) is importable.
+
+    Resolved with ``find_spec`` rather than an import: importing RapidOCR pulls
+    in onnxruntime and its model runtime, which is exactly the cost the optional
+    extra exists to avoid paying on the common (text-PDF) path.
+    """
+    try:
+        return importlib.util.find_spec("rapidocr_onnxruntime") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _read_pdf_text(file_path: str) -> str:
     """Extract text from a PDF. Tries pdftotext first, falls back to OCR."""
     # Attempt 1: pdftotext (poppler-utils) — fast, accurate for text PDFs
@@ -383,7 +422,14 @@ def _read_pdf_text(file_path: str) -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Attempt 2: OCR via our existing pipeline (for scanned PDFs)
+    # Attempt 2: OCR via our existing pipeline (for scanned PDFs).
+    # OCR is an *optional extra*, so a missing engine is an expected state, not
+    # an error to swallow: bail out here and let the caller show the install
+    # hint. (This used to hide inside ``except Exception: pass``, so a scanned
+    # PDF with no OCR installed looked like a blank document.)
+    if not _ocr_available():
+        return ""
+
     try:
         from rapidocr_onnxruntime import RapidOCR
         import cv2
@@ -473,10 +519,16 @@ async def read_document(
     if ext == ".pdf":
         text = await asyncio.to_thread(_read_pdf_text, file_path)
         if not text:
+            scanned_hint = (
+                f"For scanned PDFs, {OCR_INSTALL_HINT}"
+                if not _ocr_available()
+                else "For scanned PDFs, OCR ran but found no text — "
+                "the page may be blank or too low-resolution."
+            )
             return (
                 f"Could not extract text from {filename}.\n"
                 "For text PDFs, install poppler-utils: sudo apt install poppler-utils\n"
-                "For scanned PDFs, ensure rapidocr-onnxruntime is installed."
+                f"{scanned_hint}"
             )
         return f"Document: {filename} ({size_kb:.0f} KB)\n\n{_cap_text(text, MAX_DOCUMENT_CHARS, f'{size_kb:.0f} KB')}"
 

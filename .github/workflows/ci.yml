@@ -26,12 +26,11 @@ jobs:
           - python-version: "3.10"
           - python-version: "3.11"
           - python-version: "3.12"
-          # 3.13 is newer than some optional native deps (onnxruntime,
-          # ctranslate2) have wheels for; treat it as experimental until the
-          # ecosystem catches up.
+          # Blocking as of 0.5.0: OCR moved to the [ocr] extra, so the core
+          # install no longer depends on packages without 3.13 wheels. If this
+          # job ever fails on a native wheel (ctranslate2 / onnxruntime), push
+          # that extra out the same way rather than re-gating the job.
           - python-version: "3.13"
-            experimental: true
-    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
 

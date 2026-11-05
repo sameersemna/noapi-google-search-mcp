@@ -83,7 +83,14 @@ def _dependency_report() -> tuple[str, bool]:
     rows.append(("yt-dlp", _has_module("yt_dlp"), "pip install 'yt-dlp[default]'", False))
     rows.append(("faster-whisper", _has_module("faster_whisper"), "pip install faster-whisper", False))
     rows.append(("opencv (cv2)", _has_module("cv2"), "pip install opencv-python-headless", False))
-    rows.append(("rapidocr-onnxruntime", _has_module("rapidocr_onnxruntime"), "pip install rapidocr-onnxruntime", False))
+    rows.append(("av (clip extraction)", _has_module("av"), "pip install av", False))
+    rows.append(("onnxruntime (captcha solver)", _has_module("onnxruntime"), "pip install onnxruntime", False))
+    rows.append((
+        "rapidocr (OCR extra)",
+        _has_module("rapidocr_onnxruntime"),
+        'pip install "noapi-google-search-mcp[ocr]"',
+        False,
+    ))
     rows.append(("boto3 (S3 optional)", _has_module("boto3"), "pip install boto3", False))
     rows.append((
         "starlette+uvicorn (health)",

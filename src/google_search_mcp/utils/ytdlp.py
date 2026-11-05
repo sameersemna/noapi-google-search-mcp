@@ -117,7 +117,15 @@ def build_ydl_opts(
     opts: dict[str, Any] = {
         "quiet": quiet,
         "no_warnings": quiet,
-        "noprogress": quiet,
+        # ``noprogress`` is pinned, NOT derived from *quiet*: yt-dlp's progress
+        # bar writes carriage-return-updated text to **stdout**, and on the MCP
+        # stdio transport stdout is the JSON-RPC channel. One progress write
+        # interleaves with a response and the client fails to parse every
+        # message after it ("Failed to parse JSONRPC message from server").
+        # Deriving this from ``quiet`` meant a single caller passing
+        # ``quiet=False`` could silently break the transport for the whole
+        # process, so the option is set unconditionally.
+        "noprogress": True,
         "retries": config.YTDLP_RETRIES,
         "fragment_retries": config.YTDLP_RETRIES,
         "socket_timeout": config.YTDLP_SOCKET_TIMEOUT,

@@ -19,6 +19,7 @@ from ..config import (
     IMAGE_EXTENSIONS,
     MAX_OBJECTS,
     MOBILENET_ONNX_PATH,
+    OCR_INSTALL_HINT,
 )
 from ..core import fsguard
 from ..core.browser import pooled_browser
@@ -842,7 +843,7 @@ async def ocr_image(image_source: str) -> str:
     try:
         from rapidocr_onnxruntime import RapidOCR
     except ImportError:
-        return "rapidocr-onnxruntime is required for OCR. Install with: pip install rapidocr-onnxruntime"
+        return OCR_INSTALL_HINT
 
     # Handle base64 input
     tmp_base64_path = None

@@ -120,7 +120,10 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ),
         ("bucket", "file_path"),
     ),
-    "visit_page": (("url",), ("url",)),
+    # `max_characters` is an additive per-call page-text cap (0.5.0): the
+    # configured default lives in NOAPI_MCP_MAX_PAGE_CHARS, this overrides it
+    # for one call. Optional, so it is not in the required set.
+    "visit_page": (("max_characters", "url"), ("url",)),
     # `fresh` is an additive cache-bypass param (Phase 5).
     "wikipedia": (("fresh", "language", "query", "sentences"), ("query",)),
 }
