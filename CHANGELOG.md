@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-05
+
 ### Changed
 
 - **The HTTP transports are now served natively; `mcp-proxy` is gone.**
@@ -23,9 +25,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passed, so a crash exits and systemd can restart the process.
 - `mcp` is now pinned to `>=1.27,<2`; the HTTP transport behaviour above is
   version-sensitive.
+- **OCR is now an optional extra, so the package installs on Python 3.13.**
+  `rapidocr-onnxruntime` declares `Requires-Python <3.13` upstream
+  ([RapidAI/RapidOCR#579](https://github.com/RapidAI/RapidOCR/issues/579)), so
+  as a hard dependency it made `pip install noapi-google-search-mcp`
+  unsatisfiable on 3.13 — while the package claimed 3.13 support and CI only ran
+  that job with `continue-on-error`. Install it with
+  `pip install "noapi-google-search-mcp[ocr]"`. Both OCR entry points
+  (`ocr_image`, and the scanned-PDF fallback in `read_document`) now return a
+  one-line install hint.
+- **`playwright>=1.48.0`** (was `>=1.40.0`) — the first release that officially
+  added and tested Python 3.13.
+- **`av` and `onnxruntime` are declared core dependencies.** Both were imported
+  by shipped code but satisfied only by accident: `av` was missing entirely (so
+  `extract_video_clip` failed on a clean install) and `onnxruntime` arrived
+  transitively through `rapidocr`, which would have disappeared with the OCR
+  move and silently disabled the neural-net CAPTCHA solver.
+- The Python 3.13 CI job is **blocking** instead of `continue-on-error`.
+- The `--check` dependency doctor reports `av`, `onnxruntime` and the OCR extra
+  separately, with the right install hint for each.
 
 ### Added
 
+- **`--manual-browser [URL]`** — opens a visible Chromium window that shares the
+  server's cookies, for the cases only a human can handle: logging in, clearing a
+  consent dialog, or finding a feed URL. Cookies are flushed every 5 s and on
+  close to `~/.google_mcp_cookies.json`, which the server re-reads on its next
+  browser tool call, so a login done here is immediately available to the tools.
+  It uses a dedicated profile (`google-mcp-browser-manual`) rather than the
+  service's: that profile is held by the service for its lifetime, is ~1.3 GB, and
+  its `Cookies` file is SQLite, so a second writer risks corruption. Companion
+  flags: `--browser-profile DIR` and `--browser-timeout SEC`.
 - **`google_search_tabs_urls`** — reports the vertical tabs Google exposes on a
   SERP (`AI Mode`, `Images`, `News`, `Videos`, `Forums`, `Web`, `Books`, …) as
   `{label, url}` pairs, and with `include_sections=True` also the result-type
@@ -40,6 +70,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `google_search_mcp.http_app` — composes the streamable-HTTP and legacy SSE
   apps onto one Starlette app and owns process-wide startup/shutdown, because
   FastMCP's lifespan is entered once per session rather than once per process.
+- **`visit_page` takes a per-call `max_characters` argument**, alongside the new
+  `NOAPI_MCP_MAX_PAGE_CHARS` setting. The limit was a hardcoded 8000-character
+  module constant, so the `env` block people reasonably reached for did nothing
+  — and `NOAPI_MCP_MAX_TEXT_CHARS` was documented as a "generic text cap" while
+  no code path read it. `NOAPI_MCP_MAX_CHARACTERS` / `max_characters` are also
+  accepted as environment names, because that is the spelling people try first.
+  Values are clamped to 200000: the text lands in a model's context window, and
+  a tool that can silently return a megabyte turns one careless page visit into
+  a blown context. A value that is not a positive integer is ignored rather than
+  fatal, so a typo cannot stop the server from starting. The cap is part of the
+  cache key, so asking for more text is never answered from a shorter cached
+  entry.
+- `[ocr]` extra (plus an `[all]` convenience extra) for the OCR tools.
+- `CONTRIBUTING.md`, issue templates, and a pull-request template.
 
 ### Fixed
 
@@ -165,6 +209,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the frozen binary imported the server and exited. It now builds
   `scripts/frozen_entry.py` and bundles `uvicorn`/`starlette`, which the HTTP
   path imports lazily.
+- **A scanned PDF with no OCR installed looked like a blank document.** The
+  `rapidocr` import sat inside `except Exception: pass`, so the missing extra was
+  indistinguishable from a page with no text; the caller then reported "could not
+  extract text". The path now checks for the extra explicitly, skips the
+  `pdftoppm`/OCR work entirely when it is absent, and names the extra in the
+  hint.
+- **`yt-dlp` progress output is suppressed unconditionally.** The progress bar
+  writes to stdout, which is the JSON-RPC channel on the stdio transport; a
+  single call passing `quiet=False` would corrupt every message after it. The
+  option was already set from `quiet=True`, but the shared builder allowed the
+  unsafe combination, so it is now pinned in `build_ydl_opts`.
 
 ## [0.4.0] - 2026-10-17
 
@@ -324,4 +379,6 @@ _Changed_ below.
 - `src/google_search_mcp/server_selenium.py` is dead code (not imported by the
   server). It is slated for removal in a future release.
 
+[Unreleased]: https://github.com/sameersemna/noapi-google-search-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/sameersemna/noapi-google-search-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/VincentKaufmann/noapi-google-search-mcp/releases/tag/v0.4.0

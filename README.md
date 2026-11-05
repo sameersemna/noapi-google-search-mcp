@@ -110,9 +110,64 @@ is verified against the code by a test.
 
 | Variable | Default | Description |
 |---|---|---|
-| `NOAPI_MCP_MAX_DOCUMENT_CHARS` | see `config.py` | Truncation limit for `read_document`. |
-| `NOAPI_MCP_MAX_EMAIL_BODY_CHARS` | see `config.py` | Truncation limit per email body. |
-| `NOAPI_MCP_MAX_TEXT_CHARS` | see `config.py` | Generic text cap. |
+| `NOAPI_MCP_MAX_PAGE_CHARS` | `8000` | How much text `visit_page` returns before truncating. Clamped to `200000`. |
+| `NOAPI_MCP_MAX_DOCUMENT_CHARS` | `100000` | Truncation limit for `read_document`. |
+| `NOAPI_MCP_MAX_EMAIL_BODY_CHARS` | `2000` | Truncation limit per email body. |
+| `NOAPI_MCP_MAX_TEXT_CHARS` | = `MAX_PAGE_CHARS` | Legacy alias for the page cap; only used when `MAX_PAGE_CHARS` is unset. |
+
+`NOAPI_MCP_MAX_CHARACTERS` and the bare `max_characters` are accepted as
+aliases for `NOAPI_MCP_MAX_PAGE_CHARS`, because that is the spelling people try
+first. A value that is not a positive integer is ignored and the default is
+used, so a typo here cannot stop the server from starting. See
+[How much page text `visit_page` returns](#how-much-page-text-visit_page-returns).
+
+### OCR (optional)
+
+OCR is an **extra**, not a core dependency: `rapidocr-onnxruntime` declares
+`Requires-Python <3.13` upstream, so making it mandatory made the whole package
+uninstallable on Python 3.13.
+
+```bash
+pipx install "noapi-google-search-mcp[ocr]"    # or: pip install -e ".[ocr]"
+```
+
+Without it, `ocr_image` and the scanned-PDF fallback in `read_document` return
+a one-line install hint instead of raising. Everything else works unchanged,
+including `google_lens` and `read_document` on text PDFs.
+
+### How much page text `visit_page` returns
+
+`visit_page` truncates at **8000 characters** by default. That suits a small
+local model and is not enough for reading long documentation, so there are two
+ways to change it.
+
+Set it for the process — from the MCP client's `env` block:
+
+```json
+{
+  "mcpServers": {
+    "google-search": {
+      "command": "noapi-google-search-mcp",
+      "env": { "NOAPI_MCP_MAX_PAGE_CHARS": "20000" }
+    }
+  }
+}
+```
+
+Or set it for one call, which is what a model should do when it hits the
+truncation marker and wants the rest:
+
+```json
+{ "url": "https://docs.example.com/guide", "max_characters": 40000 }
+```
+
+`max_characters` is the tool argument; the same word is also accepted as an
+environment variable (`MAX_CHARACTERS` / `NOAPI_MCP_MAX_CHARACTERS`) because it
+is what people reach for first, and because 8000 is a default and not an
+answer. Values are clamped to **200000**: this text lands in a model's context
+window, and a tool that can silently return a megabyte turns one careless page
+visit into a blown context. The cap is part of the cache key, so asking for more
+text does not return a shorter cached answer.
 
 ### Feeds
 
@@ -171,6 +226,44 @@ noapi-google-search-mcp                    # run over stdio (default)
 noapi-google-search-mcp --transport streamable-http --host 127.0.0.1 --port 11498
 noapi-google-search-mcp --transport streamable-http --host 0.0.0.0 --port 11403   # what the systemd unit runs
 ```
+
+### Opening a browser by hand
+
+Sometimes a tool needs a human: log into a site, clear a consent dialog, or go
+find a feed URL. This opens a **visible Chromium window that shares the server's
+cookies**, then exits when you close it:
+
+```bash
+noapi-google-search-mcp --manual-browser                       # google.com
+noapi-google-search-mcp --manual-browser "https://news.ycombinator.com"
+noapi-google-search-mcp --manual-browser "https://example.com"  --browser-timeout 60
+```
+
+| Flag | Meaning |
+|---|---|
+| `--manual-browser [URL]` | Open the window (default `https://www.google.com`). |
+| `--browser-profile DIR` | Use a specific profile directory instead of the dedicated manual one. |
+| `--browser-timeout SEC` | Auto-close after `SEC` seconds (`0`, the default, waits for you). |
+
+It works while the service is running because it does **not** touch the service's
+profile. The persistent profile (`~/.config/google-mcp-browser`, ~1.3 GB) is held
+by the service for its whole lifetime, Chromium allows only one writer per
+profile, and its `Cookies` file is SQLite — two writers risk corruption. So the
+window uses its own profile (`google-mcp-browser-manual`) and shares the *session*
+instead:
+
+1. it seeds itself with the same cookies the server uses;
+2. it re-saves cookies every 5 s and again on close, to
+   `~/.google_mcp_cookies.json` — the file the server reads on every browser tool
+   call.
+
+So: log in to whatever the tools need, close the window, then call the tool. Pass
+`--browser-profile ~/.config/google-mcp-browser` only when the service is
+**stopped** and you want that exact profile (localStorage, fingerprint).
+
+> Feeds are stored in SQLite, not in the browser. Use the `subscribe` tool (or
+> `--manual-browser` to find the feed URL first, then `subscribe`).
+
 
 See also [SECURITY.md](SECURITY.md) for the threat model and an operator
 hardening checklist.
@@ -1541,6 +1634,46 @@ python3 -m venv ~/.local/share/noapi-google-search-mcp
 ~/.local/share/noapi-google-search-mcp/bin/playwright install chromium
 ```
 
+### Python 3.13 / OCR
+
+The core package installs on every supported Python, including 3.13. OCR is
+opt-in because `rapidocr-onnxruntime` has no Python 3.13 wheel upstream
+([RapidAI/RapidOCR#579](https://github.com/RapidAI/RapidOCR/issues/579)).
+Everything except the OCR tools (`ocr_image` and the scanned-PDF fallback in
+`read_document`) works without it.
+
+To enable OCR, add the `[ocr]` extra on a compatible Python (3.10–3.12):
+
+```bash
+pipx install "noapi-google-search-mcp[ocr]"
+playwright install chromium
+```
+
+Calling an OCR tool without the extra returns the install hint rather than
+raising, so a missing engine is never mistaken for a blank document.
+
+### This fork vs upstream
+
+This tree descends from
+[`engram-ae/noapi-google-search-mcp`](https://github.com/engram-ae/noapi-google-search-mcp)
+(formerly `VincentKaufmann/noapi-google-search-mcp`) at commit `857a98c`, and
+then diverges substantially. Upstream is unchanged since 2026-08-16 (v0.3.2);
+this fork carries 43 tools instead of 38, and adds:
+
+- a modular `core/` + `tools/` + `utils/` layout in place of one `server.py`;
+- a shared Chromium pool (8.6×–14.8× faster per call), read-through caching,
+  an idempotency store, a token-bucket rate limiter, a circuit breaker and
+  transient-only retries;
+- SSRF and filesystem guards, typed errors, and output caps;
+- native `/mcp` + `/sse` transports served by the Python process (`mcp-proxy`
+  retired), stateless mode, and a `/health` endpoint with per-tool metrics;
+- `--manual-browser`, `--check`, `--version`, and an offline test suite with
+  coverage and lint gates.
+
+Upstream fixes landed after the fork are tracked here too: the `yt-dlp`
+`noprogress` stdio fix, OCR as an optional extra, and the configurable
+`visit_page` character limit.
+
 ## Configuration
 
 ### LM Studio
@@ -1605,11 +1738,17 @@ python -m google_search_mcp
 ## Development
 
 ```bash
-git clone https://github.com/VincentKaufmann/noapi-google-search-mcp.git
-cd google-search-mcp
-pip install -e .
+git clone https://github.com/sameersemna/noapi-google-search-mcp.git
+cd noapi-google-search-mcp
+pip install -e ".[dev]"
 playwright install chromium
+
+pytest -m "not live" -q          # offline suite; no browser or network needed
+python -m google_search_mcp --check
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the test policy and the checklist for
+adding a tool.
 
 ## License
 
