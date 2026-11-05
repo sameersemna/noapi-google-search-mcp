@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`/health` reported the wrong transport.** The field was hardcoded to
+  `"transport": "stdio"`, so every HTTP deployment advertised stdio — the same
+  class of stale label that made the retired `mcp-proxy --transport
+  streamable-http` flag look effective. The CLI now records what it actually
+  serves (`health_server.set_active_transport`), and `/health` reports that.
 - **Domain-relevance audit across the Google tools.** An audit harness
   (`scripts/audit_tools.py`) calls every Google-facing tool and checks the output
   for markers that only exist in that domain, so a tool that silently answers a

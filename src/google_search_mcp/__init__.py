@@ -166,6 +166,12 @@ def main(argv: list[str] | None = None) -> None:
     mcp.settings.host = host
     mcp.settings.port = port
 
+    # Record what is actually served so /health does not report the configured
+    # default (it said "stdio" for this HTTP deployment).
+    from . import health_server as _health
+
+    _health.set_active_transport(transport)
+
     if transport == "stdio":
         mcp.run(transport="stdio")
         return

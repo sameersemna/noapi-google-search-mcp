@@ -160,6 +160,24 @@ _STARTUP_RESULT: dict[str, Any] = {
 # Reference to the mcp server object (set by `set_mcp_server()`)
 _MCP_SERVER: Any = None
 
+# Transport the process actually serves (set by `set_active_transport()`).
+# ``config.TRANSPORT`` only describes the *configured default*; the CLI can
+# override it with ``--transport``, so reading config here reported "stdio" for a
+# process serving streamable HTTP — the same class of stale label that made the
+# old `mcp-proxy` transport flag look effective.
+_ACTIVE_TRANSPORT: str = "stdio"
+
+
+def set_active_transport(transport: str) -> None:
+    """Record the transport this process is serving, for ``/health``."""
+    global _ACTIVE_TRANSPORT
+    _ACTIVE_TRANSPORT = transport or "stdio"
+
+
+def get_active_transport() -> str:
+    """Return the transport this process is serving."""
+    return _ACTIVE_TRANSPORT
+
 
 def set_loaded_at(when: datetime | None = None) -> None:
     """Mark the service as loaded. Called from app_lifespan after cookie
@@ -657,7 +675,7 @@ def _check_mcp() -> dict[str, Any]:
         "prompts": 0,
         "resources": 0,
         "uptime_sec": _uptime_sec(),
-        "transport": "stdio",  # current default
+        "transport": get_active_transport(),
     }
     if _MCP_SERVER is None:
         info["error"] = "mcp server not registered"
