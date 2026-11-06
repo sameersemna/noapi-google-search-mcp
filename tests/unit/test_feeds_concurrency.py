@@ -132,3 +132,100 @@ def test_check_feeds_respects_concurrency_limit(feed_db, monkeypatch):
 
 def test_check_feeds_no_subscriptions(feed_db):
     assert "No subscriptions to check" in asyncio.run(feeds.check_feeds())
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Thread affinity of the per-subscription connection
+# ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_auto_transcribe_connection_is_created_on_calling_thread(monkeypatch):
+    """The connection must be born on the thread that uses it.
+
+    Regression: the connection used to be opened with ``asyncio.to_thread``,
+    so it lived on a pool thread while every ``conn.execute()`` ran on the
+    event loop thread. sqlite3 refuses that ("SQLite objects created in a
+    thread can only be used in that same thread"), and because the error also
+    fired from ``conn.close()`` it hit even subscriptions whose transcription
+    returned early — every YouTube feed reported ERROR and nothing was stored.
+    """
+    import threading
+
+    creation_thread: list[int] = []
+    real_get_db = feeds._get_feeds_db
+
+    def recording_get_db():
+        creation_thread.append(threading.get_ident())
+        return real_get_db()
+
+    monkeypatch.setattr(feeds, "_get_feeds_db", recording_get_db)
+
+    async def fake_transcribe(conn, sub_id, items, ctx=None):
+        # sqlite3 would raise here if the connection came from another thread.
+        conn.execute("SELECT 1").fetchone()
+        return ""
+
+    monkeypatch.setattr(feeds, "_auto_transcribe_youtube", fake_transcribe)
+
+    await feeds._auto_transcribe_youtube_isolated(1, [])
+
+    assert creation_thread == [threading.get_ident()], (
+        "connection must be created on the event-loop thread"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_transcribe_isolated_closes_without_thread_error(monkeypatch):
+    """Closing must not raise, including on the early-return path."""
+    async def early_return(conn, sub_id, items, ctx=None):
+        # Simulates the "remote not configured" short-circuit: conn untouched.
+        return " (auto-transcription skipped)"
+
+    monkeypatch.setattr(feeds, "_auto_transcribe_youtube", early_return)
+
+    note = await feeds._auto_transcribe_youtube_isolated(1, [])
+
+    assert note == " (auto-transcription skipped)"
+
+
+@pytest.mark.asyncio
+async def test_failed_transcription_still_removes_downloaded_audio(
+    feed_db, tmp_path, monkeypatch
+):
+    """A failed transcription must not orphan its downloaded audio.
+
+    Regression: cleanup sat on the success path only, so every failure left a
+    full audio download behind. When an undecodable-codec bug made every
+    transcription fail, the cache accumulated more than 3 GB of audio that no
+    code path would ever revisit.
+    """
+    from google_search_mcp.utils import whisper_remote
+
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"\x00" * 1024)
+
+    monkeypatch.setattr(feeds.ytdlp, "is_available", lambda: True)
+    monkeypatch.setattr(whisper_remote, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        feeds, "_download_audio",
+        lambda url, cache_dir: {
+            "title": "T", "duration": 5, "uploader": "U",
+            "audio_path": str(audio),
+        },
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("remote rejected the upload")
+
+    monkeypatch.setattr(feeds, "_transcribe_audio", boom)
+
+    conn = feeds._get_feeds_db()
+    try:
+        note = await feeds._auto_transcribe_youtube(
+            conn, 1, [{"url": "https://www.youtube.com/watch?v=abcdefghijk"}],
+        )
+    finally:
+        conn.close()
+
+    assert "failed" in note
+    assert not audio.exists(), "audio must be removed even when transcription fails"

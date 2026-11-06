@@ -574,12 +574,20 @@ async def _auto_transcribe_youtube_isolated(
     ``check_feeds`` workers run concurrently and must not share a connection,
     so this opens (and closes) a dedicated one around
     :func:`_auto_transcribe_youtube`.
+
+    The connection is created and closed on the *current* thread on purpose.
+    Opening it via ``asyncio.to_thread`` put the connection on a pool thread
+    while every ``conn.execute()`` below runs on the event loop thread, and
+    sqlite3 rejects that ("SQLite objects created in a thread can only be used
+    in that same thread"). The error surfaced from ``conn.close()`` too, so the
+    failure also hit subscriptions whose transcription returned early — every
+    YouTube feed reported ERROR and no transcript was ever stored.
     """
-    conn = await asyncio.to_thread(_get_feeds_db)
+    conn = _get_feeds_db()
     try:
         return await _auto_transcribe_youtube(conn, sub_id, items, ctx=ctx)
     finally:
-        await asyncio.to_thread(conn.close)
+        conn.close()
 
 
 def _prune_items() -> int:
@@ -817,6 +825,7 @@ async def _auto_transcribe_youtube(
     errors: list[str] = []
 
     for i, video_url in enumerate(batch):
+        audio_path: str | None = None
         try:
             if ctx:
                 await ctx.report_progress(
@@ -828,10 +837,11 @@ async def _auto_transcribe_youtube(
             dl_info = await asyncio.to_thread(
                 _download_audio, video_url, TRANSCRIBE_CACHE_DIR,
             )
+            audio_path = dl_info["audio_path"]
 
             # Transcribe audio (in thread)
             whisper_result = await asyncio.to_thread(
-                _transcribe_audio, dl_info["audio_path"], model_size, "",
+                _transcribe_audio, audio_path, model_size, "",
             )
 
             segments = whisper_result["segments"]
@@ -866,21 +876,30 @@ async def _auto_transcribe_youtube(
 
             transcribed += 1
 
-            # Clean up temp audio file
-            try:
-                os.remove(dl_info["audio_path"])
-            except OSError:
-                pass
-
         except Exception as e:
             errors.append(str(e))
+        finally:
+            # Always remove the downloaded audio, not just after a successful
+            # transcription. Cleanup used to sit on the success path only, so
+            # every failure orphaned its download — when an undecodable-codec
+            # bug made every transcription fail, the cache grew past 3 GB of
+            # audio that no code path would ever touch again.
+            if audio_path:
+                try:
+                    os.remove(audio_path)
+                except OSError:
+                    pass
 
     # ── build status string ────────────────────────────────────────────
     parts: list[str] = []
     if transcribed:
         parts.append(f"{transcribed} transcribed")
     if errors:
-        parts.append(f"{len(errors)} failed")
+        # Say WHY, not just how many. A bare "5 failed" hid a systematic
+        # failure — every attempt was being rejected by the remote for an
+        # undecodable audio codec — and read like a transient blip.
+        reason = " ".join(str(errors[0]).split())[:160]
+        parts.append(f"{len(errors)} failed: {reason}")
     skipped = total_pending - len(batch)
     if skipped > 0:
         parts.append(f"{skipped} queued for next check")

@@ -17,6 +17,7 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import os
 import urllib.error
 from typing import Any
 from unittest import mock
@@ -820,3 +821,121 @@ def test_health_check_config_exposes_api_style(monkeypatch):
     cfg = health_server._check_config()
     assert cfg["WHISPER_REMOTE_API_STYLE"] == "whispercpp"
 
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Audio normalisation — the server only decodes a few codecs
+#
+# Regression: ytdlp.download_audio prefers `bestaudio[ext=m4a]`, and
+# whisper.cpp cannot decode AAC. Every feed auto-transcription therefore
+# failed with "HTTP 400: Invalid request" — 24 warnings in one check_feeds
+# call, surfaced to the user only as "5 failed". Verified against the live
+# server: wav/mp3/flac/ogg-vorbis => 200; m4a/aac and opus => 400.
+# ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "name, needs",
+    [
+        ("audio.m4a", True),   # AAC — rejected by the server
+        ("audio.opus", True),  # Opus — rejected by the server
+        ("audio.ogg", True),   # container cannot reveal Vorbis vs Opus
+        ("audio.webm", True),
+        ("audio.mkv", True),
+        ("audio.mp4", True),
+        ("audio.wav", False),  # verified working
+        ("audio.mp3", False),  # verified working
+        ("audio.flac", False),  # verified working
+        ("AUDIO.M4A", True),   # case-insensitive
+    ],
+)
+def test_normalisation_needed_matrix(name, needs):
+    assert whisper_remote._needs_normalisation(name) is needs
+
+
+def test_normalise_skips_decodable_formats(tmp_path):
+    """A file the server can already read must not be re-encoded."""
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"\xff" * 2048)
+
+    path, temp = whisper_remote._normalise_audio(str(audio))
+
+    assert path == str(audio)
+    assert temp is None
+
+
+def test_normalise_falls_back_when_ffmpeg_missing(monkeypatch, tmp_path):
+    """No ffmpeg must degrade to the old behaviour, not crash."""
+    audio = tmp_path / "clip.m4a"
+    audio.write_bytes(b"\x00" * 2048)
+
+    monkeypatch.setattr(
+        whisper_remote.subprocess, "run",
+        mock.Mock(side_effect=FileNotFoundError("ffmpeg")),
+    )
+    path, temp = whisper_remote._normalise_audio(str(audio))
+
+    assert path == str(audio), "must upload the original file"
+    assert temp is None
+
+
+def test_normalise_falls_back_when_ffmpeg_fails(monkeypatch, tmp_path):
+    """A non-zero ffmpeg exit also falls back rather than sending junk."""
+    audio = tmp_path / "clip.m4a"
+    audio.write_bytes(b"\x00" * 2048)
+
+    failed = mock.Mock(returncode=1, stderr=b"Invalid data found when processing input")
+    monkeypatch.setattr(whisper_remote.subprocess, "run", mock.Mock(return_value=failed))
+    path, temp = whisper_remote._normalise_audio(str(audio))
+
+    assert path == str(audio)
+    assert temp is None
+
+
+def test_normalise_transcodes_m4a_to_mp3(monkeypatch, tmp_path):
+    """An m4a must be converted, and the temp file returned for cleanup."""
+    audio = tmp_path / "clip.m4a"
+    audio.write_bytes(b"\x00" * 2048)
+
+    def fake_run(cmd, **kwargs):
+        # ffmpeg writes to the final path in the command line
+        assert cmd[0] == "ffmpeg"
+        assert "-nostdin" in cmd, "must never read the shared terminal"
+        assert "16000" in cmd and "1" in cmd, "Whisper wants 16 kHz mono"
+        assert kwargs.get("stdin") == whisper_remote.subprocess.DEVNULL
+        with open(cmd[-1], "wb") as f:
+            f.write(b"\xff" * 4096)
+        return mock.Mock(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(whisper_remote.subprocess, "run", fake_run)
+    path, temp = whisper_remote._normalise_audio(str(audio))
+
+    assert temp is not None
+    assert path == temp
+    assert path.endswith(".mp3")
+    assert os.path.isfile(path), "converted file must exist"
+    whisper_remote._safe_unlink(temp)
+    assert not os.path.exists(path), "cleanup must remove the temp file"
+
+
+def test_transcribe_remote_uploads_normalised_file(monkeypatch, tmp_path):
+    """The request must carry the converted path, and clean it up."""
+    _enable_remote(monkeypatch, min_bytes=1)
+    payload = {"language": "en", "segments": [{"start": 0, "end": 1, "text": "hi"}]}
+    audio = tmp_path / "clip.m4a"
+    audio.write_bytes(b"\x00" * 2048)
+
+    converted = tmp_path / "converted.mp3"
+    converted.write_bytes(b"\xff" * 2048)
+    monkeypatch.setattr(
+        whisper_remote, "_normalise_audio",
+        lambda p: (str(converted), str(converted)),
+    )
+
+    with mock.patch.object(
+        whisper_remote.urllib.request, "urlopen",
+        return_value=_fake_http_response(200, payload),
+    ):
+        result = whisper_remote.transcribe_remote(str(audio), "tiny", "")
+
+    assert result is not None
+    assert not converted.exists(), "the converted temp file must be deleted"

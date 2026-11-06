@@ -98,11 +98,14 @@ identical whether the result came from local or remote Whisper.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import mimetypes
 import os
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -464,6 +467,129 @@ def startup_probe() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Audio normalisation — the server only decodes a few codecs
+# ---------------------------------------------------------------------------
+
+# Extensions this server was empirically verified to decode. whisper.cpp uses
+# miniaudio/dr_wav/stb_vorbis internally, which covers PCM, MP3, FLAC and
+# Ogg-Vorbis — but NOT AAC (``.m4a``) and NOT Opus (``.opus``, or Opus inside
+# ``.ogg``). Anything else is transcoded before upload.
+#
+# ``.ogg`` is deliberately absent even though Ogg-Vorbis works: the container
+# does not reveal whether the codec is Vorbis (works) or Opus (HTTP 400), so it
+# is cheaper to convert it than to guess.
+#
+# This matters because ``ytdlp.download_audio`` prefers ``bestaudio[ext=m4a]``
+# — the single most common format here was the one the server rejected, so
+# every feed auto-transcription failed with a bare "HTTP 400: Invalid request".
+_SERVER_DECODABLE_EXTS = frozenset({".wav", ".mp3", ".flac"})
+
+# 16 kHz mono is what Whisper consumes internally, so converting loses nothing
+# the model uses. MP3 at 32 kbps is ~8x smaller than the equivalent WAV, which
+# keeps a one-hour upload at ~14 MB instead of ~115 MB.
+_NORMALISE_ARGS = (
+    "-ar",
+    "16000",
+    "-ac",
+    "1",
+    "-b:a",
+    "32k",
+)
+
+
+def _needs_normalisation(audio_path: str) -> bool:
+    """True when the file's container/codec is not known to be server-safe."""
+    return os.path.splitext(audio_path)[1].lower() not in _SERVER_DECODABLE_EXTS
+
+
+def _safe_unlink(path: str | None) -> None:
+    if not path:
+        return
+    with contextlib.suppress(OSError):
+        os.unlink(path)
+
+
+def _normalise_audio(audio_path: str) -> tuple[str, str | None]:
+    """Return a path the remote can decode, transcoding if necessary.
+
+    Returns ``(path_to_upload, temp_path_or_None)``. The caller must delete
+    ``temp_path`` when done.
+
+    Degrades gracefully: if ffmpeg is missing or fails, the original path is
+    returned unchanged so the upload behaves exactly as it did before — a
+    codec the server cannot read still surfaces as its own HTTP error rather
+    than being masked by a conversion failure.
+    """
+    if not _needs_normalisation(audio_path):
+        return audio_path, None
+
+    target_dir = os.path.dirname(os.path.abspath(audio_path)) or None
+    tmp_path: str | None = None
+    # Prefer the source's own directory: it is on disk and almost always
+    # writable, whereas the system temp dir may be tmpfs (RAM) on some hosts,
+    # and this box has 14 GB total. Fall back to the default temp dir when the
+    # source directory refuses the write (read-only mount, foreign ownership).
+    for candidate_dir in (target_dir, None):
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="whisper_norm_", suffix=".mp3", dir=candidate_dir
+            )
+            os.close(fd)
+            break
+        except OSError as exc:
+            log.debug(
+                "could not create normalisation target in %s: %s",
+                candidate_dir or "<system temp>",
+                exc,
+            )
+            tmp_path = None
+    if not tmp_path:
+        return audio_path, None
+
+    cmd = [
+        "ffmpeg",
+        "-nostdin",  # never read the terminal: a shared pty causes SIGTTIN
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        audio_path,
+        *_NORMALISE_ARGS,
+        tmp_path,
+    ]
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, path is ours
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=config.WHISPER_REMOTE_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("ffmpeg unavailable for normalisation (%s); uploading as-is", exc)
+        _safe_unlink(tmp_path)
+        return audio_path, None
+
+    if proc.returncode != 0 or not os.path.getsize(tmp_path):
+        detail = (proc.stderr or b"").decode("utf-8", "replace").strip()[:200]
+        log.warning(
+            "Could not normalise %s for the remote (%s); uploading as-is.",
+            os.path.basename(audio_path),
+            detail or f"ffmpeg exit {proc.returncode}",
+        )
+        _safe_unlink(tmp_path)
+        return audio_path, None
+
+    log.debug(
+        "Normalised %s (%s, %.1f MB) -> 16 kHz mono mp3 (%.1f MB)",
+        os.path.basename(audio_path),
+        os.path.splitext(audio_path)[1] or "?",
+        os.path.getsize(audio_path) / 1e6,
+        os.path.getsize(tmp_path) / 1e6,
+    )
+    return tmp_path, tmp_path
+
+
+# ---------------------------------------------------------------------------
 # Multipart upload — hand-rolled (no requests, no httpx)
 # ---------------------------------------------------------------------------
 
@@ -584,6 +710,23 @@ def transcribe_remote(
     if not is_eligible(audio_path):
         return None
 
+    # The server decodes only a few codecs (see _SERVER_DECODABLE_EXTS), and the
+    # audio downloader prefers m4a — so a raw upload of the most common format
+    # failed with "HTTP 400: Invalid request" on every feed transcription.
+    # Normalise to 16 kHz mono mp3 before uploading.
+    upload_path, temp_path = _normalise_audio(audio_path)
+    try:
+        return _transcribe_remote_upload(upload_path, model_size, language)
+    finally:
+        _safe_unlink(temp_path)
+
+
+def _transcribe_remote_upload(
+    audio_path: str,
+    model_size: str,
+    language: str,
+) -> dict | None:
+    """POST one already-decodable audio file to the remote."""
     _record_attempt()
     started = _now()
 
