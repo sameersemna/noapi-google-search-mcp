@@ -143,18 +143,24 @@ def test_transcribe_path_has_no_local_whisper():
     assert "whisper_remote" in src, "video.py must delegate to the remote host"
 
 
-def test_ocr_sites_use_the_cache():
+def test_ocr_sites_have_no_local_engine():
+    """OCR is remote-only now: no local engine, so nothing to cache.
+
+    The local RapidOCR engine was removed with the move to a GPU host, so these
+    modules must not construct it at all — that was the 6.9 GB leak, and it is
+    also ~170 MB of models we no longer want resident here.
+    """
     from google_search_mcp.tools import vision, web_utils
 
     for name, module in (("vision.py", vision), ("web_utils.py", web_utils)):
         src = _src(module)
-        assert "cached_engine(" in src, f"{name} must use the engine cache"
-        assert "engine = RapidOCR()" not in src, (
-            f"{name} constructs RapidOCR per call — that leaks an ORT arena"
+        assert "rapidocr" not in src.lower(), (
+            f"{name} still references rapidocr — OCR runs on the remote host"
         )
-        assert "ocr = RapidOCR()" not in src, (
-            f"{name} constructs RapidOCR per call — that leaks an ORT arena"
+        assert "RapidOCR()" not in src, (
+            f"{name} constructs a local OCR engine; OCR is remote-only"
         )
+        assert "ocr_remote" in src, f"{name} must delegate to the remote OCR host"
 
 
 def test_captcha_classifier_uses_the_cache():

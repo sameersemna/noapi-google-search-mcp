@@ -2,13 +2,13 @@
 
 Why this module exists
 ----------------------
-``rapidocr_onnxruntime.RapidOCR`` and ``onnxruntime.InferenceSession`` each
-allocate a large native arena — model weights plus an ONNX Runtime thread pool,
+``onnxruntime.InferenceSession`` — used by the neural-net CAPTCHA solver —
+allocates a large native arena: model weights plus an ONNX Runtime thread pool,
 hundreds of megabytes per instance.
 
-(``faster_whisper.WhisperModel`` was the worst offender and is the reason this
-module exists at all; transcription has since moved to a GPU host, so it is no
-longer cached here.)
+(Two engines that used to live here are gone: Whisper and the OCR model both
+moved to a GPU host over HTTP. Whisper is why this module exists at all —
+reconstructing it per call is what produced the 6.9 GB leak described below.)
 
 Constructing one per tool call looked harmless: each call returns its result and
 the local name goes out of scope. It is not harmless. Those native arenas are
@@ -62,9 +62,9 @@ def cached_engine(
     """Return the cached engine for *name*, building it via *factory* if needed.
 
     Args:
-        name: Engine family — ``"whisper"``, ``"rapidocr"``, ``"mobilenet"``.
-            Names are the cache slot, so two call sites that want the same
-            engine should share one name.
+        name: Engine family — ``"mobilenet"`` is the only one left (the CAPTCHA
+            classifier). Names are the cache slot, so two call sites that want
+            the same engine should share one name.
         key: Everything the engine is parameterised by (e.g. the model size). A
             different key replaces the resident instance rather than adding one.
         factory: Zero-argument callable that constructs the engine. Only called

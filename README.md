@@ -80,7 +80,7 @@ is verified against the code by a test.
 | `NOAPI_MCP_CACHE_TTL_SECONDS` | `3600` | Fallback TTL for tools without a specific one. |
 | `NOAPI_MCP_CACHE_MAX_ENTRIES` | `512` | In-memory LRU bound. |
 | `NOAPI_MCP_CACHE_DB_PATH` | `<cache>/cache.db` | Optional on-disk tier. |
-| `NOAPI_MCP_CACHE_ENGINES` | `1` | Reuse RapidOCR/ONNX engines across calls. `0` rebuilds per call — which leaks their native memory; for debugging only. |
+| `NOAPI_MCP_CACHE_ENGINES` | `1` | Reuse the ONNX CAPTCHA classifier across calls. `0` rebuilds per call — which leaks its native memory; for debugging only. |
 
 ### Idempotency
 
@@ -122,19 +122,29 @@ first. A value that is not a positive integer is ignored and the default is
 used, so a typo here cannot stop the server from starting. See
 [How much page text `visit_page` returns](#how-much-page-text-visit_page-returns).
 
-### OCR (optional)
+### OCR (remote service)
 
-OCR is an **extra**, not a core dependency: `rapidocr-onnxruntime` declares
-`Requires-Python <3.13` upstream, so making it mandatory made the whole package
-uninstallable on Python 3.13.
+OCR runs on a **GPU host**, not locally: `POST {OCR_REMOTE_URL}/ocr`. The local
+`rapidocr-onnxruntime` engine was removed because it held ~170 MB of ONNX models
+resident and spent CPU on every page. Same 6 KB test image:
+
+| | Time | Memory here |
+|---|---|---|
+| local (CPU) | ~1.8 s | ~170 MB resident |
+| remote (CUDA) | **0.13 s** | none |
 
 ```bash
-pipx install "noapi-google-search-mcp[ocr]"    # or: pip install -e ".[ocr]"
+OCR_REMOTE_ENABLED=1
+OCR_REMOTE_URL=http://promaxgb10-6116:8769
 ```
 
-Without it, `ocr_image` and the scanned-PDF fallback in `read_document` return
-a one-line install hint instead of raising. Everything else works unchanged,
-including `google_lens` and `read_document` on text PDFs.
+There is **no local fallback**. An unreachable host makes `ocr_image` and the
+scanned-PDF fallback in `read_document` return an error naming the URL and the
+file, rather than silently running ten times slower. To run without OCR at all,
+set `OCR_REMOTE_ENABLED=0`; those two tools then explain why they cannot work.
+Everything else works unchanged, including `google_lens` and `read_document` on
+text PDFs. See [`deploy/ocr-server/`](deploy/ocr-server/) for a reference
+implementation of the service.
 
 ### How much page text `visit_page` returns
 
@@ -660,7 +670,7 @@ streamable HTTP, or stdio).
 - **Process metrics** (PID, PPID, RSS memory, VMS, CPU%, thread count, nice)
 - **MCP introspection** (tool count, prompt count, resource count, **full list of tool names**)
 - **Config snapshot** (env-driven settings: `ENABLE_MANUAL_INTERVENTION`, `SKIP_COOKIE_VALIDATION`, etc.)
-- **Dependency status** for every Python package: `playwright` (with chromium install path!), `opencv`, `onnxruntime`, `yt_dlp`, `yt_dlp_ejs`, `js_runtime`, `rapidocr`, `lingua`, `psutil`, `starlette`, `uvicorn` — plus the **remote Whisper host** (URL + reachability).
+- **Dependency status** for every Python package: `playwright` (with chromium install path!), `opencv`, `onnxruntime`, `yt_dlp`, `yt_dlp_ejs`, `js_runtime`, `lingua`, `psutil`, `starlette`, `uvicorn` — plus the **remote Whisper** and **remote OCR** hosts (URL + reachability).
 - **File presence & sizes** for `google_cookies.txt`, `youtube_cookies.txt`, auto-saved cookies, MobileNetV2 model, feeds DB, browser data dir
 - **Disk usage** for the cache directory (free / total / used %)
 - **Manual intervention state** (enabled, display available, currently active, last result)
@@ -932,7 +942,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 |------|-------------|
 | `google_lens` | Reverse image search — identify objects, products, landmarks, text |
 | `google_lens_detect` | Detect all objects in an image (OpenCV) and identify each via Lens |
-| `ocr_image` | Extract text from images locally (RapidOCR, fully offline) |
+| `ocr_image` | Extract text from images using OCR on the remote GPU host |
 | `list_images` | List image files in a directory for use with vision tools |
 
 ### Video & Audio Intelligence — AI-Powered Video Editing
@@ -1445,9 +1455,9 @@ Detect all objects (OpenCV), crop each one, identify individually via Lens.
 |-----------|-------------|---------|
 | `image_source` | Local file path or base64 (required) | `"/home/user/photo.jpg"` |
 
-#### `ocr_image` — Local OCR (offline)
+#### `ocr_image` — OCR (remote GPU host)
 
-Extract text from images using RapidOCR. No internet needed.
+Extract text from images using OCR on the remote GPU host (`OCR_REMOTE_URL`).
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
@@ -1674,23 +1684,14 @@ python3 -m venv ~/.local/share/noapi-google-search-mcp
 ~/.local/share/noapi-google-search-mcp/bin/playwright install chromium
 ```
 
-### Python 3.13 / OCR
+### Python 3.13
 
-The core package installs on every supported Python, including 3.13. OCR is
-opt-in because `rapidocr-onnxruntime` has no Python 3.13 wheel upstream
-([RapidAI/RapidOCR#579](https://github.com/RapidAI/RapidOCR/issues/579)).
-Everything except the OCR tools (`ocr_image` and the scanned-PDF fallback in
-`read_document`) works without it.
-
-To enable OCR, add the `[ocr]` extra on a compatible Python (3.10–3.12):
-
-```bash
-pipx install "noapi-google-search-mcp[ocr]"
-playwright install chromium
-```
-
-Calling an OCR tool without the extra returns the install hint rather than
-raising, so a missing engine is never mistaken for a blank document.
+The package installs and runs on every supported Python, including 3.13. OCR no
+longer affects this: it used to be the blocker, because
+`rapidocr-onnxruntime` has no 3.13 wheel upstream
+([RapidAI/RapidOCR#579](https://github.com/RapidAI/RapidOCR/issues/579)) and was
+kept as an `[ocr]` extra for that reason. That engine is gone — OCR is a remote
+service now, so there is no extra to install.
 
 ### This fork vs upstream
 

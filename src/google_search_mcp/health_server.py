@@ -511,6 +511,63 @@ def _check_js_runtime() -> dict[str, Any]:
         return {"ok": False, "runtime": None, "error": str(exc)}
 
 
+def _check_ocr_remote() -> dict[str, Any]:
+    """Report the remote OCR service's health.
+
+    OCR runs on a GPU host (``OCR_REMOTE_URL``): the local engine held ~170 MB of
+    ONNX models and spent CPU on every page. This reports the cached probe result
+    plus call counters, so ``/health`` is informative without an extra HTTP
+    request of its own.
+    """
+    try:
+        from . import config as _config
+        from .utils import ocr_remote
+
+        stats = ocr_remote.get_stats()
+        enabled = bool(stats.get("enabled"))
+        url = stats.get("url")
+        configured = bool(enabled and url)
+
+        if not configured:
+            return {
+                "ok": False,
+                "configured": False,
+                "enabled": enabled,
+                "url": url,
+                "error": "OCR_REMOTE_ENABLED=0 or OCR_REMOTE_URL is empty",
+                "attempts": stats.get("attempts", 0),
+                "successes": stats.get("successes", 0),
+                "failures": stats.get("failures", 0),
+                "last_error": stats.get("last_error"),
+            }
+
+        last_probe_ok = stats.get("last_probe_ok")
+        return {
+            "ok": bool(last_probe_ok) if last_probe_ok is not None else None,
+            "configured": True,
+            "enabled": True,
+            "url": url,
+            "timeout_sec": _config.OCR_REMOTE_TIMEOUT_SEC,
+            "last_probe_at": stats.get("last_probe_at"),
+            "last_probe_latency_ms": stats.get("last_probe_latency_ms"),
+            "last_probe_error": stats.get("last_probe_error"),
+            "attempts": stats.get("attempts", 0),
+            "successes": stats.get("successes", 0),
+            "failures": stats.get("failures", 0),
+            "last_error": stats.get("last_error"),
+            "last_success_at": stats.get("last_success_at"),
+            "error": None,
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "ok": False,
+            "configured": False,
+            "enabled": None,
+            "url": None,
+            "error": f"health check failed: {type(exc).__name__}: {exc}",
+        }
+
+
 def _check_whisper_remote() -> dict[str, Any]:
     """Report the remote-Whisper delegation layer's health.
 
@@ -601,8 +658,7 @@ def _check_dependencies() -> dict[str, Any]:
     deps["yt_dlp_ejs"] = _check_ytdlp_ejs()
     deps["js_runtime"] = _check_js_runtime()
     deps["whisper_remote"] = _check_whisper_remote()
-    ok, ver = _safe_import("rapidocr_onnxruntime")
-    deps["rapidocr"] = {"ok": ok, "version": ver, "error": None if ok else ver}
+    deps["ocr_remote"] = _check_ocr_remote()
     ok, ver = _safe_import("lingua")
     deps["lingua"] = {"ok": ok, "version": ver, "error": None if ok else ver}
     deps["psutil"] = {

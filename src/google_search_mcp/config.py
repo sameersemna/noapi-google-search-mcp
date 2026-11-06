@@ -529,6 +529,59 @@ WHISPER_REMOTE_PROBE_ON_STARTUP: bool = os.environ.get(
 ).strip().lower() in ("1", "true", "yes", "on")
 
 # ---------------------------------------------------------------------------
+# Remote OCR server — the ONLY OCR backend
+# ---------------------------------------------------------------------------
+# OCR runs on the GPU host, like transcription. The local
+# ``rapidocr-onnxruntime`` engine is gone: it held ~170 MB of ONNX models
+# resident and consumed CPU on every page, on a box that is already over
+# committed. Measured on the deployment's own 6 KB test image:
+#
+#     local  (CPU)     ~1.8 s
+#     remote (CUDA)     0.13 s
+#
+# There is no local fallback, so an unreachable host is a clear error naming the
+# URL rather than a silent (and much slower) local run. To run without OCR,
+# leave OCR_REMOTE_ENABLED=0 — the ocr_image tool and the scanned-PDF fallback
+# then report why they cannot work instead of failing obscurely.
+#
+# Expected service: ``POST {OCR_REMOTE_URL}/ocr`` (multipart ``file``) returning
+# ``{"result": [[box, text, confidence], ...], "elapse": [det, cls, rec]}``.
+# See deploy/ocr-server/ in this repository.
+OCR_REMOTE_ENABLED: bool = os.environ.get(
+    "OCR_REMOTE_ENABLED", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Base URL of the OCR service (no trailing slash).
+OCR_REMOTE_URL: str = os.environ.get(
+    "OCR_REMOTE_URL", "http://promaxgb10-6116:8769"
+).strip().rstrip("/")
+
+# Optional bearer token. Empty = no Authorization header sent. Only needed if
+# the service was started with OCR_SERVER_TOKEN set.
+OCR_REMOTE_TOKEN: str = os.environ.get("OCR_REMOTE_TOKEN", "").strip()
+
+# Per-request timeout. OCR on a warm model is ~0.1-1 s; a cold model or an
+# unusually large scan takes longer, so allow room without hanging a tool call.
+OCR_REMOTE_TIMEOUT_SEC: float = float(
+    os.environ.get("OCR_REMOTE_TIMEOUT_SEC", "60")
+)
+
+# Health-probe timeout (separate and much shorter).
+OCR_REMOTE_HEALTH_TIMEOUT_SEC: float = float(
+    os.environ.get("OCR_REMOTE_HEALTH_TIMEOUT_SEC", "5")
+)
+
+# After a failed probe, wait this long before probing again.
+OCR_REMOTE_UNHEALTHY_COOLDOWN_SEC: float = float(
+    os.environ.get("OCR_REMOTE_UNHEALTHY_COOLDOWN_SEC", "60")
+)
+
+# Probe once at startup so /health is informative on the first request.
+OCR_REMOTE_PROBE_ON_STARTUP: bool = os.environ.get(
+    "OCR_REMOTE_PROBE_ON_STARTUP", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# ---------------------------------------------------------------------------
 # Rate limiting — minimum gap (seconds) between requests to Google
 # ---------------------------------------------------------------------------
 
@@ -555,16 +608,6 @@ MAX_OBJECTS: int = 4
 # context. See ``page_chars_default()`` for how both are applied.
 PAGE_CHARS_DEFAULT: int = 8000
 PAGE_CHARS_CEILING: int = 200_000
-
-# User-facing install hint for the opt-in OCR extra. OCR is not a core
-# dependency because ``rapidocr-onnxruntime`` declares Requires-Python <3.13
-# upstream, which made the whole package uninstallable on 3.13. Every OCR entry
-# point returns this hint instead of raising when the extra is absent.
-OCR_INSTALL_HINT = (
-    "OCR is an optional extra. Install it with: "
-    'pip install "noapi-google-search-mcp[ocr]"'
-)
-
 
 # ---------------------------------------------------------------------------
 # Namespaced settings (NOAPI_MCP_*)

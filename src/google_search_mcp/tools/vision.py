@@ -19,7 +19,6 @@ from ..config import (
     IMAGE_EXTENSIONS,
     MAX_OBJECTS,
     MOBILENET_ONNX_PATH,
-    OCR_INSTALL_HINT,
 )
 from ..core import fsguard
 from ..core.browser import pooled_browser
@@ -35,7 +34,6 @@ from ..server import (
     try_solve_captcha,
 )
 from ..utils.image import is_base64_image, is_local_file, save_base64_image
-from ..utils.singletons import cached_engine
 
 
 # google_lens (reverse image search)
@@ -819,16 +817,18 @@ async def list_images(directory: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# ocr_image (local OCR using RapidOCR - no internet needed)
+# ocr_image (OCR on the remote GPU host)
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def ocr_image(image_source: str) -> str:
-    """Extract text from an image using local OCR. No internet connection needed.
+    """Extract text from an image using OCR on the remote GPU host.
 
-    Uses RapidOCR (PaddleOCR models on ONNX Runtime) to read text from
-    screenshots, documents, photos of signs, labels, receipts, or any image
-    containing text. Runs entirely locally.
+    Reads text from screenshots, documents, photos of signs, labels, receipts,
+    or any image containing text. The OCR engine runs on a GPU host on the LAN
+    (``OCR_REMOTE_URL``) because it needs ~170 MB of ONNX models and steady CPU,
+    which this machine does not have to spare; a page that takes ~1.8 s locally
+    comes back in ~0.13 s there.
 
     Supports local file paths and base64-encoded image data (from drag-and-drop).
 
@@ -841,10 +841,10 @@ async def ocr_image(image_source: str) -> str:
     Args:
         image_source: Local file path or base64-encoded image data.
     """
-    try:
-        from rapidocr_onnxruntime import RapidOCR
-    except ImportError:
-        return OCR_INSTALL_HINT
+    from ..utils import ocr_remote
+
+    if not ocr_remote.is_configured():
+        return str(ocr_remote.ocr_unavailable_error(image_source))
 
     # Handle base64 input
     tmp_base64_path = None
@@ -858,10 +858,11 @@ async def ocr_image(image_source: str) -> str:
         if not os.path.isfile(file_path):
             return f"File not found: {image_source}\nPlease provide a valid file path."
 
-        # One OCR engine for the process: rebuilding RapidOCR per call leaked an
-        # ONNX Runtime arena (~200+ MB) on every invocation.
-        engine = cached_engine("rapidocr", (), RapidOCR)
-        result, elapse = engine(file_path)
+        # Network I/O, so it must not block the event loop.
+        ocr_result = await asyncio.to_thread(ocr_remote.ocr_path, file_path)
+        if ocr_result is None:
+            return str(ocr_remote.ocr_unavailable_error(image_source))
+        result, elapse = ocr_result
 
         if not result:
             return f"No text found in image: {image_source}"

@@ -248,6 +248,26 @@ def _start_whisper_probe() -> None:
         print(f"[startup] whisper_remote probe wiring failed: {exc}", file=sys.stderr)
 
 
+def _start_ocr_probe() -> None:
+    """Kick the remote-OCR health probe (best-effort, non-blocking)."""
+    try:
+        from .utils import ocr_remote
+
+        if not ocr_remote.is_configured():
+            return
+
+        import functools
+        import threading
+
+        threading.Thread(
+            target=functools.partial(ocr_remote.startup_probe),
+            name="ocr-remote-startup-probe",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[startup] ocr_remote probe wiring failed: {exc}", file=sys.stderr)
+
+
 async def _startup_services(server: FastMCP):
     """Start process-wide services and validate cookies. Returns the health server.
 
@@ -268,6 +288,7 @@ async def _startup_services(server: FastMCP):
     health_server.set_loaded_at()
 
     _start_whisper_probe()
+    _start_ocr_probe()
 
     if SKIP_COOKIE_VALIDATION:
         print("SKIP_COOKIE_VALIDATION is set — skipping cookie validation.", file=sys.stderr)

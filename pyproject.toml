@@ -38,9 +38,9 @@ dependencies = [
     # Imported directly, so it must be declared directly:
     #   av            -> extract_video_clip / PyAV clip cutting
     #   onnxruntime   -> the neural-net CAPTCHA solver in captcha.py
-    # OCR (rapidocr-onnxruntime) is NOT here: it has no Python 3.13 wheel
-    # upstream, so a hard dependency makes `pip install` unsatisfiable there.
-    # Install it with the [ocr] extra.
+    # No OCR engine here: OCR runs on a GPU host (OCR_REMOTE_URL). The local
+    # rapidocr-onnxruntime engine held ~170 MB of models resident and spent CPU
+    # on every page; it is also the package that had no Python 3.13 wheel.
     "av>=12.0.0",
     "onnxruntime>=1.20.0",
     # The [default] extra pulls in yt-dlp-ejs, which yt-dlp needs to solve
@@ -66,19 +66,6 @@ Issues = "https://github.com/VincentKaufmann/noapi-google-search-mcp/issues"
 # ── development / test tooling (not installed by default) ──
 # Install with:  pip install -e ".[dev]"
 [project.optional-dependencies]
-# OCR is opt-in because `rapidocr-onnxruntime` declares Requires-Python <3.13
-# upstream (no 3.13 wheel, RapidAI/RapidOCR#579) — as a hard dependency it made
-# `pip install noapi-google-search-mcp` unsatisfiable on Python 3.13.
-# Everything except `ocr_image` and the scanned-PDF fallback in `read_document`
-# works without this extra; those two return an install hint instead of raising.
-ocr = [
-    "rapidocr-onnxruntime>=1.4.0",
-]
-# Convenience: hatchling cannot make one extra reference another, so the OCR
-# requirement is repeated here rather than nested.
-all = [
-    "rapidocr-onnxruntime>=1.4.0",
-]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

@@ -103,7 +103,8 @@ def test_health_payload_has_metrics():
     assert "per_tool" in payload["metrics"]
 
 
-def test_health_checks_rapidocr_onnxruntime_import(monkeypatch):
+def test_health_checks_ocr_remote_not_a_local_module(monkeypatch):
+    """OCR is a remote service, so health must not probe a local package."""
     from google_search_mcp import health_server
 
     imported_modules = []
@@ -117,12 +118,18 @@ def test_health_checks_rapidocr_onnxruntime_import(monkeypatch):
     monkeypatch.setattr(health_server, "_check_ytdlp_ejs", lambda: {"ok": True})
     monkeypatch.setattr(health_server, "_check_js_runtime", lambda: {"ok": True})
     monkeypatch.setattr(health_server, "_check_whisper_remote", lambda: {"ok": True})
+    monkeypatch.setattr(
+        health_server,
+        "_check_ocr_remote",
+        lambda: {"ok": True, "configured": True, "url": "http://ocr.test:8769"},
+    )
 
     dependencies = health_server._check_dependencies()
 
-    assert "rapidocr_onnxruntime" in imported_modules
-    assert "rapidocr" not in imported_modules
-    assert dependencies["rapidocr"]["ok"] is True
+    assert "rapidocr_onnxruntime" not in imported_modules, (
+        "the local OCR engine is gone; health must not look for it"
+    )
+    assert dependencies["ocr_remote"]["configured"] is True
 
 
 def test_metrics_wrapper_records_tool_call():

@@ -1,6 +1,20 @@
 # OCR microservice for `promaxgb10-6116`
 
-Moves OCR off `latitude`. RapidOCR loads ~174 MB of ONNX models and burns CPU on
+> **Status:** a service of this shape is already deployed at
+> `http://promaxgb10-6116:8769` (it reports `provider: CUDAExecutionProvider`,
+> `model_type: medium`, ~1570 MB RSS) and the MCP server is configured to use
+> it. That deployment is a *different implementation* with a slightly richer
+> health payload (`status`, `version`, `gpu`, `model_type`, `device_id`,
+> `rss_mb`, `uptime_s`, `auth_required`). This file is the reference
+> implementation kept in-repo so the contract is documented and reproducible —
+> you do not need to deploy it twice.
+>
+> The two agree on the two things the client depends on:
+> `POST /ocr` with a multipart `file` field, returning
+> `{"result": [[box, text, confidence], …], "elapse": [det, cls, rec]}`.
+> Extra response fields are ignored by the client.
+
+Moves OCR off `latitude`. RapidOCR loads ~170 MB of ONNX models and burns CPU on
 every page; this service does that work on the GPU host instead and exposes it
 over HTTP on **port 8769**.
 

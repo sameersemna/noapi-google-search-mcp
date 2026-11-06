@@ -103,12 +103,28 @@ def _dependency_report() -> tuple[str, bool]:
     except Exception as exc:  # pragma: no cover - defensive
         _whisper_row = ("whisper remote", False, f"check failed: {exc}", False)
     rows.append(_whisper_row)
-    rows.append((
-        "rapidocr (OCR extra)",
-        _has_module("rapidocr_onnxruntime"),
-        'pip install "noapi-google-search-mcp[ocr]"',
-        False,
-    ))
+
+    # OCR is remote-only too: report the host, not a local package.
+    _ocr_row: tuple[str, bool, str, bool]
+    try:
+        from . import config as _cfg2
+        from .utils import ocr_remote as _or
+
+        _ocr_configured = _or.is_configured()
+        _ocr_host = _cfg2.OCR_REMOTE_URL or "(OCR_REMOTE_URL unset)"
+        _ocr_reachable = bool(_or.probe().get("ok")) if _ocr_configured else False
+        _ocr_row = (
+            f"OCR remote ({_ocr_host})",
+            _ocr_reachable,
+            "set OCR_REMOTE_URL to the OCR host (e.g. http://promaxgb10-6116:8769)"
+            if not _ocr_configured
+            else "OCR host unreachable — ocr_image and scanned PDFs will fail",
+            False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _ocr_row = ("OCR remote", False, f"check failed: {exc}", False)
+    rows.append(_ocr_row)
+
     rows.append(("boto3 (S3 optional)", _has_module("boto3"), "pip install boto3", False))
     rows.append((
         "starlette+uvicorn (health)",

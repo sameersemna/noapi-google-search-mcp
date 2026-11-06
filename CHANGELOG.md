@@ -87,6 +87,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OCR now runs on the remote GPU host; the local engine is removed.**
+  `rapidocr-onnxruntime` (and the `[ocr]`/`[all]` extras it lived in) is gone,
+  nothing in the code imports it, and `ocr_image` plus the scanned-PDF fallback
+  in `read_document` POST to `OCR_REMOTE_URL` instead. Measured on the same 6 KB
+  test image: **~1.8 s locally vs 0.13 s on the GPU host**, and the models
+  (~170 MB resident) no longer live on this machine. The response shape is
+  RapidOCR's native one, so the callers' sorting and formatting are unchanged.
+  As with transcription there is no local fallback — an unreachable host raises a
+  specific error naming the URL, the file and the setting, rather than silently
+  falling back to a much slower path. `/health` reports `ocr_remote`
+  (url, probe latency, call counters) and shows `degraded` when the host is
+  unreachable, since the other tools still work.
+  Also removes the orphaned `shapely` and GUI `opencv-python` packages that only
+  RapidOCR pulled in (the declared, headless `opencv-python-headless` remains).
 - **Transcription now always runs on the remote GPU host; the local Whisper
   stack is removed.** `faster-whisper` and `ctranslate2` are no longer
   dependencies and nothing in the code imports them. Transcription is delegated

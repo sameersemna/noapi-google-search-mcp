@@ -7,8 +7,8 @@ Extracted from the monolithic server.py. Registers its tools on the shared
 import asyncio
 import hashlib
 import imaplib
-import importlib.util
 import json
+import logging
 import os
 import re
 import subprocess
@@ -30,7 +30,6 @@ from ..config import (
     IMAP_SERVERS,
     MAX_DOCUMENT_CHARS,
     MAX_EMAIL_BODY_CHARS,
-    OCR_INSTALL_HINT,
     TRANSCRIPT_CACHE_DIR,
 )
 from ..core import fsguard, idempotency, netguard
@@ -45,8 +44,9 @@ from ..server import (
     format_error,
     strip_html,
 )
-from ..utils.singletons import cached_engine
 from ..utils.text import format_timestamp
+
+log = logging.getLogger("google_search_mcp.web_utils")
 
 
 def _cap_text(text: str, limit: int, label: str = "") -> str:
@@ -401,16 +401,14 @@ async def convert_media(
 
 
 def _ocr_available() -> bool:
-    """True if the opt-in OCR extra (``rapidocr-onnxruntime``) is importable.
+    """True if the OCR service is configured.
 
-    Resolved with ``find_spec`` rather than an import: importing RapidOCR pulls
-    in onnxruntime and its model runtime, which is exactly the cost the optional
-    extra exists to avoid paying on the common (text-PDF) path.
+    OCR runs on the GPU host (``OCR_REMOTE_URL``); there is no local engine, so
+    this is a configuration check rather than a package check.
     """
-    try:
-        return importlib.util.find_spec("rapidocr_onnxruntime") is not None
-    except (ImportError, ValueError):
-        return False
+    from ..utils import ocr_remote
+
+    return ocr_remote.is_configured()
 
 
 def _read_pdf_text(file_path: str) -> str:
@@ -426,17 +424,16 @@ def _read_pdf_text(file_path: str) -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Attempt 2: OCR via our existing pipeline (for scanned PDFs).
-    # OCR is an *optional extra*, so a missing engine is an expected state, not
-    # an error to swallow: bail out here and let the caller show the install
-    # hint. (This used to hide inside ``except Exception: pass``, so a scanned
-    # PDF with no OCR installed looked like a blank document.)
+    # Attempt 2: OCR on the GPU host (for scanned PDFs).
+    # OCR is a *remote* service now, so an unconfigured host is an expected
+    # state, not an error to swallow: bail out here and let the caller say so.
+    # (This used to hide inside ``except Exception: pass``, so a scanned PDF with
+    # no OCR available looked like a blank document.)
     if not _ocr_available():
         return ""
 
     try:
-        from rapidocr_onnxruntime import RapidOCR
-        import cv2
+        from ..utils import ocr_remote
         import tempfile
 
         # Convert PDF pages to images via pdftoppm
@@ -448,12 +445,19 @@ def _read_pdf_text(file_path: str) -> str:
             if img_proc.returncode != 0:
                 return ""
 
-            # Shared with ocr_image: one RapidOCR engine per process, not one
-            # per PDF page batch (each rebuild leaked an ONNX Runtime arena).
-            ocr = cached_engine("rapidocr", (), RapidOCR)
             all_text: list[str] = []
             for img_file in sorted(Path(tmpdir).glob("*.png")):
-                result, _ = ocr(str(img_file))
+                ocr_result = ocr_remote.ocr_path(str(img_file))
+                if ocr_result is None:
+                    # Host unreachable mid-document: report what we have rather
+                    # than pretending the remaining pages were blank.
+                    log.warning(
+                        "OCR host failed on %s; returning %d page(s) of text",
+                        img_file.name,
+                        len(all_text),
+                    )
+                    break
+                result, _elapse = ocr_result
                 if result:
                     page_text = "\n".join(line[1] for line in result)
                     all_text.append(page_text)
@@ -525,12 +529,17 @@ async def read_document(
     if ext == ".pdf":
         text = await asyncio.to_thread(_read_pdf_text, file_path)
         if not text:
-            scanned_hint = (
-                f"For scanned PDFs, {OCR_INSTALL_HINT}"
-                if not _ocr_available()
-                else "For scanned PDFs, OCR ran but found no text — "
-                "the page may be blank or too low-resolution."
-            )
+            if not _ocr_available():
+                from ..utils import ocr_remote
+
+                scanned_hint = "For scanned PDFs: " + str(
+                    ocr_remote.ocr_unavailable_error()
+                )
+            else:
+                scanned_hint = (
+                    "For scanned PDFs, OCR ran but found no text "
+                    "— the page may be blank or too low-resolution."
+                )
             return (
                 f"Could not extract text from {filename}.\n"
                 "For text PDFs, install poppler-utils: sudo apt install poppler-utils\n"
