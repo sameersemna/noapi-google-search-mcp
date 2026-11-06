@@ -105,6 +105,13 @@ _AUTH_REJECTION_MARKERS = (
     "private video",
     "members-only",
     "video unavailable",
+    # yt-dlp's actual wording is "This video is unavailable" — the extra "is"
+    # meant the marker above never matched, so a dead video id produced the
+    # useless "lookup failed, please try again" instead of naming the problem.
+    "video is unavailable",
+    "no longer available",
+    "removed by the uploader",
+    "account associated with this video has been terminated",
 )
 
 
@@ -129,10 +136,19 @@ def describe_error(exc: BaseException) -> str | None:
     cookie_path = config.YOUTUBE_COOKIE_PATH
     present = bool(cookie_path and os.path.isfile(cookie_path))
 
-    if "video unavailable" in text or "private video" in text:
+    if (
+        "video unavailable" in text
+        or "video is unavailable" in text
+        or "private video" in text
+        or "no longer available" in text
+        or "removed by the uploader" in text
+        or "has been terminated" in text
+    ):
         return (
-            "YouTube reports the video as unavailable or private, so there are "
-            "no captions or audio to fetch. Check the URL in a browser."
+            "YouTube reports the video as unavailable, private or removed, so "
+            "there are no captions or audio to fetch. Check the URL in a browser "
+            "— a deleted video can never be fetched, however many times it is "
+            "retried."
         )
     if "members-only" in text or "requires payment" in text:
         return (

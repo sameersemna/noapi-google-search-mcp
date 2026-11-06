@@ -385,6 +385,13 @@ async def youtube_search(query: str, limit: int = 10) -> str:
     if not ytdlp.is_available():
         return "yt-dlp is required. Install with: pip install yt-dlp"
 
+    query = (query or "").strip()
+    if not query:
+        return (
+            "A search query is required, e.g. youtube_search(query=\"memory "
+            "bandwidth explained\")."
+        )
+
     limit = max(1, min(int(limit), 25))
     try:
         entries = await asyncio.to_thread(ytdlp.search_videos, query, limit)
@@ -438,6 +445,13 @@ async def list_channel_videos(target: str, limit: int = 20) -> str:
     """
     if not ytdlp.is_available():
         return "yt-dlp is required. Install with: pip install yt-dlp"
+
+    target = (target or "").strip()
+    if not target:
+        return (
+            "A channel target is required: an @handle, a UC... channel id, a "
+            "channel name, or a channel/playlist URL."
+        )
 
     limit = max(1, min(int(limit), 50))
     try:

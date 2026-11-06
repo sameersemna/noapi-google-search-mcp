@@ -65,14 +65,22 @@ def test_bot_rejection_mentions_a_missing_cookie_file(monkeypatch, tmp_path):
     "text, expected",
     [
         ("ERROR: [youtube] x: Private video. Sign in if you have been granted access",
-         "unavailable or private"),
-        ("ERROR: [youtube] x: Video unavailable", "unavailable or private"),
+         "private"),
+        ("ERROR: [youtube] x: Video unavailable", "unavailable"),
+        # yt-dlp's real wording for a dead video id. The marker list used to hold
+        # only "video unavailable", so the extra "is" meant a deleted video was
+        # reported as "lookup failed, please try again" — advice that can never
+        # work. This case is the regression guard.
+        ("ERROR: [youtube] x: This video is unavailable", "unavailable"),
+        ("ERROR: [youtube] x: This video has been removed by the uploader",
+         "unavailable"),
         ("ERROR: [youtube] x: This video is members-only", "members-only"),
     ],
 )
 def test_unavailable_video_is_explained(text, expected):
     msg = ytdlp.describe_error(_YtdlpError(text))
     assert msg is not None and expected in msg
+    assert "try again" not in msg.casefold(), "retrying cannot fix a dead video"
 
 
 @pytest.mark.parametrize(
