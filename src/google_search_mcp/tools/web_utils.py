@@ -318,7 +318,7 @@ async def convert_media(
         proc = await asyncio.to_thread(
             subprocess.run,
             ["ffmpeg", "-version"],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=5, stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             return (
@@ -354,7 +354,13 @@ async def convert_media(
 
     audio_fmts = {"mp3", "wav", "m4a", "flac", "ogg", "aac", "wma", "opus"}
 
-    cmd = ["ffmpeg", "-i", input_path, "-y"]
+    # ``-nostdin`` and ``stdin=DEVNULL`` are both needed. ffmpeg reads stdin for
+    # its interactive keyboard handler ("press q to stop"); a process in a
+    # background process group that reads its controlling terminal is stopped by
+    # SIGTTIN, and subprocess.run then waits forever. Observed live: a conversion
+    # hung for 180 s with the child in state T (`do_signal_stop`), because the
+    # service had been started from a shell and inherited the pty.
+    cmd = ["ffmpeg", "-nostdin", "-i", input_path, "-y"]
 
     if output_format in audio_fmts:
         cmd.extend(["-vn", "-b:a", q["ab"]])
@@ -372,6 +378,7 @@ async def convert_media(
         proc = await asyncio.to_thread(
             subprocess.run, cmd,
             capture_output=True, text=True, timeout=600,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return "Conversion timed out (10 minute limit)."
@@ -418,6 +425,7 @@ def _read_pdf_text(file_path: str) -> str:
         proc = subprocess.run(
             ["pdftotext", "-layout", file_path, "-"],
             capture_output=True, text=True, timeout=60,
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip()
@@ -441,6 +449,7 @@ def _read_pdf_text(file_path: str) -> str:
             img_proc = subprocess.run(
                 ["pdftoppm", "-png", "-r", "200", file_path, os.path.join(tmpdir, "page")],
                 capture_output=True, timeout=120,
+                stdin=subprocess.DEVNULL,
             )
             if img_proc.returncode != 0:
                 return ""
@@ -1326,6 +1335,7 @@ async def upload_to_s3(
             try:
                 r = subprocess.run(
                     [name, "--version"], capture_output=True, timeout=5,
+                    stdin=subprocess.DEVNULL,
                 )
                 if r.returncode == 0:
                     mc_path = name
@@ -1357,6 +1367,7 @@ async def upload_to_s3(
                 stat = subprocess.run(
                     [mc_path, "stat", f"{alias}/{bucket}/{key}"],
                     capture_output=True, text=True, timeout=30, env=env,
+                    stdin=subprocess.DEVNULL,
                 )
                 if stat.returncode == 0:
                     raise _S3ObjectExists(
@@ -1366,6 +1377,7 @@ async def upload_to_s3(
             r = subprocess.run(
                 [mc_path, "cp", file_path, f"{alias}/{bucket}/{key}"],
                 capture_output=True, text=True, timeout=300, env=env,
+                stdin=subprocess.DEVNULL,
             )
             if r.returncode == 0:
                 return f"s3://{bucket}/{key}"
@@ -1390,6 +1402,7 @@ async def upload_to_s3(
                     head_cmd.extend(["--endpoint-url", endpoint])
                 head = subprocess.run(
                     head_cmd, capture_output=True, text=True, timeout=30, env=env,
+                    stdin=subprocess.DEVNULL,
                 )
                 if head.returncode == 0:
                     raise _S3ObjectExists(
@@ -1398,6 +1411,7 @@ async def upload_to_s3(
 
             r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300, env=env,
+                stdin=subprocess.DEVNULL,
             )
             if r.returncode == 0:
                 return f"s3://{bucket}/{key}"

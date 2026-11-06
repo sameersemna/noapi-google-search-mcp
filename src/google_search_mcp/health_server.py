@@ -246,7 +246,7 @@ def _get_git_info(workspace: Path | None = None) -> dict[str, Any]:
                 r = subprocess.run(
                     ["git", *args],
                     capture_output=True, text=True, timeout=2,
-                    cwd=cwd,
+                    cwd=cwd, stdin=subprocess.DEVNULL,
                 )
                 if r.returncode == 0:
                     return r.stdout.strip()

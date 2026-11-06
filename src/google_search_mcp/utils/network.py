@@ -150,6 +150,7 @@ def _resolve_youtube_by_title(title: str, timeout: int = 10) -> str:
         r = subprocess.run(
             cmd,
             capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
         if r.returncode == 0:
             vid = r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""
