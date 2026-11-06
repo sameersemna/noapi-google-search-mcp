@@ -89,6 +89,74 @@ def resolve_cookiefile(url: str) -> str | None:
     return None
 
 
+# ── actionable errors ──────────────────────────────────────────────────────
+
+# Phrases yt-dlp emits when YouTube rejects the request as a bot rather than
+# returning data. Matched case-insensitively against the exception text.
+_AUTH_REJECTION_MARKERS = (
+    "sign in to confirm",
+    "not a bot",
+    "use --cookies",
+    "cookies for the authentication",
+    "confirm your age",
+    "this video requires payment",
+    "private video",
+    "members-only",
+    "video unavailable",
+)
+
+
+def describe_error(exc: BaseException) -> str | None:
+    """Turn a yt-dlp exception into a message that names the remedy.
+
+    yt-dlp's own text is developer-facing: *"Sign in to confirm you're not a bot.
+    Use --cookies-from-browser or --cookies for the authentication."* Passed
+    through ``format_error`` it collapses to *"Subtitle lookup failed. Please try
+    again."* — which hides the only useful fact, that YouTube rejected the
+    request and the cookie jar needs refreshing. Retrying cannot fix that.
+
+    Returns:
+        A user-facing explanation for a recognised condition, or ``None`` when
+        the exception is something else and the caller should fall back to a
+        generic message.
+    """
+    text = str(exc).casefold()
+    if not any(marker in text for marker in _AUTH_REJECTION_MARKERS):
+        return None
+
+    cookie_path = config.YOUTUBE_COOKIE_PATH
+    present = bool(cookie_path and os.path.isfile(cookie_path))
+
+    if "video unavailable" in text or "private video" in text:
+        return (
+            "YouTube reports the video as unavailable or private, so there are "
+            "no captions or audio to fetch. Check the URL in a browser."
+        )
+    if "members-only" in text or "requires payment" in text:
+        return (
+            "YouTube reports this video as members-only or paid, so it cannot "
+            "be fetched anonymously."
+        )
+
+    if present:
+        reason = (
+            f"YouTube rejected the request as automated even though a cookie file "
+            f"is present at {cookie_path} — the signed-in session behind it is no "
+            f"longer valid."
+        )
+    else:
+        reason = f"No YouTube cookie file was found at {cookie_path}."
+
+    return (
+        f"{reason} Refresh the cookies by opening YouTube logged in:\n"
+        f"  noapi-google-search-mcp --manual-browser https://www.youtube.com\n"
+        f"then export the browser cookies to {cookie_path} in Netscape format "
+        f"(the '# Netscape HTTP Cookie File' layout yt-dlp expects). Until then "
+        f"YouTube-backed tools (list_subtitles, transcribe_video, "
+        f"extract_video_clip, feed auto-transcription) cannot reach it."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Option building
 # ---------------------------------------------------------------------------

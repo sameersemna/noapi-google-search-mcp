@@ -73,16 +73,42 @@ EMPTY_MARKERS = (
     "could not find",
     "empty",
 )
+# Upstream authentication/consent walls (yt-dlp's YouTube bot check, expired
+# cookies). Not a defect, and retrying cannot fix it, so these are reported as
+# NEEDS_CONFIG with the reason rather than as FAIL — and, just as important, not
+# as PASS, which is what would happen if the message fell through to the
+# expectation check because it contains no failure marker.
+AUTH_MARKERS = (
+    "rejected the request as automated",
+    "refresh the cookies",
+    "sign in to confirm",
+    "not a bot",
+)
+# Markers that mean the tool itself reported a problem rather than data.
+#
+# Matched against the whole reply, so every entry must be a phrase that real
+# content would not contain by accident. Bare English words were removed after
+# `get_feed_items` was scored FAIL on a BBC headline reading "bus crashes in
+# France": an aggregator's payload legitimately contains words like crash,
+# cancelled and failed. A genuine server crash never reaches this point anyway —
+# it surfaces as a raised exception or a timeout, both of which run_group already
+# reports as FAIL.
 FAILURE_MARKERS = (
     "raw page content",
     "could not extract",
     "lookup failed",
-    "failed.",
     "traceback",
     "unhandled",
     "iserror",
-    "cancelled",
-    "crash",
+)
+# Short tool-side failures ("Google Maps search failed.") are matched only in the
+# opening line, so a long, legitimately failing-worded result is not mistaken for
+# a broken tool.
+OPENING_FAILURE_MARKERS = (
+    "failed.",
+    "failed to ",
+    "error:",
+    "exception:",
 )
 CHROME_WORDS = (
     "skip to main content",
@@ -217,8 +243,14 @@ def classify(case: Case, result: Any, text: str) -> tuple[str, str]:
             return "BLOCKED", "bot detection"
         return "FAIL", f"isError: {text.strip()[:80]}"
 
-    if any(m in low for m in FAILURE_MARKERS):
-        marker = next(m for m in FAILURE_MARKERS if m in low)
+    if any(m in low for m in AUTH_MARKERS):
+        return "NEEDS_CONFIG", "upstream auth wall (refresh cookies)"
+
+    opening = text.strip().splitlines()[0].casefold() if text.strip() else ""
+    marker = next((m for m in FAILURE_MARKERS if m in low), None)
+    if marker is None:
+        marker = next((m for m in OPENING_FAILURE_MARKERS if m in opening), None)
+    if marker is not None:
         if any(m in low for m in BLOCKED_MARKERS):
             return "BLOCKED", "bot detection"
         return "FAIL", f"failure marker {marker!r}"

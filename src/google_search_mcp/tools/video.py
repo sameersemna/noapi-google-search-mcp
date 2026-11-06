@@ -401,7 +401,7 @@ async def transcribe_video(
         )
 
     except Exception as e:
-        return format_error("Video transcription", e)
+        return ytdlp.describe_error(e) or format_error("Video transcription", e)
 
     finally:
         try:
@@ -546,7 +546,7 @@ async def list_subtitles(url: str) -> str:
     try:
         info = await asyncio.to_thread(ytdlp.list_subtitles, url)
     except Exception as e:
-        return format_error("Subtitle lookup", e)
+        return ytdlp.describe_error(e) or format_error("Subtitle lookup", e)
 
     manual = info.get("manual") or {}
     automatic = info.get("automatic") or {}
