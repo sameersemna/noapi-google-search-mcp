@@ -15,27 +15,43 @@ from google_search_mcp.utils import ytdlp
 
 
 # ── cookie resolution ──────────────────────────────────────────────────
+#
+# These create their own jars in tmp_path. They used to read the real
+# cookies/youtube_cookies.txt, which made the suite depend on a credential file
+# that is gitignored, machine-specific, and legitimately absent on a fresh
+# checkout — so the tests failed for a reason that had nothing to do with the code.
 
 
-def test_resolve_cookiefile_youtube():
+@pytest.fixture
+def jar_paths(monkeypatch, tmp_path):
+    yt = tmp_path / "youtube_cookies.txt"
+    gg = tmp_path / "google_cookies.txt"
+    yt.write_text("# Netscape HTTP Cookie File\n")
+    gg.write_text("# Netscape HTTP Cookie File\n")
+    monkeypatch.setattr(ytdlp.config, "YOUTUBE_COOKIE_PATH", str(yt))
+    monkeypatch.setattr(ytdlp.config, "GOOGLE_COOKIE_PATH", str(gg))
+    return yt, gg
+
+
+def test_resolve_cookiefile_youtube(jar_paths):
+    yt, _gg = jar_paths
     path = ytdlp.resolve_cookiefile("https://www.youtube.com/watch?v=abc")
-    assert path is not None
-    assert path.endswith("youtube_cookies.txt")
+    assert path == str(yt)
 
 
-def test_resolve_cookiefile_youtu_be_shortlink():
+def test_resolve_cookiefile_youtu_be_shortlink(jar_paths):
+    yt, _gg = jar_paths
     path = ytdlp.resolve_cookiefile("https://youtu.be/abc")
-    assert path is not None
-    assert path.endswith("youtube_cookies.txt")
+    assert path == str(yt)
 
 
-def test_resolve_cookiefile_google():
+def test_resolve_cookiefile_google(jar_paths):
+    _yt, gg = jar_paths
     path = ytdlp.resolve_cookiefile("https://www.google.com/search?q=x")
-    assert path is not None
-    assert path.endswith("google_cookies.txt")
+    assert path == str(gg)
 
 
-def test_resolve_cookiefile_unrelated_host():
+def test_resolve_cookiefile_unrelated_host(jar_paths):
     """Sending the wrong cookie jar is worse than sending none."""
     assert ytdlp.resolve_cookiefile("https://vimeo.com/12345") is None
 
@@ -70,9 +86,10 @@ def test_resolve_cookiefile_all_missing(monkeypatch, tmp_path):
 # ── option building ────────────────────────────────────────────────────
 
 
-def test_build_ydl_opts_includes_cookiefile():
+def test_build_ydl_opts_includes_cookiefile(jar_paths):
+    yt, _gg = jar_paths
     opts = ytdlp.build_ydl_opts("https://www.youtube.com/watch?v=abc")
-    assert opts["cookiefile"].endswith("youtube_cookies.txt")
+    assert opts["cookiefile"] == str(yt)
 
 
 def test_build_ydl_opts_omits_cookiefile_for_other_hosts():

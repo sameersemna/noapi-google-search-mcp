@@ -102,7 +102,7 @@ async def _session(url: str, profile: str, timeout_sec: int) -> int:
                     await asyncio.wait_for(closed.wait(), timeout=SAVE_INTERVAL_SEC)
                 # Persist while the context is still alive.
                 with contextlib.suppress(Exception):
-                    await save_cookies(context)
+                    await _save_all(context)
                 if deadline is not None and asyncio.get_running_loop().time() >= deadline:
                     print(
                         f"[manual-browser] timeout of {timeout_sec}s reached",
@@ -112,7 +112,7 @@ async def _session(url: str, profile: str, timeout_sec: int) -> int:
                     break
         finally:
             with contextlib.suppress(Exception):
-                await save_cookies(context)
+                await _save_all(context)
             with contextlib.suppress(Exception):
                 await context.close()
 
@@ -123,6 +123,30 @@ async def _session(url: str, profile: str, timeout_sec: int) -> int:
         flush=True,
     )
     return 0
+
+
+async def _save_all(context) -> None:
+    """Persist cookies to the browser store **and** to yt-dlp's Netscape jars.
+
+    Two stores, two formats: the browser tools read the JSON file, yt-dlp reads
+    the Netscape files. Saving only the JSON is why logging in here fixed Google
+    scraping but left YouTube rejecting requests with "Sign in to confirm you're
+    not a bot".
+    """
+    with contextlib.suppress(Exception):
+        from .browser import export_ytdlp_cookie_files, save_cookies
+
+        await save_cookies(context)
+    with contextlib.suppress(Exception):
+        from .browser import export_ytdlp_cookie_files
+
+        written = export_ytdlp_cookie_files(await context.cookies())
+        for path, count in written.items():
+            print(
+                f"[manual-browser] wrote {count} cookie(s) to {path} (yt-dlp)",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def run_manual_browser(

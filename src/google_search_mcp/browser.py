@@ -7,13 +7,13 @@ human-like interaction delays.
 
 import asyncio
 import json
+import logging
 import os
 import random
 import sys
 import threading
 import time
 from datetime import datetime, timezone
-
 from playwright.async_api import BrowserContext, Page
 
 from . import config
@@ -29,6 +29,8 @@ from .config import (
     STEALTH_JS,
     USER_AGENT,
 )
+
+log = logging.getLogger("google_search_mcp.browser")
 
 
 # ── Viewport randomization ──
@@ -744,9 +746,64 @@ def _write_netscape_cookie_file(filepath: str, cookies: list[dict], source_domai
         f.write(content)
 
 
+def _resolve_cookie_path(path: str) -> str:
+    """Make a configured cookie path absolute.
+
+    ``YOUTUBE_COOKIE_PATH`` / ``GOOGLE_COOKIE_PATH`` default to relative paths
+    (``./cookies/...``), which only resolve correctly when the process runs from
+    the repository root — true for the systemd unit, not necessarily for an
+    operator typing the CLI from elsewhere. Resolve against the repo root so both
+    write to the file the server actually reads.
+    """
+    if os.path.isabs(path):
+        return path
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.normpath(os.path.join(repo_root, path))
+
+
+def export_ytdlp_cookie_files(cookies: list[dict]) -> dict[str, int]:
+    """Write the Netscape jars yt-dlp reads, from Playwright cookie dicts.
+
+    yt-dlp cannot read the JSON cookie store the browser tools use; it needs
+    Netscape format. Without this, "log in with --manual-browser" fixed Google
+    scraping but left YouTube broken, because ``cookies/youtube_cookies.txt``
+    went stale — which is exactly the state that produced
+    "Sign in to confirm you're not a bot".
+
+    A jar is only written when the corresponding cookies were actually seen. An
+    empty selection must never truncate a good file: a failed login would then
+    destroy working credentials.
+
+    Returns:
+        ``{path: cookie_count}`` for the files that were written.
+    """
+    groups = {
+        "youtube": ([".youtube.com", "youtube.com", ".youtu.be"], config.YOUTUBE_COOKIE_PATH),
+        "google": ([".google.com", "google.com"], config.GOOGLE_COOKIE_PATH),
+    }
+
+    written: dict[str, int] = {}
+    for name, (domains, path) in groups.items():
+        if not path:
+            continue
+        selected = [
+            c for c in cookies
+            if any((c.get("domain") or "").endswith(d) for d in domains)
+        ]
+        if not selected:
+            continue
+        target = _resolve_cookie_path(path)
+        try:
+            _write_netscape_cookie_file(target, selected, source_domain=f"{name} (manual browser)")
+        except Exception as exc:  # pragma: no cover - disk/permission issues
+            log.warning("could not write %s cookie jar to %s: %s", name, target, exc)
+            continue
+        written[target] = len(selected)
+    return written
+
+
 async def login_and_save_cookies() -> bool:
     """Open a headful browser for the user to manually log into Google.
-
     The browser window appears visibly (not headless). The user logs into
     their Google account manually. Once login is detected, cookies are
     saved to google_cookies.txt and youtube_cookies.txt, plus the auto-save
