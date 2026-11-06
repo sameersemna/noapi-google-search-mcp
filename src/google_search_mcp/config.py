@@ -824,6 +824,18 @@ MAX_EMAIL_BODY_CHARS: int = env_int("MAX_EMAIL_BODY_CHARS", 2000)
 # ── Feeds subsystem (Phase 8) ──
 # How many subscriptions to refresh in parallel inside check_feeds.
 FEEDS_CONCURRENCY: int = env_int("FEEDS_CONCURRENCY", 8)
+# Wall-clock budget for the YouTube auto-transcription phase inside check_feeds.
+# Transcription only became reachable once the audio codec reached the remote,
+# and 6 channels x 5 videos x ~60 s is half an hour of GPU work — far longer
+# than any MCP client waits before giving up. Once the budget is spent the
+# remaining videos are left for the next check, which is cheap because each
+# finished video is cached.
+#
+# Keep this well under a client's patience: refreshing 32 feeds already costs
+# ~140 s on its own, and a single Whisper call on a long video can run for
+# minutes without the budget being able to interrupt it (the check only runs
+# between videos). 0 disables the budget (unbounded).
+FEEDS_TRANSCRIBE_BUDGET_SEC: int = env_int("FEEDS_TRANSCRIBE_BUDGET_SEC", 90)
 # Retention: prune stored items after each check. 0 = keep everything (default,
 # preserving the historical behaviour).
 FEEDS_MAX_ITEMS_PER_SUB: int = env_int("FEEDS_MAX_ITEMS_PER_SUB", 0)

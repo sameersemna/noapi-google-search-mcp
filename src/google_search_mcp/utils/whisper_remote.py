@@ -458,7 +458,8 @@ def startup_probe() -> None:
             )
         else:
             log.warning(
-                "Remote Whisper probe FAILED: %s — %s. Will fall back to local.",
+                "Remote Whisper probe FAILED: %s — %s. Transcription will fail "
+                "until the host answers: there is no local model.",
                 config.WHISPER_REMOTE_URL,
                 result.get("error"),
             )
@@ -788,8 +789,9 @@ def _transcribe_remote_upload(
         _record_failure(err)
         _set_probe(False, err, round((_now() - started) * 1000, 1))
         log.warning(
-            "Remote Whisper unreachable (%s); falling back to local. "
-            "Cooldown %s s before retry.",
+            "Remote Whisper unreachable (%s). There is no local model, so this "
+            "transcription fails; nothing is uploaded. Cooling down for %s s "
+            "before the next attempt.",
             err,
             config.WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC,
         )

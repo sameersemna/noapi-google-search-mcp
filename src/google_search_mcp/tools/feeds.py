@@ -8,9 +8,11 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -42,6 +44,8 @@ from ..server import (
     strip_html,
 )
 from ..utils import ytdlp
+
+log = logging.getLogger("google_search_mcp.feeds")
 
 
 # Database
@@ -566,6 +570,20 @@ def _update_subscription_meta(
         conn.close()
 
 
+def _cached_transcript_text(cache_path: str) -> str:
+    """Read the formatted transcript back out of a cache entry.
+
+    The feed path needs the same text the other tools see, so it reads what
+    ``_format_and_cache_transcript`` wrote rather than re-deriving a header.
+    Returns an empty string when the entry is missing or unreadable.
+    """
+    try:
+        with open(cache_path) as f:
+            return str(json.load(f).get("transcript") or "")
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
 async def _auto_transcribe_youtube_isolated(
     sub_id: int, items: list[dict], ctx: Context = None
 ) -> str:
@@ -802,6 +820,10 @@ async def _auto_transcribe_youtube(
     if not _whisper_remote.is_configured():
         return " (auto-transcription skipped: WHISPER_REMOTE_URL not set)"
 
+    # Imported here, not at module scope: ``video`` imports from ``server``,
+    # which imports the tool modules — a top-level import would close the cycle.
+    from .video import _format_and_cache_transcript, _load_segments
+
     os.makedirs(TRANSCRIBE_CACHE_DIR, exist_ok=True)
     os.makedirs(TRANSCRIPT_CACHE_DIR, exist_ok=True)
 
@@ -821,10 +843,23 @@ async def _auto_transcribe_youtube(
     total_pending = len(uncached)
     batch = uncached[:max_videos]
 
+    # Bound the whole phase. Now that transcription actually reaches the GPU
+    # host, 6 channels x 5 videos x ~60 s is half an hour of work — far longer
+    # than any MCP client waits before giving up on the call. Whatever does not
+    # fit is left for the next check, and each video finished here is cached, so
+    # progress accumulates instead of being thrown away.
+    budget = max(0, int(getattr(config, "FEEDS_TRANSCRIBE_BUDGET_SEC", 240)))
+    deadline = (time.monotonic() + budget) if budget else None
+
     transcribed = 0
     errors: list[str] = []
+    out_of_time = 0
 
     for i, video_url in enumerate(batch):
+        if deadline is not None and time.monotonic() > deadline:
+            out_of_time = len(batch) - i
+            break
+
         audio_path: str | None = None
         try:
             if ctx:
@@ -833,38 +868,59 @@ async def _auto_transcribe_youtube(
                     message=f"Auto-transcribing video {i + 1}/{len(batch)}...",
                 )
 
-            # Download audio (in thread — keeps event loop alive)
-            dl_info = await asyncio.to_thread(
-                _download_audio, video_url, TRANSCRIBE_CACHE_DIR,
-            )
-            audio_path = dl_info["audio_path"]
-
-            # Transcribe audio (in thread)
-            whisper_result = await asyncio.to_thread(
-                _transcribe_audio, audio_path, model_size, "",
-            )
-
-            segments = whisper_result["segments"]
-            if not segments:
-                errors.append(f"no speech: {video_url}")
-                continue
-
-            # Build transcript text (same format as transcribe_video tool)
-            transcript_lines = [
-                "Video Transcript",
-                f"Title: {dl_info['title']}",
-                f"Duration: {format_timestamp(dl_info['duration'])}",
-                f"Language: {whisper_result['language']}\n",
-            ]
-            for seg in segments:
-                ts = format_timestamp(seg["start"])
-                transcript_lines.append(f"[{ts}] {seg['text']}")
-            full_transcript = "\n".join(transcript_lines)
-
-            # Save to disk cache (reusable by transcribe_video tool)
+            # ── Platform captions first ────────────────────────────────
+            # This path existed (transcribe_video and search_transcript both
+            # use it) but the feed never called it: it went straight to
+            # downloading audio and paying ~60 s of GPU time per video. Captions
+            # cost ~6 s, need no audio and no GPU, and are *exact* rather than a
+            # reconstruction. _load_segments also writes the transcript cache,
+            # so subsequent tools reuse it for free.
+            segments, _title, source = await _load_segments(video_url, model_size)
             cache_path = _transcript_cache_path(video_url, model_size)
-            with open(cache_path, "w") as f:
-                json.dump({"url": video_url, "transcript": full_transcript}, f)
+
+            if segments:
+                full_transcript = _cached_transcript_text(cache_path)
+                if not full_transcript:
+                    errors.append(f"captions unusable: {video_url}")
+                    continue
+            else:
+                # ── No captions anywhere: fetch audio for the GPU host ──
+                dl_info = await asyncio.to_thread(
+                    _download_audio, video_url, TRANSCRIBE_CACHE_DIR,
+                )
+                audio_path = dl_info["audio_path"]
+
+                whisper_result = await asyncio.to_thread(
+                    _transcribe_audio, audio_path, model_size, "",
+                )
+                segments = whisper_result["segments"]
+                if not segments:
+                    errors.append(f"no speech: {video_url}")
+                    continue
+
+                # Write the SAME cache shape the other tools use. This used to
+                # store only {"url", "transcript"}, with no "segments" — so
+                # transcribe_video and extract_video_clip treated the entry as
+                # absent and re-did all the work.
+                _format_and_cache_transcript(
+                    url=video_url,
+                    cache_path=cache_path,
+                    title=dl_info["title"],
+                    uploader=dl_info.get("uploader", "Unknown"),
+                    duration=dl_info["duration"],
+                    language=whisper_result["language"],
+                    language_note=(
+                        "confidence: "
+                        f"{whisper_result.get('language_probability', 0.0):.0%}"
+                    ),
+                    segments=segments,
+                    source_label="whisper",
+                )
+                full_transcript = _cached_transcript_text(cache_path)
+                source = "whisper"
+                if not full_transcript:
+                    errors.append(f"transcript empty: {video_url}")
+                    continue
 
             # Write transcript into feed_items.content → FTS5 searchable
             conn.execute(
@@ -875,6 +931,7 @@ async def _auto_transcribe_youtube(
             conn.commit()
 
             transcribed += 1
+            log.debug("feed transcript for %s from %s", video_url, source)
 
         except Exception as e:
             errors.append(str(e))
@@ -885,10 +942,8 @@ async def _auto_transcribe_youtube(
             # bug made every transcription fail, the cache grew past 3 GB of
             # audio that no code path would ever touch again.
             if audio_path:
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(audio_path)
-                except OSError:
-                    pass
 
     # ── build status string ────────────────────────────────────────────
     parts: list[str] = []
@@ -900,7 +955,7 @@ async def _auto_transcribe_youtube(
         # undecodable audio codec — and read like a transient blip.
         reason = " ".join(str(errors[0]).split())[:160]
         parts.append(f"{len(errors)} failed: {reason}")
-    skipped = total_pending - len(batch)
+    skipped = (total_pending - len(batch)) + out_of_time
     if skipped > 0:
         parts.append(f"{skipped} queued for next check")
 

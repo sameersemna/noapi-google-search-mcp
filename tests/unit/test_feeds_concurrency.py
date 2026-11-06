@@ -229,3 +229,110 @@ async def test_failed_transcription_still_removes_downloaded_audio(
 
     assert "failed" in note
     assert not audio.exists(), "audio must be removed even when transcription fails"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Captions before the GPU, and a bounded budget
+# ─────────────────────────────────────────────────────────────────────
+
+def _enable_yt(monkeypatch):
+    from google_search_mcp.utils import whisper_remote
+
+    monkeypatch.setattr(feeds.ytdlp, "is_available", lambda: True)
+    monkeypatch.setattr(whisper_remote, "is_configured", lambda: True)
+
+
+@pytest.mark.asyncio
+async def test_captions_are_used_before_downloading_audio(
+    feed_db, tmp_path, monkeypatch
+):
+    """Captions cost ~6 s and no GPU; audio+Whisper costs ~60 s of GPU.
+
+    The feed path used to skip captions entirely and go straight to the GPU
+    host, so a check that could have taken seconds took tens of minutes.
+    """
+    _enable_yt(monkeypatch)
+    monkeypatch.setattr(feeds, "TRANSCRIPT_CACHE_DIR", str(tmp_path))
+
+    from google_search_mcp.tools import video
+
+    # The cache must NOT exist yet, or the "needs transcription" filter would
+    # skip this video before the loop ever runs.
+    cache = tmp_path / "cached.json"
+
+    async def fake_load_segments(url, model_size):
+        # Mirror the real _load_segments: it writes the cache and returns the
+        # segments plus a source label naming where the text came from.
+        video._format_and_cache_transcript(
+            url=url, cache_path=str(cache), title="T", uploader="U",
+            duration=60.0, language="en", language_note="manual captions",
+            segments=[{"start": 0, "end": 1, "text": "hi"}],
+            source_label="captions (manual, en)",
+        )
+        return [{"start": 0, "end": 1, "text": "hi"}], "T", "captions (manual, en)"
+
+    monkeypatch.setattr(video, "_load_segments", fake_load_segments)
+    monkeypatch.setattr(feeds, "_transcript_cache_path", lambda url, ms: str(cache))
+    monkeypatch.setattr(
+        feeds, "_download_audio",
+        lambda *a, **k: pytest.fail("must not download audio when captions exist"),
+    )
+    monkeypatch.setattr(
+        feeds, "_transcribe_audio",
+        lambda *a, **k: pytest.fail("must not use the GPU when captions exist"),
+    )
+
+    conn = feeds._get_feeds_db()
+    try:
+        note = await feeds._auto_transcribe_youtube(
+            conn, 1, [{"url": "https://www.youtube.com/watch?v=abcdefghijk"}],
+        )
+    finally:
+        conn.close()
+
+    assert "1 transcribed" in note
+
+
+@pytest.mark.asyncio
+async def test_transcription_stops_when_budget_is_spent(feed_db, tmp_path, monkeypatch):
+    """check_feeds must return in bounded time.
+
+    Without a budget, 6 channels x 5 videos x ~60 s is half an hour and the
+    MCP client gives up long before the call returns. Each video finished here
+    is cached, so the leftovers are picked up cheaply on the next check.
+    """
+    _enable_yt(monkeypatch)
+    monkeypatch.setattr(feeds, "TRANSCRIBE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        feeds, "_transcript_cache_path",
+        lambda url, ms: str(tmp_path / f"{url.rsplit('=', 1)[-1]}.json"),
+    )
+
+    from google_search_mcp.tools import video
+
+    items = [
+        {"url": f"https://www.youtube.com/watch?v=video{i:07d}"} for i in range(5)
+    ]
+    calls = {"load": 0, "download": 0}
+
+    async def fake_load(url, model_size):
+        calls["load"] += 1
+        time.sleep(0.6)  # two of these already exceed the 1 s budget
+        return None, "T", ""  # no captions available
+
+    def fake_download(url, cache_dir):
+        calls["download"] += 1
+        raise RuntimeError("no audio")  # keeps the test off the GPU and disk
+
+    monkeypatch.setattr(video, "_load_segments", fake_load)
+    monkeypatch.setattr(feeds, "_download_audio", fake_download)
+    monkeypatch.setattr(feeds.config, "FEEDS_TRANSCRIBE_BUDGET_SEC", 1)
+
+    conn = feeds._get_feeds_db()
+    try:
+        note = await feeds._auto_transcribe_youtube(conn, 1, items)
+    finally:
+        conn.close()
+
+    assert calls["load"] < len(items), "budget must cut the batch short"
+    assert "queued for next check" in note
