@@ -570,6 +570,26 @@ def _update_subscription_meta(
         conn.close()
 
 
+def _is_not_yet_available(message: str) -> bool:
+    """True when yt-dlp's complaint means "come back later", not "broken".
+
+    A scheduled premiere or live stream has no captions and no audio until it
+    starts, and yt-dlp says so. That is not a failure: the video will be
+    transcribed on a later check once it exists.
+    """
+    text = message.casefold()
+    return any(
+        marker in text
+        for marker in (
+            "will begin in a few moments",
+            "premieres in",
+            "live event will begin",
+            "this live event has ended",
+            "is not available yet",
+        )
+    )
+
+
 def _cached_transcript_text(cache_path: str) -> str:
     """Read the formatted transcript back out of a cache entry.
 
@@ -853,6 +873,7 @@ async def _auto_transcribe_youtube(
 
     transcribed = 0
     errors: list[str] = []
+    not_yet = 0
     out_of_time = 0
 
     for i, video_url in enumerate(batch):
@@ -934,7 +955,15 @@ async def _auto_transcribe_youtube(
             log.debug("feed transcript for %s from %s", video_url, source)
 
         except Exception as e:
-            errors.append(str(e))
+            # Some "failures" are just premature: a scheduled stream has no
+            # captions or audio yet, so there is nothing to do and nothing went
+            # wrong. Counting those as failures made a healthy feed look broken.
+            message = str(e)
+            if _is_not_yet_available(message):
+                not_yet += 1
+                log.debug("feed transcript deferred for %s: %s", video_url, message)
+            else:
+                errors.append(message)
         finally:
             # Always remove the downloaded audio, not just after a successful
             # transcription. Cleanup used to sit on the success path only, so
@@ -958,6 +987,9 @@ async def _auto_transcribe_youtube(
     skipped = (total_pending - len(batch)) + out_of_time
     if skipped > 0:
         parts.append(f"{skipped} queued for next check")
+    if not_yet:
+        # Scheduled streams: nothing to do yet, and nothing went wrong.
+        parts.append(f"{not_yet} not started yet")
 
     return (" — " + ", ".join(parts)) if parts else ""
 

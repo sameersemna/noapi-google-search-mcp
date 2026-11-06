@@ -709,6 +709,13 @@ def _check_config() -> dict[str, Any]:
         "WHISPER_REMOTE_MIN_FILE_BYTES": config.WHISPER_REMOTE_MIN_FILE_BYTES,
         "WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC": config.WHISPER_REMOTE_UNHEALTHY_COOLDOWN_SEC,
         "WHISPER_REMOTE_PROBE_ON_STARTUP": config.WHISPER_REMOTE_PROBE_ON_STARTUP,
+        # Feeds: these decide whether check_feeds returns promptly or appears to
+        # hang, so an operator debugging a slow feed refresh can see the budget
+        # without reading the source.
+        "FEEDS_CONCURRENCY": config.FEEDS_CONCURRENCY,
+        "FEEDS_TRANSCRIBE_BUDGET_SEC": config.FEEDS_TRANSCRIBE_BUDGET_SEC,
+        "FEEDS_MAX_ITEMS_PER_SUB": config.FEEDS_MAX_ITEMS_PER_SUB,
+        "FEEDS_MAX_AGE_DAYS": config.FEEDS_MAX_AGE_DAYS,
     }
 
 

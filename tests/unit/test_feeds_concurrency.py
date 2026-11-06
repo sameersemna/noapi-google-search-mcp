@@ -336,3 +336,55 @@ async def test_transcription_stops_when_budget_is_spent(feed_db, tmp_path, monke
 
     assert calls["load"] < len(items), "budget must cut the batch short"
     assert "queued for next check" in note
+
+
+@pytest.mark.parametrize(
+    "message, deferred",
+    [
+        ("ERROR: [youtube] J8EYTcGPftA: This live event will begin in a few moments.", True),
+        ("ERROR: [youtube] x: Premieres in 3 hours", True),
+        ("ERROR: [youtube] x: This live event has ended", True),
+        ("ERROR: [youtube] x: Video unavailable", False),
+        ("HTTP Error 429: Too Many Requests", False),
+        ("This video is members-only", False),
+    ],
+)
+def test_not_yet_available_classification(message, deferred):
+    """A scheduled stream is "not started yet", not a failure.
+
+    Reporting it as a failure made a perfectly healthy feed look broken: the
+    video simply has no captions and no audio until it begins.
+    """
+    assert feeds._is_not_yet_available(message) is deferred
+
+
+@pytest.mark.asyncio
+async def test_scheduled_live_stream_is_not_counted_as_failure(
+    feed_db, tmp_path, monkeypatch
+):
+    """End-to-end: a premiere must not produce "N failed"."""
+    _enable_yt(monkeypatch)
+    monkeypatch.setattr(feeds, "TRANSCRIBE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        feeds, "_transcript_cache_path", lambda url, ms: str(tmp_path / "nope.json")
+    )
+
+    from google_search_mcp.tools import video
+
+    async def load_raises(url, model_size):
+        raise RuntimeError(
+            "ERROR: [youtube] x: This live event will begin in a few moments."
+        )
+
+    monkeypatch.setattr(video, "_load_segments", load_raises)
+
+    conn = feeds._get_feeds_db()
+    try:
+        note = await feeds._auto_transcribe_youtube(
+            conn, 1, [{"url": "https://www.youtube.com/watch?v=abcdefghijk"}],
+        )
+    finally:
+        conn.close()
+
+    assert "failed" not in note
+    assert "not started yet" in note
