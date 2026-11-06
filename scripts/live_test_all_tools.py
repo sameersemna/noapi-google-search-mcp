@@ -210,6 +210,15 @@ CASES: list[Case] = [
     # Depends on the transcript transcribe_video builds for the same URL.
     Case("search_transcript", {"url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
                                "query": "bunny"}, "heavy", expect=("",), timeout=420),
+    # YouTube triage: metadata and caption tracks only — no audio, no GPU.
+    Case("youtube_video_info", {"url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ"},
+         "heavy", expect=("",), timeout=180),
+    Case("get_captions", {"url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                          "query": "bunny"}, "heavy", expect=("",), timeout=240),
+    Case("youtube_search", {"query": "big buck bunny", "limit": 3}, "heavy",
+         expect=("",), timeout=180),
+    Case("list_channel_videos", {"target": "@3Blue1Brown", "limit": 3}, "heavy",
+         expect=("",), timeout=180),
     Case("check_feeds", {}, "heavy", expect=("",), timeout=300),
     # Runs unattended would pop a GUI window on someone's desktop.
     Case("open_manual_browser", {}, "heavy",

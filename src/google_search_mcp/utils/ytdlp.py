@@ -32,7 +32,9 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 from .. import config
@@ -334,21 +336,86 @@ def is_available() -> bool:
 # Metadata
 # ---------------------------------------------------------------------------
 
+# ``extract_info`` is expensive: one round trip to YouTube plus (on a cold
+# player) JavaScript challenge work, measured at 7-12 s here. A triage flow hits
+# it two or three times for the same URL (list the caption tracks, then fetch
+# them, then read the chapters), so the same metadata was being paid for
+# repeatedly.
+#
+# A short TTL cache makes that a single cost. Ten minutes is chosen to be shorter
+# than a user's working session on a video but long enough to cover the tool
+# sequence, and the entry count is bounded so a long-running server cannot grow
+# without limit.
+_INFO_TTL_SEC = 600.0
+_INFO_MAX_ENTRIES = 128
 
-def extract_info(url: str, *, download: bool = False) -> dict[str, Any]:
+_info_cache: "OrderedDict[tuple[str, bool], tuple[float, dict[str, Any]]]" = OrderedDict()
+_info_lock = threading.Lock()
+
+
+def clear_info_cache() -> None:
+    """Drop every cached metadata entry (tests, or after a cookie refresh)."""
+    with _info_lock:
+        _info_cache.clear()
+
+
+def _cache_get(key: tuple[str, bool]) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _info_lock:
+        entry = _info_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, info = entry
+        if now - stored_at > _INFO_TTL_SEC:
+            _info_cache.pop(key, None)
+            return None
+        _info_cache.move_to_end(key)
+        return info
+
+
+def _cache_put(key: tuple[str, bool], info: dict[str, Any]) -> None:
+    if not info:
+        return  # never cache an empty result
+    with _info_lock:
+        _info_cache[key] = (time.monotonic(), info)
+        _info_cache.move_to_end(key)
+        while len(_info_cache) > _INFO_MAX_ENTRIES:
+            _info_cache.popitem(last=False)
+
+
+def extract_info(
+    url: str, *, download: bool = False, fresh: bool = False
+) -> dict[str, Any]:
     """Fetch metadata for *url* without downloading media.
+
+    Results are cached for :data:`_INFO_TTL_SEC` and shared across every caller,
+    so listing caption tracks and then downloading them costs one metadata fetch
+    instead of two. A failed call is never cached.
 
     Args:
         url: Media URL.
         download: Pass ``True`` only when combined with a download option.
+        fresh: Bypass the cache and replace the entry.
 
     Returns:
         The yt-dlp info dict (``title``, ``duration``, ``uploader``, ...).
     """
+    key = (url, download)
+    if not fresh:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
     yt_dlp = _require_ytdlp()
     opts = build_ydl_opts(url, extra={"skip_download": True})
     with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=download) or {}
+        info = ydl.extract_info(url, download=download) or {}
+
+    # ``download=True`` returns extra runtime fields; only the metadata-only form
+    # is stable enough to reuse across callers.
+    if not download:
+        _cache_put(key, info)
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -909,3 +976,86 @@ def ytdlp_version() -> str | None:
 def ffmpeg_available() -> bool:
     """Return ``True`` if an ``ffmpeg`` binary is on ``PATH``."""
     return shutil.which("ffmpeg") is not None
+
+
+# ---------------------------------------------------------------------------
+# Discovery — search and flat listing (no media download, no per-entry lookup)
+# ---------------------------------------------------------------------------
+
+
+def search_videos(query: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Search YouTube via yt-dlp's ``ytsearchN:`` pseudo-URL.
+
+    No API key and no cookies are needed, and ``extract_flat`` means yt-dlp does
+    not resolve each result individually — one request for the whole page.
+
+    Args:
+        query: Search query.
+        limit: Maximum entries to return.
+
+    Returns:
+        ``[{"title", "url", "duration", "channel", "view_count"}, ...]``.
+    """
+    listing = list_entries(f"ytsearch{max(1, limit)}:{query}", limit)
+    return listing.get("entries") or []
+
+
+def list_entries(target: str, limit: int = 20, *, fresh: bool = False) -> dict[str, Any]:
+    """Flat-list the entries of a channel, playlist, or search.
+
+    ``extract_flat="in_playlist"`` keeps this to a single request: entries carry
+    title, URL, duration and channel, but no streaming formats. That is what makes
+    a channel survey cost ~1 s instead of one request per video.
+
+    Args:
+        target: Channel URL, playlist URL, or ``ytsearchN:query``.
+        limit: Maximum entries (``playlistend``).
+        fresh: Bypass the metadata cache.
+
+    Returns:
+        ``{"title": str, "entries": [...]}``.
+    """
+    key = (f"flat:{target}:{limit}", False)
+    if not fresh:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+    yt_dlp = _require_ytdlp()
+    opts = build_ydl_opts(
+        target,
+        extra={
+            "skip_download": True,
+            "extract_flat": "in_playlist",
+            "playlistend": max(1, limit),
+            "quiet": True,
+        },
+    )
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(target, download=False) or {}
+
+    entries: list[dict[str, Any]] = []
+    for raw in info.get("entries") or []:
+        if not raw:
+            continue
+        # Flat entries expose either webpage_url or url (an id for ytsearch).
+        url = raw.get("webpage_url") or raw.get("url") or ""
+        if url and not str(url).startswith("http"):
+            vid = str(url)
+            url = f"https://www.youtube.com/watch?v={vid}"
+        entries.append(
+            {
+                "title": raw.get("title") or "",
+                "url": url,
+                "duration": raw.get("duration"),
+                "channel": raw.get("channel")
+                or raw.get("uploader")
+                or raw.get("playlist_uploader")
+                or "",
+                "view_count": raw.get("view_count"),
+            }
+        )
+
+    result = {"title": info.get("title") or info.get("channel") or "", "entries": entries}
+    _cache_put(key, result)
+    return result

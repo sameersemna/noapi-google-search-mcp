@@ -83,6 +83,15 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "list_images": (("directory",), ()),
     "list_subscriptions": ((), ()),
     "list_subtitles": (("url",), ("url",)),
+    # yt-dlp-backed YouTube triage tools (0.5.0). All read-only lookups;
+    # the optional parameters make them additive, not breaking.
+    "youtube_video_info": (("url",), ("url",)),
+    "get_captions": (
+        ("include_automatic", "languages", "max_characters", "query", "url"),
+        ("url",),
+    ),
+    "youtube_search": (("limit", "query"), ("query",)),
+    "list_channel_videos": (("limit", "target"), ("target",)),
     "manual_intervention_status": ((), ()),
     "ocr_image": (("image_source",), ("image_source",)),
     "open_manual_browser": (("reason", "timeout_sec", "url"), ()),
@@ -128,7 +137,7 @@ EXPECTED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "wikipedia": (("fresh", "language", "query", "sentences"), ("query",)),
 }
 
-EXPECTED_TOOL_COUNT = 43
+EXPECTED_TOOL_COUNT = 47
 
 
 @pytest.fixture(scope="module")

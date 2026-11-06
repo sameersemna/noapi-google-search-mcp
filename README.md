@@ -7,7 +7,7 @@ If you want to support noapi-google-mcp or gpt-oss-20B/120B-Vision and other ope
 > <img src="images/btc-donate-qr.jpeg" alt="BTC" width="80" align="left" style="margin-right:12px"> If you find this useful, consider supporting continued development and new features.<br>**BTC:** `16DT4AHemLyn7C6P116YepjY518gu9wUUH`<br clear="all">
 > <img src="images/eth-donate-qr.png" alt="ETH" width="80" align="left" style="margin-right:12px"> **ETH:** `0x7287D1F9c77832cFF246937af0443622bFdACD04`<br clear="all">
 
-**43 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
+**47 tools. Zero API keys. Give any local LLM real Google search, live feeds, vision, OCR, and full video understanding.**
 
 ## What's New in v0.4.0 — Hardening (Caching, Resilience, Security, CI)
 
@@ -890,7 +890,7 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 
 ---
 
-## All 43 Tools by Category
+## All 47 Tools by Category
 
 ### Bot-Detection & Diagnostics
 | Tool | Description |
@@ -954,6 +954,14 @@ Pull emails, generate QR codes, shorten URLs, archive pages, look up Wikipedia, 
 | `search_transcript` | Search a transcribed video for topics by keyword |
 | `extract_video_clip` | AI-powered clip extraction — tell the LLM what you want and it cuts the video using transcript context |
 | `convert_media` | Convert between audio/video formats via FFmpeg |
+
+### YouTube Triage — Cheap Relevance Checks (No GPU, No Audio)
+| Tool | Description |
+|------|-------------|
+| `youtube_video_info` | Title, channel, duration, views, upload date, caption availability, and chapters — decide whether a video is worth transcribing |
+| `get_captions` | Fetch the platform caption track directly (manual or auto-generated); optionally return only the passages matching a query |
+| `youtube_search` | Search YouTube and get title, channel, duration, views, and URL per result |
+| `list_channel_videos` | List a channel's recent uploads by `@handle`, `UC…` id, or channel URL |
 
 ### Documents & Data
 | Tool | Description |
@@ -1516,6 +1524,58 @@ Ask "extract the part about X" and the LLM finds timestamps from the transcript 
 | `buffer_seconds` | Extra seconds before/after (default: 3) | `5.0` |
 | `output_filename` | Custom filename (optional) | `"hardware_overview"` |
 
+### YouTube Triage Tools
+
+Most YouTube work does not need audio. YouTube publishes caption tracks, and
+`yt-dlp` can read them without downloading media — no GPU, no Whisper, no
+ffmpeg. Use these four tools to answer "is this video relevant?" for a few
+seconds of network time before spending minutes of GPU time.
+
+Measured on a warm process: `youtube_search` 1.1 s, `list_channel_videos`
+0.9 s, `youtube_video_info` 7.3 s (full metadata), `get_captions` 5.5 s.
+
+#### `youtube_video_info` — Decide Before You Transcribe
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `url` | YouTube video URL (required) | `"https://youtube.com/watch?v=..."` |
+
+Reports title, channel, duration, views, upload date, the caption tracks that
+exist (`human captions (de, en)` / `auto-generated only` / `none`), chapters
+with `start_seconds=` values, and a short description excerpt. If human
+captions exist the output says so — transcription is unnecessary.
+
+#### `get_captions` — Platform Captions as Text
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `url` | YouTube video URL (required) | `"https://youtube.com/watch?v=..."` |
+| `languages` | Comma-separated preference order (default: `en`) | `"en,de"` |
+| `include_automatic` | Fall back to auto-generated tracks (default: true) | `false` |
+| `query` | Only return passages matching this text | `"memory bandwidth"` |
+| `max_characters` | Truncate the output (default: 8000) | `12000` |
+
+With `query` set, each passage carries `start_seconds=` / `end_seconds=` and
+the matching segments are marked with `>>>`, so the result plugs straight into
+`extract_video_clip`. The output names its source, e.g.
+`Source: captions (manual, en)`. Captions fetched here are also written to the
+transcript cache, so a later `search_transcript` or `extract_video_clip` on the
+same URL is instant.
+
+#### `youtube_search` — Search Without a Browser
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `query` | Search terms (required) | `"memory bandwidth explained"` |
+| `limit` | Number of results, 1–25 (default: 10) | `5` |
+
+#### `list_channel_videos` — Recent Uploads
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `target` | `@handle`, `UC…` channel id, bare channel name, or channel URL | `"@3Blue1Brown"` |
+| `limit` | Number of videos, 1–50 (default: 20) | `10` |
+
 ---
 
 ## Sample Prompts
@@ -1699,7 +1759,7 @@ This tree descends from
 [`engram-ae/noapi-google-search-mcp`](https://github.com/engram-ae/noapi-google-search-mcp)
 (formerly `VincentKaufmann/noapi-google-search-mcp`) at commit `857a98c`, and
 then diverges substantially. Upstream is unchanged since 2026-08-16 (v0.3.2);
-this fork carries 43 tools instead of 38, and adds:
+this fork carries 47 tools instead of 38, and adds:
 
 - a modular `core/` + `tools/` + `utils/` layout in place of one `server.py`;
 - a shared Chromium pool (8.6×–14.8× faster per call), read-through caching,
@@ -1762,7 +1822,7 @@ mcp_servers:
       PYTHONUNBUFFERED: "1"
 ```
 
-This gives your OpenClaw agent access to all 43 tools — real Google search, live feeds, vision, OCR, video intelligence, the headful bot-detection fallback, and the built-in health endpoint — with zero API keys.
+This gives your OpenClaw agent access to all 47 tools — real Google search, live feeds, vision, OCR, video intelligence, the headful bot-detection fallback, and the built-in health endpoint — with zero API keys.
 
 ### As a CLI
 

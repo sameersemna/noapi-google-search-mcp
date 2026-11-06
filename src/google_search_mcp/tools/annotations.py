@@ -115,6 +115,11 @@ _SPECS: dict[str, ToolSpec] = {
     "manual_intervention_status": _spec("Manual Intervention Status", **_LOCAL_READ),
     "open_manual_browser": _spec("Open Manual Browser", ro=False, de=False, idem=False, ow=True),
     "list_subtitles": _spec("List Video Subtitles", **_LOOKUP),
+    # ── YouTube triage / captions / discovery (yt-dlp, no GPU) ──
+    "youtube_video_info": _spec("YouTube Video Info", **_LOOKUP),
+    "get_captions": _spec("YouTube Captions", **_LOOKUP),
+    "youtube_search": _spec("YouTube Search", **_LOOKUP),
+    "list_channel_videos": _spec("List Channel Videos", **_LOOKUP),
 }
 
 

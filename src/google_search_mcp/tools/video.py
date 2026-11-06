@@ -84,6 +84,76 @@ def _existing_cache_path(primary: str, legacy: str) -> str:
     return primary
 
 
+async def _load_segments(
+    url: str, model_size: str
+) -> tuple[list[dict] | None, str, str]:
+    """Return ``(segments, title, source_label)`` for *url*, cheapest source first.
+
+    Order matters — this is what makes triage cheap:
+
+    1. An existing transcript (captions or Whisper, both live in the same cache).
+    2. Platform captions fetched from YouTube (~9 s, no GPU, no audio download).
+    3. ``None`` — the caller reports that transcription is still required.
+
+    Step 2 exists because ``search_transcript`` used to hard-fail with "call
+    transcribe_video first" even when YouTube already had the captions, which is
+    the wrong order of work: checking whether a video is relevant should not
+    require transcribing it.
+    """
+    cache_path = _existing_cache_path(
+        _transcript_cache_path(url, model_size),
+        _transcript_cache_path_legacy(url, model_size),
+    )
+    if os.path.isfile(cache_path):
+        try:
+            with open(cache_path) as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        segments = data.get("segments") or []
+        if segments:
+            return segments, data.get("title", "Unknown"), "cached transcript"
+
+    # No transcript yet: try the platform captions before giving up.
+    if not ytdlp.is_available():
+        return None, "Unknown", ""
+    try:
+        captions = await asyncio.to_thread(
+            ytdlp.download_subtitles, url, None, include_automatic=True
+        )
+    except Exception as exc:  # auth wall / network — caller shows the reason
+        log.debug("caption fallback failed for %s: %s", url, exc)
+        return None, "Unknown", ""
+
+    tracks = captions.get("tracks") or {}
+    if not tracks:
+        return None, captions.get("title", "Unknown"), ""
+
+    lang, track = next(iter(tracks.items()))
+    segments = track.get("segments") or []
+    if not segments:
+        return None, captions.get("title", "Unknown"), ""
+
+    # Seed the transcript cache so the next call (and extract_video_clip) reuses
+    # these captions instead of paying for them again.
+    try:
+        _format_and_cache_transcript(
+            url=url,
+            cache_path=_transcript_cache_path(url, model_size),
+            title=captions.get("title", "Unknown"),
+            uploader=captions.get("uploader", "Unknown"),
+            duration=captions.get("duration", 0) or 0,
+            language=lang,
+            language_note=f"{track.get('source', 'caption')} captions",
+            segments=segments,
+        )
+    except Exception as exc:  # pragma: no cover - cache write is best effort
+        log.debug("could not seed transcript cache for %s: %s", url, exc)
+
+    source = f"captions ({track.get('source', 'unknown')}, {lang})"
+    return segments, captions.get("title", "Unknown"), source
+
+
 def _download_audio(url: str, cache_dir: str) -> dict:
     """Download audio from URL (runs in thread). Returns info dict.
 
@@ -134,6 +204,11 @@ def _format_and_cache_transcript(
         f"Channel: {uploader}",
         f"Duration: {format_timestamp(duration)}",
         f"Language: {language} ({language_note})",
+        # The source decides how much the text can be trusted: human captions are
+        # exact, auto-captions are decent, Whisper is a reconstruction. Saying it
+        # explicitly stops a model from quoting an auto-caption as if it were a
+        # verbatim transcript.
+        f"Source: {language_note}",
         f"URL: {url}",
         "",
     ]
@@ -155,6 +230,7 @@ def _format_and_cache_transcript(
                 {
                     "url": url,
                     "title": title,
+                    "source": language_note,
                     "transcript": full_transcript,
                     "segments": segments,
                 },
@@ -444,24 +520,13 @@ async def search_transcript(
         model_size: Must match the model_size used for transcription (default: tiny).
         context_segments: Number of surrounding segments to include (default: 2).
     """
-    cache_path = _existing_cache_path(
-        _transcript_cache_path(url, model_size),
-        _transcript_cache_path_legacy(url, model_size),
-    )
-    if not os.path.isfile(cache_path):
+    segments, title, source = await _load_segments(url, model_size)
+    if segments is None:
         return (
-            f"No cached transcript found for this URL. "
-            f"Call transcribe_video first with url=\"{url}\"."
+            f"No transcript and no captions available for this URL. "
+            f"Call transcribe_video first with url=\"{url}\" to transcribe the "
+            f"audio."
         )
-
-    try:
-        with open(cache_path) as f:
-            data = json.load(f)
-    except Exception:
-        return "Failed to read cached transcript."
-
-    segments = data.get("segments", [])
-    title = data.get("title", "Unknown")
     if not segments:
         return "Transcript has no segments."
 
@@ -491,6 +556,7 @@ async def search_transcript(
         f"Search results for \"{query}\" in: {title}",
         f"Matches found: {len(matches)} segments in {len(ranges)} section(s)",
         f"URL: {url}",
+        f"Source: {source}",
         "",
     ]
 

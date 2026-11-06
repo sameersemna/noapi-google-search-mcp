@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Four YouTube triage tools that need no GPU.** Most YouTube work is really a
+  relevance question, and YouTube publishes caption tracks that `yt-dlp` can
+  read without downloading media. New tools: `youtube_video_info` (title,
+  channel, duration, views, upload date, which caption tracks exist, chapters
+  with `start_seconds=`, description excerpt), `get_captions` (fetch a caption
+  track directly, optionally returning only passages matching a query with
+  `start_seconds=`/`end_seconds=` markers that plug into `extract_video_clip`),
+  `youtube_search` (1–25 results) and `list_channel_videos` (1–50 uploads from a
+  `@handle`, `UC…` id, bare name or channel URL). Measured warm-process costs:
+  search 1.1 s, channel 0.9 s, video info 7.3 s, captions 5.5 s — against
+  minutes of GPU time for the same question asked by transcription.
+
+### Changed
+
+- **`search_transcript` no longer refuses a video that was never transcribed.**
+  It falls back to the platform captions and says where the text came from
+  (`Source: captions (manual, en)`), covering the video itself in 13.3 s. The
+  transcript cache is seeded by that fallback, so `extract_video_clip` benefits
+  immediately. `transcribe_video` already preferred captions; the machinery
+  existed but was only reachable through transcription.
+- **`yt-dlp` metadata is cached in-process** (10-minute TTL, 128 entries, keyed
+  by URL + download flag; empty results are never cached so failures are not
+  sticky). A `list_subtitles` + `download_subtitles` pair used to pay for the
+  same metadata extraction twice. The caption flow dropped from 24 s to 16.1 s,
+  and repeats of the discovery calls are effectively free (0.00 s).
+- Transcript headers and cached transcripts now record their `source`, so a
+  cached transcript that came from captions is not mistaken for Whisper output.
+
+### Fixed
+
+- `yt-dlp` and `ffmpeg` children no longer inherit the terminal's stdin. A
+  `convert_media` call hung for 180 s in state `T` because `ffmpeg` reads stdin
+  for its keyboard handler and was stopped by `SIGTTIN` when it read the shared
+  pty; every `subprocess.run` in `ytdlp.py` now passes `stdin=DEVNULL` and
+  `ffmpeg` gets `-nostdin`. An AST guard test keeps it that way.
+- YouTube auth walls, private videos and members-only videos now report which
+  cookie file was used and how to refresh it via `--manual-browser`, instead of
+  a bare `yt-dlp` traceback.
+
 ## [0.5.0] - 2026-11-05
 
 ### Changed

@@ -59,6 +59,13 @@ PER_TOOL_TTL: dict[str, int] = {
     "google_hotels": 1800,
     "google_flights": 1800,
     "visit_page": 900,
+    # yt-dlp-backed YouTube triage. Metadata and captions change slowly; a
+    # 10-minute TTL lets a triage flow (info -> captions -> search) reuse them
+    # without going stale within a session.
+    "youtube_video_info": 600,
+    "get_captions": 600,
+    "youtube_search": 900,
+    "list_channel_videos": 900,
 }
 
 

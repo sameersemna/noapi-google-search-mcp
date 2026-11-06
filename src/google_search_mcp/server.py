@@ -671,6 +671,13 @@ _transcribe_audio = _video._transcribe_audio
 _transcript_cache_path = _video._transcript_cache_path
 _video_cache_path = _video._video_cache_path
 
+# ---------------------------------------------------------------------------
+# YouTube triage / caption / discovery tools — tools/youtube.py
+# ---------------------------------------------------------------------------
+# These read metadata and captions only: no audio download, no Whisper, no GPU.
+# They are the cheap path for deciding whether a video is worth transcribing.
+from .tools import youtube as _youtube  # noqa: F401  (registers youtube tools)
+
 
 # ---------------------------------------------------------------------------
 # visit_page
