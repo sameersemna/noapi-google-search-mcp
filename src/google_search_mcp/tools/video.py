@@ -112,7 +112,10 @@ async def _load_segments(
             data = {}
         segments = data.get("segments") or []
         if segments:
-            return segments, data.get("title", "Unknown"), "cached transcript"
+            # Older cache entries predate ``source_label``; ``source`` holds the
+            # language note, which is still more informative than nothing.
+            label = data.get("source_label") or data.get("source") or ""
+            return segments, data.get("title", "Unknown"), label or "cached transcript"
 
     # No transcript yet: try the platform captions before giving up.
     if not ytdlp.is_available():
@@ -146,6 +149,7 @@ async def _load_segments(
             language=lang,
             language_note=f"{track.get('source', 'caption')} captions",
             segments=segments,
+            source_label=f"captions ({track.get('source', 'caption')}, {lang})",
         )
     except Exception as exc:  # pragma: no cover - cache write is best effort
         log.debug("could not seed transcript cache for %s: %s", url, exc)
@@ -173,6 +177,7 @@ def _format_and_cache_transcript(
     language: str,
     language_note: str,
     segments: list[dict],
+    source_label: str = "",
 ) -> str:
     """Format a transcript, cache it to disk, and return the LLM-facing text.
 
@@ -194,6 +199,12 @@ def _format_and_cache_transcript(
         language_note: Extra detail appended to the language line, e.g.
             ``"confidence: 98%"`` or ``"manual captions"``.
         segments: ``[{start, end, text}, ...]``.
+        source_label: Where the text came from, in the same form the caption
+            fallback uses (``"captions (manual, en)"`` / ``"whisper"``).
+            Cached verbatim so a later ``search_transcript`` can still say
+            whether it is reading exact captions or a reconstruction —
+            ``language_note`` cannot serve that purpose, because the Whisper
+            path puts a confidence figure in it.
 
     Returns:
         The formatted transcript (full or condensed).
@@ -231,6 +242,7 @@ def _format_and_cache_transcript(
                     "url": url,
                     "title": title,
                     "source": language_note,
+                    "source_label": source_label or language_note,
                     "transcript": full_transcript,
                     "segments": segments,
                 },
@@ -421,6 +433,7 @@ async def transcribe_video(
                 language=lang,
                 language_note=f"{track['source']} captions",
                 segments=segments,
+                source_label=f"captions ({track['source']}, {lang})",
             )
 
     from ..utils import whisper_remote as _whisper_remote
@@ -474,6 +487,7 @@ async def transcribe_video(
                 f"confidence: {whisper_result['language_probability']:.0%}"
             ),
             segments=segments,
+            source_label="whisper",
         )
 
     except Exception as e:

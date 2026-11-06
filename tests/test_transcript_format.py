@@ -160,3 +160,91 @@ def test_caption_and_whisper_paths_produce_same_shape(tmp_path):
     assert caption.replace("manual captions", "X") == whisper.replace(
         "confidence: 98%", "X"
     )
+
+
+def test_cache_records_source_label(tmp_path):
+    """The cache must remember where the text came from.
+
+    A caption transcript and a Whisper transcript are not equally trustworthy —
+    captions are exact, Whisper is a reconstruction. `search_transcript` reads
+    the cache, so the label has to survive the round trip. `language_note`
+    cannot carry it: the Whisper path puts a confidence figure there.
+    """
+    cache = tmp_path / "t.json"
+    video._format_and_cache_transcript(
+        url="u",
+        cache_path=str(cache),
+        title="T",
+        uploader="U",
+        duration=60.0,
+        language="en",
+        language_note="confidence: 97%",
+        segments=_segments(2),
+        source_label="whisper",
+    )
+    assert json.loads(cache.read_text())["source_label"] == "whisper"
+
+
+def test_source_label_defaults_to_language_note(tmp_path):
+    """Callers that pass no label must not write an empty source."""
+    cache = tmp_path / "t.json"
+    video._format_and_cache_transcript(
+        url="u",
+        cache_path=str(cache),
+        title="T",
+        uploader="U",
+        duration=60.0,
+        language="en",
+        language_note="manual captions",
+        segments=_segments(2),
+    )
+    assert json.loads(cache.read_text())["source_label"] == "manual captions"
+
+
+@pytest.mark.asyncio
+async def test_load_segments_reports_cached_source(tmp_path, monkeypatch):
+    """A cached transcript keeps naming its origin instead of just "cached"."""
+    cache = tmp_path / "t.json"
+    video._format_and_cache_transcript(
+        url="u",
+        cache_path=str(cache),
+        title="T",
+        uploader="U",
+        duration=60.0,
+        language="en",
+        language_note="manual captions",
+        segments=_segments(2),
+        source_label="captions (manual, en)",
+    )
+    monkeypatch.setattr(
+        video, "_transcript_cache_path", lambda url, model_size: str(cache)
+    )
+    monkeypatch.setattr(
+        video, "_transcript_cache_path_legacy", lambda url, model_size: str(cache)
+    )
+
+    segments, title, source = await video._load_segments("u", "tiny")
+
+    assert len(segments) == 2
+    assert title == "T"
+    assert source == "captions (manual, en)"
+
+
+@pytest.mark.asyncio
+async def test_load_segments_falls_back_for_old_cache_entries(tmp_path, monkeypatch):
+    """Caches written before `source_label` existed still report something."""
+    cache = tmp_path / "t.json"
+    cache.write_text(
+        json.dumps({"title": "T", "source": "manual captions", "segments": _segments(1)})
+    )
+    monkeypatch.setattr(
+        video, "_transcript_cache_path", lambda url, model_size: str(cache)
+    )
+    monkeypatch.setattr(
+        video, "_transcript_cache_path_legacy", lambda url, model_size: str(cache)
+    )
+
+    segments, _, source = await video._load_segments("u", "tiny")
+
+    assert len(segments) == 1
+    assert source == "manual captions"

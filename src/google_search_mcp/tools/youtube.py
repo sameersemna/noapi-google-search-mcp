@@ -355,6 +355,7 @@ async def _seed_transcript_cache(
             language=lang,
             language_note=f"{track.get('source', 'caption')} captions",
             segments=segments,
+            source_label=f"captions ({track.get('source', 'caption')}, {lang})",
         )
     except Exception as exc:  # pragma: no cover - cache write is best effort
         log.debug("could not seed transcript cache for %s: %s", url, exc)
