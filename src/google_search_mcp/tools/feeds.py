@@ -775,7 +775,8 @@ async def _auto_transcribe_youtube(
 ) -> str:
     """Auto-transcribe new YouTube videos and store transcripts in the DB.
 
-    Gracefully skips if yt-dlp or faster-whisper are not installed.
+    Gracefully skips if yt-dlp is missing or the remote Whisper host is not
+    configured (there is no local transcription engine).
     Uses the existing transcript cache to avoid re-downloading.
     Caps at *max_videos* per invocation so check_feeds doesn't block forever.
     Transcripts are written into feed_items.content so FTS5 can search them.

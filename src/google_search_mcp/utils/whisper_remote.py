@@ -1,19 +1,22 @@
-"""Remote Whisper server client — delegates heavy transcription to a GPU host.
+"""Remote Whisper server client — transcription runs on a GPU host.
 
-The local ``faster-whisper`` model is fast enough for short clips but
-crawls on hour-long audio when running CPU + int8. When a GPU host
-(such as a Dell Pro Max GB10 running ``speaches``) is reachable on the
-LAN, this module sends the audio file there via the OpenAI-compatible
-``POST /v1/audio/transcriptions`` endpoint and returns the segments in
-the same shape ``tools.video._transcribe_audio`` already produces.
+Transcription is delegated to a GPU host on the LAN (a Dell Pro Max GB10
+running whisper.cpp or ``speaches``) instead of being computed locally: an
+hour of audio takes minutes on CPU + int8 and a fraction of a second per
+minute on that GPU. There is no local model any more — see the note below.
+
+This module sends the audio file to the host and returns the segments in
+the shape ``tools.video._transcribe_audio`` produces.
 
 Design constraints
 ------------------
 
-* **Always falls back to local.** If the remote is disabled,
-  unreachable, returns an error, or the file is too small, the caller
-  must be able to transparently fall back to the local ``faster_whisper``
-  path. We therefore return ``None`` on any failure rather than raising.
+* **No local fallback.** Transcription runs only here; the local
+  ``faster-whisper`` path was removed (it drove this process to 6.9 GB RSS and
+  the kernel OOM-killer killed the desktop). The caller therefore treats ``None``
+  as a hard failure and raises ``remote_unavailable_error()``. We still return
+  ``None`` rather than raising, so the diagnosis stays at the call site where the
+  audio path is known.
 * **No new HTTP dependency.** The rest of the project uses
   ``urllib.request`` via ``asyncio.to_thread``; we follow that
   pattern. Multipart bodies are hand-rolled because they're trivial

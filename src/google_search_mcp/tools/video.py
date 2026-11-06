@@ -39,7 +39,6 @@ from ..server import (
     try_solve_captcha,
 )
 from ..utils import ytdlp
-from ..utils.singletons import cached_engine
 from ..utils.text import format_timestamp
 
 log = logging.getLogger("google_search_mcp.video")

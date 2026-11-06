@@ -2,10 +2,13 @@
 
 Why this module exists
 ----------------------
-``faster_whisper.WhisperModel``, ``rapidocr_onnxruntime.RapidOCR`` and
-``onnxruntime.InferenceSession`` each allocate a large native arena — model
-weights plus ctranslate2 / ONNX Runtime thread pools, tens to hundreds of
-megabytes per instance.
+``rapidocr_onnxruntime.RapidOCR`` and ``onnxruntime.InferenceSession`` each
+allocate a large native arena — model weights plus an ONNX Runtime thread pool,
+hundreds of megabytes per instance.
+
+(``faster_whisper.WhisperModel`` was the worst offender and is the reason this
+module exists at all; transcription has since moved to a GPU host, so it is no
+longer cached here.)
 
 Constructing one per tool call looked harmless: each call returns its result and
 the local name goes out of scope. It is not harmless. Those native arenas are
